@@ -52,8 +52,21 @@ jobs:
           REPO_NAME="${GITHUB_REPOSITORY#*/}"
           SITE="https://${OWNER_LC}.github.io/${REPO_NAME}"
           mkdir -p dist/bundles
-          curl -fsSL "$SITE/channel/channel.json"     -o dist/channel.json
-          curl -fsSL "$SITE/channel/channel.json.sig" -o dist/channel.json.sig
+
+          # 下载一律走这个函数：失败时**把 URL 与 HTTP 码打出来**（写成 ::error:: 就能在
+          # 检查注解里看到，不必翻日志 —— job 日志要 token，检查注解是公开的），
+          # 并带重试：线上偶发 5xx/限流不该让整步失败。
+          dl() { # dl <url> <输出文件>
+            local url="$1" out="$2" code=""
+            code="$(curl -fsSL --retry 3 --retry-all-errors --retry-delay 2 \
+                      -w '%{http_code}' -o "$out" "$url")" && return 0
+            local rc=$?
+            echo "::error::下载失败 rc=$rc http=${code:-?} url=$url"
+            return $rc
+          }
+
+          dl "$SITE/channel/channel.json"     dist/channel.json
+          dl "$SITE/channel/channel.json.sig" dist/channel.json.sig
           [ -s dist/channel.json ] || { echo "::error::拿不到频道清单（/channel/channel.json）"; exit 1; }
 
           # 用清单当唯一事实源：文件名按 <id>-<版本>.erofs.zst 落，并顺手生成
@@ -75,7 +88,7 @@ jobs:
           while IFS=$'\t' read -r id ver url sha ext raw rawsize; do
             f="dist/$id-$ver.erofs.$ext"
             echo "下载 $id $ver ← $url"
-            curl -fsSL "$url" -o "$f"
+            dl "$url" "$f"
             got="$(sha256sum "$f" | awk '{print $1}')"
             [ "$got" = "$sha" ] || { echo "::error::$f sha256 与频道清单不符：$got ≠ $sha"; exit 1; }
             # 只有清单里确实带了 raw 值才写进 SHA256SUMS：**绝不填 0 冒充**
