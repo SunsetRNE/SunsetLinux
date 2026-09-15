@@ -65,6 +65,7 @@
 | 文档 | 内容 |
 |---|---|
 | [`docs/STATUS.md`](docs/STATUS.md) | **项目状态总账**：已交付什么、验证到什么程度、**做不到什么**、下一步。先看这个 |
+| [`docs/HANDOFF.md`](docs/HANDOFF.md) | **交接**：仓库/CI/密钥落到哪、需要你操作什么、删掉对话后怎么恢复上下文 |
 | [`docs/findings.md`](docs/findings.md) | 设备/内核/DSHA 的**实测事实**、内核能力、EROFS 约束、体积实测。**排错先看这个** |
 | [`docs/architecture.md`](docs/architecture.md) | 架构与**接口契约**（`linuxctl` 命令、status JSON、频道清单、挂载树） |
 | [`docs/dsh-profile.md`](docs/dsh-profile.md) | DSH profile/插件机制、许可边界、**已验证的 profile 配方** |
