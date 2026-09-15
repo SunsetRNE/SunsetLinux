@@ -60,7 +60,7 @@
 
 - **proot 宿主侧脚本已 mksh 化（2026-09-15 修完）**：`runtime/proot/{linuxctl,start}.sh`
   现在能被 mksh 解析，并跑同一套纯函数回归 `runtime/proot/selftest-funcs.sh`
-  （bash / mksh 各 64/64 通过）；`tools/shell-compat-check.mjs` 的欠债名单**已清零**。
+  （bash / mksh 各 65/65 通过）；`tools/shell-compat-check.mjs` 的欠债名单**已清零**。
   顺带修掉一个 `mksh -n` 抓不到的**运行时**缺陷：`/dev/tcp` 是 bash 专有特性，
   mksh 下恒失败（真机表现＝"服务起来了却一直判未就绪"），已换成三层回退的端口探测
   （`/proc/net/tcp` → `nc -z` → `ss -ltn`）；root 侧 `runtime/root/start.sh` 的

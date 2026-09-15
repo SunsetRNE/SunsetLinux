@@ -186,8 +186,8 @@ Android 10+ 又禁止 `execve` App 私有目录里的文件，App 只能用 `/sy
 
 ```bash
 node tools/shell-compat-check.mjs --verbose      # 通过，欠债名单已清零
-bash runtime/proot/selftest-funcs.sh             # 64 通过 / 0 失败
-mksh runtime/proot/selftest-funcs.sh             # 64 通过 / 0 失败（与 bash 同结果）
+bash runtime/proot/selftest-funcs.sh             # 65 通过 / 0 失败
+mksh runtime/proot/selftest-funcs.sh             # 65 通过 / 0 失败（与 bash 同结果）
 mksh runtime/proot/selftest.sh                   # 18 通过 / 0 失败（以前只有 bash 能跑）
 mksh runtime/proot/linuxctl.sh status            # 与 bash 版输出逐字节一致，契约检查双通过
 ```
