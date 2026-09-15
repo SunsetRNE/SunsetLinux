@@ -635,19 +635,29 @@ report_deletions() {
                    }' \
              | cut -d' ' -f5- | grep -v '^\\.$' | head -n 200 || true)"
     if [ -n "$gone" ]; then
-        # 交叉核对：只有"在 before 里是文件/链接、在 after 里彻底不存在"的才算真删除
+        # 交叉核对：清单里"消失"的行**不等于文件被删** —— 属性变了（size/mtime/inode）也会换行。
+        # ★ 这里必须 `-e || -L`，不能只判 `-e`（真机踩过）：
+        #   `-e` 会**跟着绝对软链走**，而 rootfs 里的软链大多指向 chroot 内的绝对路径
+        #   （例：usr/bin/awk → /etc/alternatives/awk），从 chroot 外面解析必然失败，
+        #   于是"软链明明还在"却被判成删除。base 层那 14 条里有 13 条就是这么来的。
         local real="" p=""
         while IFS= read -r p; do
             [ -n "$p" ] || continue
             [ -e "$BUILD_DIR/$p" ] && continue          # 还存在（只是属性变了）
+            [ -L "$BUILD_DIR/$p" ] && continue          # 软链本身还在（目标可能悬空，那也是"在"）
             real="$real$p\n"
         done <<EOF
 $gone
 EOF
         if [ -n "$real" ]; then
-            warn "$name 阶段检测到文件消失（层间不做删除，这些文件会残留在 lower 层）："
-            printf '%b' "$real" | head -n 20 | while IFS= read -r p; do warn "    少了: $p"; done
-            warn "  若是有意裁剪，请把裁剪动作挪到 base 层（architecture.md §5.3）。"
+            if [ "$name" = "base" ]; then
+                # base 是最底层，没有 lower 层可残留 —— 上面的删除天然生效，不算问题
+                log "$name 层：$(printf '%b' "$real" | head -n 50 | grep -c . ) 个文件在构建中被移除（base 没有下层，直接生效；例如 apt sources.list 被换成 .sources）"
+            else
+                warn "$name 阶段检测到文件消失（层间不做删除，这些文件会残留在 lower 层）："
+                printf '%b' "$real" | head -n 20 | while IFS= read -r p; do warn "    少了: $p"; done
+                warn "  若是有意裁剪，请把裁剪动作挪到 base 层（architecture.md §5.3）。"
+            fi
         fi
     fi
 }
@@ -792,31 +802,20 @@ make_erofs() {
     mk="$(mkfs_erofs_bin)" || die "找不到 mkfs.erofs（erofs-utils 未安装，且设备没有 /system/bin/mkfs.erofs）"
     log "mkfs.erofs：$mk（compress=$comp，block=$bs）"
 
-    local zargs=""
-    zargs=()
-    case "$comp" in
-        none|"") : ;;                       # 不传 -z = 不压缩
-        *)       zargs=( -z"$comp" ) ;;
-    esac
-
     # 参数能力探测 + 逐级降级。
     # 为什么要探测：设备用 /system/bin/mkfs.erofs（Android 自带，参数兼容性可能与
     # 宿主 erofs-utils 1.7.1 不同），--all-root / -x-1 / -b 未必都认。
     # 每次尝试都**把实际执行的命令原文 + 退出码写进日志**，便于真机排错。
-    local attempts=""
-    attempts=(
-        "${zargs[@]}" -b "$bs" --all-root -x-1    # 完整参数集
-        "${zargs[@]}" -b "$bs" --all-root         # 去掉 xattr
-        "${zargs[@]}" -b "$bs"                    # 去掉 --all-root
-        "${zargs[@]}"                             # 只保留压缩参数
-        ""                                        # 最小：什么都不加
-    )
-    local i=0 args_str="" rc=0
-    for a in "${attempts[@]}"; do
-        i=$((i+1))
+    #
+    # ★ 这里**刻意不用数组**（真机第二次失败的原因）：
+    #   mksh 里 `zargs=()` 并**不生成一个空数组**，随后 `"${zargs[@]}"` 在 `set -u` 下是
+    #   `zargs[@]: parameter not set` —— 而默认 EROFS_COMPRESS=none 正好走这条分支，
+    #   于是真机上每个阶段都在这里静默死掉（stderr 一行，日志里看不出来）。
+    #   改成"取第 N 组参数"的纯函数 + while 循环：没有数组、没有空展开。
+    local i=1 args_str="" rc=0
+    while [ "$i" -le 5 ]; do
+        args_str="$(erofs_args_for "$i" "$comp" "$bs")"
         rm -f "$out"
-        # shellcheck disable=SC2086
-        args_str="$a"
         if [ -z "$args_str" ]; then
             log "尝试 #$i：$mk $out $src"
             "$mk" "$out" "$src" >>"$LOG_FILE" 2>&1 && { log "第 $i 次尝试成功（无额外参数）"; probe_set_erofs_args ""; return 0; }
@@ -828,8 +827,31 @@ make_erofs() {
         fi
         rc=$?
         log "尝试 #$i 失败（rc=$rc），继续降级"
+        i=$((i+1))
     done
-    die "mkfs.erofs 全部参数组合都失败（共 $i 次，详见 $LOG_FILE）。可手动验证：$mk -b $bs $out $src"
+    die "mkfs.erofs 全部参数组合都失败（共 $((i - 1)) 次，详见 $LOG_FILE）。可手动验证：$mk -b $bs $out $src"
+}
+
+# mkfs.erofs 的**逐级降级参数组合**：第 n 组（1..5），只打印参数原文（空 = 不加任何参数）。
+#   · 1 完整集 → 2 去 xattr → 3 去 --all-root → 4 只留压缩 → 5 什么都不加
+#   ★ 纯粹为了"能被单测"：tools/provision-selftest.mjs 会把这个函数抽出来，
+#     在 mksh / bash / 设备 sh 下各跑一遍（真机就是因为空数组在这里炸的）。
+#   ★ 不要改回数组写法：mksh 的 `x=()` ≠ 空数组。
+erofs_args_for() {
+    local n="$1" comp="$2" bs="$3" zarg=""
+    case "$comp" in
+        none|"") zarg="" ;;
+        *)       zarg="-z$comp" ;;
+    esac
+    case "$n" in
+        1) printf '%s' "$zarg -b $bs --all-root -x-1" ;;
+        2) printf '%s' "$zarg -b $bs --all-root" ;;
+        3) printf '%s' "$zarg -b $bs" ;;
+        4) printf '%s' "$zarg" ;;
+        5) printf '' ;;
+        *) return 1 ;;
+    esac
+    return 0
 }
 
 # 记录本次实际生效的 mkfs.erofs 参数（供 doctor/排障读取）
@@ -917,7 +939,9 @@ squashfs-tools xz-utils"
     find "$BUILD_DIR" -xdev -type d -name '__pycache__' -prune -exec rm -rf {} + 2>/dev/null || true
     find "$BUILD_DIR" -xdev -type f -name '*.py[co]' -delete 2>/dev/null || true
     # 5) systemd 相关（内核无 PID_NS，systemd 不可用；dpkg 的 init 脚本保留即可）
-    rm -rf "$BUILD_DIR/lib/systemd" "$BUILD_DIR/usr/lib/systemd" 2>/dev/null || true
+    #    ★ 连 /etc/systemd 一起删：那一堆 *.wants/*.timer 是指向 /usr/lib/systemd 的**悬空软链**，
+    #      留着纯属垃圾（而且会让删除检测刷一屏噪音 —— 真机第一跑就是 13 条这种）。
+    rm -rf "$BUILD_DIR/lib/systemd" "$BUILD_DIR/usr/lib/systemd" "$BUILD_DIR/etc/systemd" 2>/dev/null || true
     # 6) 常见体积大户但本项目用不到
     rm -rf "$BUILD_DIR/usr/share/perl"/*/unicore 2>/dev/null || true
     log "裁剪完成（locale 目录删除 $removed 项；doc/man/info/apt 缓存已清）"

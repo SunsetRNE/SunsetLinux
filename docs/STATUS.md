@@ -301,6 +301,40 @@ apksigner verify --print-certs <旧 CI 包>             → 84be9523…  ← 与
 「代码里不许出现 `%q`」（静态，因为本地跑不出来）、「引导脚本里没有 `export` 一堆变量」、
 以及**把含空格与单引号的种子目录送进内层、断言它拿到的路径与命令行逐字一致**。
 
+### 3.10.3 ★ 真机第二跑：mksh 的空数组（模块 **v1.0.7/10007**）
+
+模块 1.0.6 把 profiles 与 `%q` 两个坑堵住后，真机一路跑到 **base 层装完 40 个包、
+裁剪完、5224 个变更条目都算出来**，然后在打包那一步死掉：
+
+```
+[05:54:12] mkfs.erofs：/system/bin/mkfs.erofs（compress=none，block=4096）
+[05:54:13] ERROR: 构建失败
+```
+
+日志里连"尝试 #N"都没有 → 第一次调用都没走到。复现（容器里的 **Android `/system/bin/sh`**）：
+
+```sh
+set -u; z=(); printf '%s' "${z[@]}"    # z[@]: parameter not set
+```
+
+**mksh 的 `x=()` 不是空数组**（就是不存在的变量），而 `make_erofs` 默认分支
+（`EROFS_COMPRESS=none`）让 `zargs` 保持空 → `attempts=( "${zargs[@]}" … )` 炸 → `set -e` 退出，
+stderr 不在日志里，外层只报"构建失败"。**这类"每层都会踩、且静默"的坑，只有把函数单测到才能防。**
+
+改法：`make_erofs` 去掉数组，参数组合改成纯函数 `erofs_args_for <n> <comp> <bs>`，
+`while` 逐级降级；回归里把该函数抽出来 + 桩 mkfs.erofs（第一次失败、第二次成功）跑完整链条，
+**变异测试**过（换回旧写法立刻红，报的正是真机那句 `zargs[@]: parameter not set`）。
+
+同一屏还有 14 条"文件消失"警告 —— 13 条是误报：交叉核对用 `[ -e ]`，
+而**`-e` 会跟着绝对软链走**，rootfs 里的软链大多指向 chroot 内绝对路径（`usr/bin/awk → /etc/alternatives/awk`）。
+改成 `[ -e ] || [ -L ]`；base 层不再 warn（没有下层，删除天然生效）；顺带把已无用的
+`/etc/systemd` 一起裁掉。
+
+顺带在容器里用**同一套 Android 二进制**验了两个此前只能猜的点：
+`/system/bin/mkfs.erofs` 对 5 组参数**全部接受**（产出 139 KB 镜像正常）；
+`upper.img` 的 `mke2fs` 在真机上确实可用（03:12 的 `linuxctl provision` 就是它建的，
+而那条代码失败会删文件并退出 —— 文件在就是证据）。
+
 回归：`ProvisionPlanTest` 9 条 + `ProvisionWiringTest` 3 条（源码级契约：向导里必须还有
 `ProvisionPlan.nextStep` / `streamDeviceProvision`，脚本路径与 `--seeds` 不能漂移，
 `Proc.stream` 不能又把 stdout 丢了）。App 单测 **74/0**。

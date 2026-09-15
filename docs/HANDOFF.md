@@ -64,6 +64,7 @@ CI 四条线路：① `ci.yml` 回归门禁（shell / node / android 三并行�
 | 12 | *(本次)* | **`device-provision.sh` mksh 化 —— 拆掉设备侧首次部署的 bash 依赖**（下一节详述） | 新增 `tools/provision-selftest.mjs`（28 条，进 CI）；mksh+bash 下真跑内层到「准备 base 阶段」；模块 **1.0.5** |
 | 13 | *(本次)* | **修 App「首次部署向导」：缺层时真的去建层** —— 它原先只调 `linuxctl provision`，而那个命令只建目录/可写层/配置、**从不构建层**，于是真机上向导必然以"provision 失败"收场；现在缺层时改调 `device-provision.sh`（root 模式），proot 模式明确指向频道 | 新增 `ProvisionPlanTest`（9 条）+ `ProvisionWiringTest`（3 条）；顺带修 `Proc.stream` 把 stdout 丢掉的老毛病（`missing_layers` 就在 stdout）；App 单测 **74/0**；App 0.2.1/3 |
 | 14 | *(本次)* | **真机第一跑（05:36）暴露的两个坑**：① **Android 的 mksh 没有 `printf %q`** → 生成内层引导脚本那一段当场 `printf: bad %q@20`，整个部署就此终止（容器里的 mksh R59 **有** %q，所以本地测不出来）；② **模块从来没打包 `rootfs/profiles/`** → 真机日志 `素材：base.packages=未找到`，会跑到 dsh 阶段才 die（白等 20 分钟） | 改法：内层改成**原样重放命令行参数**（彻底不依赖 %q）；mkmodule 打包 profiles/ 并加必需项断言；preflight 对素材做 **fail-fast**；顺带加 `find -exec … {} +` 的**能力探测+降级**；新增 `squote()`（POSIX 单引号转义，sed 实现）。provision 冒烟 **35 条**；模块 **1.0.6**、App **0.2.2/4** |
+| 15 | *(本次)* | **真机第二跑（05:52）又逮到两个**：① **mksh 里 `zargs=()` 不是空数组** —— 随后 `"${zargs[@]}"` 在 `set -u` 下 `zargs[@]: parameter not set`，而默认 EROFS_COMPRESS=none 正好走这条分支，**每个阶段都在打包前静默死掉**（日志里只有一行 stderr）；② 删除检测把 13 个「软链还在、只是绝对目标要从 chroot 里才解析得到」误报成删除 | ① `make_erofs` 去掉数组，改`erofs_args_for <n>` 纯函数 + while；② 交叉核对改 `-e || -L`，并把 `/etc/systemd` 一起裁掉；新增 **make_erofs 行为回归**（抽函数出来用桩 mkfs 跑降级链，mksh+bash 各一遍；把旧写法换回去会立刻红）。provision 冒烟 **51 条**；模块 **1.0.7** |
 
 ### 第 12 条到底修了什么 —— 一句话：**真机上根本跑不了首次部署**
 
@@ -109,6 +110,55 @@ printf: bad %q@20
 
 回归里加了**含空格 + 单引号的种子目录**来回跑一遍，断言内层拿到的路径与命令行**逐字一致**
 （"转义在设备上不存在"这类问题，只有把怪值真的送过去一次才能钉住）。
+
+### 真机第二跑（05:52，模块 1.0.6）：profiles 与 %q 都过了，又栽在 mksh 的空数组上
+
+好消息：**`素材齐全：base.packages / runtime.packages / web-profile / install-web-profile.sh`** 出现了，
+`文件清单：find -exec … {} +（批量，快）` 也出现了 —— 上一轮两个坑确实堵住了。
+然后 base 层**装完 40 个包、裁剪完、5224 个变更条目都算出来了**，却在最后一步打包时死掉：
+
+```
+[05:54:12] mkfs.erofs：/system/bin/mkfs.erofs（compress=none，block=4096）
+[05:54:13] ERROR: 构建失败（详见 /data/sunsetlinux/cache/provision.log）
+```
+
+日志里**没有**任何"尝试 #N" —— 说明它连第一次调用都没走到。原因（本地用同一个 Android
+`/system/bin/sh` 复现，一行就够）：
+
+```sh
+set -u; z=(); printf '%s' "${z[@]}"      # z[@]: parameter not set
+```
+
+**mksh 里 `zargs=()` 并不生成"空数组"**，它就是未设置；而 `make_erofs` 的默认分支
+（`EROFS_COMPRESS=none`）恰好让 `zargs` 保持空，紧接着 `attempts=( "${zargs[@]}" … )` 就炸了。
+`set -u` 把它变成致命错误 → `set -e` 让脚本退出 → 一行 stderr（不在日志里）→ 外层只报"构建失败"。
+
+**改法**：`make_erofs` 彻底不用数组 —— 参数组合改成纯函数 `erofs_args_for <n> <comp> <bs>`
+（1 完整 → 2 去 xattr → 3 去 --all-root → 4 只留压缩 → 5 什么都不加），`while` 循环逐级降级。
+纯函数是**为了能被单测**：`tools/provision-selftest.mjs` 现在把这个函数抽出来，配一个
+"第一次故意失败、第二次成功"的桩 `mkfs.erofs`，在 mksh 与 bash 下各跑一遍完整降级链。
+（写完做了**变异测试**：把旧数组写法换回去，测试立刻红，报的就是真机那句
+`zargs[@]: parameter not set`。）
+
+顺手验了两件"这次不用再猜"的事（在容器里用**同一套 Android 二进制**跑的）：
+`/system/bin/mkfs.erofs` 对 5 组参数**全都接受**（139 KB 的镜像产出正常）；
+`upper.img` 那条路也有证据 —— 设备上 03:12 的 `linuxctl provision` 就是用它建的
+（那条代码在失败时会 `rm -f` 并退出，所以文件存在即证明 `mke2fs` 在真机上可用）。
+
+### 同一屏里那 14 条"文件消失"警告：13 条是误报
+
+真机日志列了 14 条 `少了: …`，肉眼一看全是软链。交叉核对用的是 `[ -e "$BUILD_DIR/$p" ]` ——
+**`-e` 会跟着绝对软链走**，而 rootfs 里的软链大多指向 **chroot 内的绝对路径**：
+
+```
+usr/bin/awk                 -> /etc/alternatives/awk      （从 chroot 外面解析 → 找不到）
+etc/systemd/…/apt-daily.timer -> /lib/systemd/system/…    （同上；而且 /usr/lib/systemd 是故意裁掉的）
+```
+
+于是"软链明明还在"却被判成删除（14 条里只有 `etc/apt/sources.list` 是真被脚本挪走的）。
+改法：`[ -e … ] || [ -L … ]`（软链本身在就算在），并且 base 层不再用 warn（**base 没有下层，
+删除天然生效**），只在 runtime/dsh 层才警告"会残留在 lower 层"。顺带把 `/etc/systemd` 一起裁掉
+（systemd 已经不可用，那一堆 `*.wants/*.timer` 本来就是指向已删目录的悬空链）。
 
 ### 同一个日志里还有第二个坑：模块**从来没打包 `profiles/`**
 
@@ -252,6 +302,12 @@ curl -s https://sunsetrne.github.io/SunsetLinux/stable/index.json
   真机只多一行 `bad: inaccessible or not found`，**而且阻断计数永远是 0**（该拦的不拦，用户是唯一发现者）。
   → 规矩：**任何体检/闸门脚本都要有"行为级冒烟"**（`tools/oneshot-selftest.mjs`、
   `tools/provision-selftest.mjs` 都是这么来的）。
+- **mksh 的 `x=()` 不是"空数组"**（真机第二次失败的原因）：`set -u` 下 `"${x[@]}"` 直接
+  `parameter not set`。设备侧脚本里**别用数组**；要用就用"取第 N 个"的纯函数，或者确认它一定非空
+  （`+=` 追加过、或从别处赋了非空值）。判据同前：本地 mksh 和 Android mksh 在这一点上行为一致，
+  所以**能被单测覆盖** —— 前提是那段代码真的被跑到（当时内层在 chroot_mounts 就死了，够不着 make_erofs）。
+- **`[ -e ]` 会跟着绝对软链走**：判断 rootfs 里的文件在不在，必须 `[ -e ] || [ -L ]`，
+  否则每个指向 chroot 内绝对路径的软链都会被误判成"已删除"。
 - **mksh 的 `local x` 是"未设置"，bash 的是"空"**：配 `set -u` 就是"bash 全绿、mksh 第一步就死"
   （`tb: parameter not set`）。**别写裸 `local`**，一律 `local x=""`。
 - **`declare -f` / `declare -a` 是 bash 专有**：设备上（mksh）报 `declare: inaccessible or not found`。

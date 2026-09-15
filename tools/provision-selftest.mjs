@@ -28,7 +28,7 @@
  * 退出码：0 全过 / 1 有失败。
  */
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, mkdirSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -42,6 +42,20 @@ const ok = (c, msg) => {
   if (c) { pass++; console.log('  \x1b[32mok\x1b[0m   ' + msg); }
   else { fail++; console.log('  \x1b[31mFAIL\x1b[0m ' + msg); }
 };
+
+/** 从源码里抽出某个 shell 函数（从 `name() {` 到列首的 `}`）——用于"把设备上真正会跑的那段
+ *  代码拿出来单测"。不抽全文件是因为脚本最后会 main，无法直接 source。 */
+function extractFunc(src, name) {
+  const lines = src.split('\n');
+  const start = lines.findIndex((l) => l.startsWith(name + '() {'));
+  if (start < 0) throw new Error('源码里找不到函数：' + name);
+  let end = -1;
+  for (let i = start + 1; i < lines.length; i++) {
+    if (lines[i] === '}') { end = i; break; }
+  }
+  if (end < 0) throw new Error('函数没有收尾的 }：' + name);
+  return lines.slice(start, end + 1).join('\n');
+}
 
 /** shell 级错误：这些一旦出现，说明脚本在设备上会以"看不懂的报错"收场 */
 const SHELL_ERRORS = [
@@ -158,6 +172,82 @@ console.log('\n== 参数重放：含空格与单引号的路径（转义必须�
   ok(out.includes(odd), `内层拿到的种子目录与命令行完全一致（没有被转义打碎）`);
   ok(/缺少 Ubuntu base tarball/.test(out), '仍以可读的缺种子错误收场（说明参数真的走到了 extract_base）');
   rmSync(odd, { recursive: true, force: true });
+}
+
+
+// ---------------------------------------------------------------------------
+// ★ make_erofs 的**行为**回归 —— 这一节存在的唯一原因，是真机上真的死在这里：
+//   mksh 里 `zargs=()` 并**不生成空数组**，随后 `"${zargs[@]}"` 在 `set -u` 下直接
+//   `zargs[@]: parameter not set`。而默认 EROFS_COMPRESS=none 恰好走那条分支，
+//   于是每个阶段都在打包前静默死掉（日志里只有一行 stderr，看不到原因）。
+//   当时所有测试都发现不了它：容器里跑内层会先死在 chroot_mounts（没有 CAP_SYS_ADMIN），
+//   根本走不到 make_erofs。所以这里把函数**抽出来单独跑**，用桩 mkfs.erofs 覆盖降级链。
+console.log('\n== make_erofs 行为回归（空数组 / 降级链 / 参数记录） ==');
+{
+  const src = readFileSync(SCRIPT, 'utf8');
+  const fnArgs = extractFunc(src, 'erofs_args_for');
+  const fnMake = extractFunc(src, 'make_erofs');
+  const fnProbe = extractFunc(src, 'probe_set_erofs_args');
+
+  for (const shell of ['mksh', 'bash']) {
+    const work = mkdtempSync(join(tmpdir(), 'sunsetlinux-erofs-'));
+    try {
+      const cache = join(work, 'cache');
+      mkdirSync(cache, { recursive: true });
+      const calls = join(work, 'calls.txt');
+      const stub = join(work, 'stub-mkfs');
+      // 桩：第 1 次调用**故意失败**（模拟设备不认 -x-1），第 2 次成功并落盘
+      writeFileSync(stub, `#!/bin/sh
+printf '%s\\n' "$*" >> ${JSON.stringify(calls)}
+n=$(wc -l < ${JSON.stringify(calls)})
+for a in "$@"; do prev="$last"; last="$a"; done
+[ "$n" -ge 2 ] || exit 1
+: > "$prev"
+exit 0
+`, { mode: 0o755 });
+      writeFileSync(calls, '');
+
+      const driver = join(work, 'driver.sh');
+      writeFileSync(driver, `set -euo pipefail
+CACHE_DIR=${JSON.stringify(cache)}
+LOG_FILE=${JSON.stringify(join(cache, 'log'))}
+EROFS_COMPRESS=none
+EROFS_BLOCK_SIZE=4096
+log() { printf '%s\\n' "$*" >> "$LOG_FILE"; }
+warn() { log "WARN: $*"; }
+die() { log "ERROR: $*"; exit 1; }
+mkdir_erofs_stub() { printf '%s' ${JSON.stringify(stub)}; }
+mkfs_erofs_bin() { mkdir_erofs_stub; }
+${fnProbe}
+${fnArgs}
+${fnMake}
+src=${JSON.stringify(join(work, 'src'))}
+mkdir -p "$src"; : > "$src/x"
+make_erofs "$src" ${JSON.stringify(join(work, 'out.erofs'))}
+printf 'OK\\n'
+`);
+
+      const r = spawnSync(shell, [driver], { encoding: 'utf8' });
+      const out = `${r.stdout ?? ''}${r.stderr ?? ''}`;
+      const callLog = readFileSync(calls, 'utf8').trim().split('\n').filter(Boolean);
+      const logText = existsSync(join(cache, 'log')) ? readFileSync(join(cache, 'log'), 'utf8') : '';
+
+      ok(r.status === 0, `${shell}：make_erofs 跑通（退出码 ${r.status}）${r.status === 0 ? '' : '：' + out.split('\n').slice(0, 3).join(' / ')}`);
+      ok(!/parameter not set/.test(out), `${shell}：没有 "parameter not set"（空数组那个坑）`);
+      ok(callLog.length === 2, `${shell}：按降级链调了 2 次 mkfs.erofs（实际 ${callLog.length} 次）`);
+      ok((callLog[0] ?? '').includes('--all-root') && (callLog[0] ?? '').includes('-x-1'),
+        `${shell}：第 1 次用完整参数集（${callLog[0] ?? ''}）`);
+      ok(!(callLog[1] ?? '').includes('-x-1'), `${shell}：第 2 次已降级（${callLog[1] ?? ''}）`);
+      ok(existsSync(join(work, 'out.erofs')), `${shell}：成功那次的产物落盘了`);
+      // .erofs-args 记的是**参数**（不是整条命令行），所以断言"它是成功那次调用的前缀"
+      const saved = readFileSync(join(cache, '.erofs-args'), 'utf8').trim();
+      ok(saved.startsWith('-b 4096') && saved.includes('--all-root') && (callLog[1] ?? '').startsWith(saved),
+        `${shell}：把实际生效的参数记进了 .erofs-args（doctor 排障用）：${saved}`);
+      ok(/第 2 次尝试成功/.test(logText), `${shell}：日志里写清了第几次成功及参数`);
+    } finally {
+      rmSync(work, { recursive: true, force: true });
+    }
+  }
 }
 
 rmSync(tmp, { recursive: true, force: true });
