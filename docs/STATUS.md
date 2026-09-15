@@ -49,7 +49,7 @@
 | `module/webroot/selftest.mjs`（WebUI 纯函数） | 41 | ✅ |
 | `tools/cmp-consistency.mjs`（三方版本比较） | 16 | ✅ |
 | `tools/contract-check.mjs`（status JSON 契约，root+proot） | — | ✅ 双通过 |
-| App 单测（解压 13 + 归因 8） | 21 | ✅ |
+| App 单测（解压 13 + 归因 8 + UI 契约 16 + 调色对比 9 + 功能 10） | 54 | ✅（`./gradlew :app:testDebugUnitTest`） |
 
 ### 3.2 端到端实测过的链路
 
@@ -119,6 +119,31 @@ E: linuxctl.sh[1578]: dsh_status_json: inaccessible or not found   ← 状态 JS
 > 据此把返回链路整条查了一遍：navigation bar 的 inset 各屏都消费了（有测试守着）；真正的缺陷是
 > **预测性返回从来没被用起来**（见上表最后一行）。已改用 `PredictiveBackHandler` 做跟手位移。
 > 真机验证要点见 `docs/smoke-test.md` §7.1 的"返回手势"一行。
+
+### 3.6 ★ App 外壳重排 + 内置终端（真机使用反馈，2026-09-16）
+
+用户原话：「**把 DSH 启动挪到上面**，然后**给应用加个终端**」「更新移到侧边栏，操作更顺手」。
+截图证据：底栏胶囊塞了 4 格（启动/更新/插件/DSH），**DSH 标签被挤到换行**成两行。
+
+| 改动 | 做法 | 回归 |
+|---|---|---|
+| DSH 上顶栏 | 顶栏加 DSH 图标按钮；点开是 DSH Web，返回手势/返回键回主界面（`PredictiveBackHandler` 本来就实现了这条） | `ShellLayoutContractTest` |
+| 更新进侧边栏 | 侧边栏第一项「更新」；启动页那个「更新」按钮仍然可用（同一目标，两条入口） | `ShellLayoutContractTest` |
+| 底栏只留 3 格 | 启动 / 插件 / **终端**；底栏改为只渲染 `ShellTab.inCapsule` 为真的页 —— 以后加页不会再自动挤进底栏 | `ShellLayoutContractTest` |
+| **内置终端**（新） | `ui/TerminalPane.kt` + `core/TerminalSession.kt`：常驻会话走 `linuxctl attach`（root = `nsenter … chroot … bash`，proot = `start.sh --inner -- bash -l`），输出区 + 输入行 + 清屏/重开/停止；**命令回显由面板补**（管道里的 shell 是非交互的，自己不打提示符也不回显） | `ShellLayoutContractTest` ×7 中的 3 条 |
+
+**终端刻意没做的**（写进了界面提示与代码注释，免得后人当 bug 修）：**没有 PTY**。
+Android 上没有随系统可用的伪终端分配接口，自己引（JNI + forkpty）代价远大于收益。后果两条：
+`vim`/`htop`/`top` 这类**全屏程序不可用**、没有作业控制（`Ctrl-C`/`fg`）；输出**按行刷新**
+（`python3` 的 `>>> ` 这种不换行的提示不会及时出现）。`ls`/`cat`/`apt`/`npm`/`dsh` 这类正常。
+
+会话**挂在外壳上**（不在 tab 分支里）：切 tab 再切回来会话与滚动都还在；外壳销毁（退出 App）
+才断开 —— 避免留下没人管的 shell 进程。起会话前先判一次环境是否 `RUNNING`（`attach` 进的是
+已存在的 mount namespace，没起来时只会甩一行报错）。
+
+**验收**：`:app:assembleDebug` + `:app:testDebugUnitTest` → **54 用例全过**（新增
+`ShellLayoutContractTest` 7 条，守着"底栏只放 3 格 / DSH 在顶栏 / 更新在侧边栏 /
+终端走 attach 且先判环境 / 会话随外壳销毁"）。
 
 ---
 

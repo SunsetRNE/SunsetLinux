@@ -184,6 +184,21 @@ class LinuxCtl(private val context: Context, val mode: EnvMode) {
     suspend fun execInEnv(vararg cmd: String): CtlResult =
         execBlocking(listOf("exec", "--") + cmd.toList(), TIMEOUT_START_STOP)
 
+    /**
+     * **终端会话**用的完整进程命令：`linuxctl attach`（不带参数 = 进环境的交互 shell）。
+     *
+     * 与 status/logs 走同一套构造（root = `su -c "<PATH=…>; 'linuxctl' …"`；
+     * proot = 直接执行 linuxctl，丢了执行位则退化为 `sh <path>`），
+     * 这样环境根的解析（LINUX_HOME / SUNSETLINUX_APP_FILES）与其它命令必然一致。
+     *
+     * 返回的是**给 ProcessBuilder 的命令**，调用方负责起进程并接管 stdin/stdout
+     * （见 core/TerminalSession.kt；没有 PTY，只能行缓冲）。
+     */
+    fun terminalCommand(): List<String> = when (mode) {
+        EnvMode.ROOT -> listOf("su", "-c", shellCommand(listOf("attach")))
+        EnvMode.PROOT -> prootCommand(listOf("attach"))
+    }
+
     // ---------------------------------------------------------------- 流式
 
     /**

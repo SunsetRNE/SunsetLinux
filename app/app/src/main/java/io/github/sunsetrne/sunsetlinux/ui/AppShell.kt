@@ -50,6 +50,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -64,10 +65,12 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import io.github.sunsetrne.sunsetlinux.ui.components.CapsuleReserve
 import io.github.sunsetrne.sunsetlinux.BuildConfig
 import io.github.sunsetrne.sunsetlinux.core.DshPaths
 import io.github.sunsetrne.sunsetlinux.core.EnvMode
+import io.github.sunsetrne.sunsetlinux.core.EnvState
 import io.github.sunsetrne.sunsetlinux.ui.components.Pill
 import io.github.sunsetrne.sunsetlinux.ui.theme.WarnTone
 import io.github.sunsetrne.sunsetlinux.ui.theme.BrushStart
@@ -87,18 +90,27 @@ import androidx.compose.ui.unit.IntOffset
 import kotlin.math.roundToInt
 
 /**
- * 底部胶囊导航的高频 tab。
+ * 外壳里的页面与入口分工（2026-09-16 按真机使用反馈调整）。
+ *
+ * - **底栏（悬浮胶囊）只放 3 个高频页**：启动 / 插件 / 终端；
+ * - **DSH 移到顶栏图标**：点开就是 DSH Web，返回手势/返回键回主界面 ——
+ *   它原先占底栏第 4 格，标签被挤到换行，而且"打开 DSH"与"启动环境"本来就不是同一层级；
+ * - **更新移到侧边栏**：低频，但要从任何页都够得着。
  *
  * ⚠️ 图标只能用 **Material core 的那几十个**：本项目**故意不引入 `material-icons-extended`**
  * （那会让 APK/dex 明显膨胀）。此前这里用了 `Icons.Filled.Extension`（拼图，语义最贴切），
  * 但它属于 extended 图标集 → **编译不过**。改用 core 里的 `Add`（"装/管理插件"）。
  * 以后加图标前请先确认它在 core 集里。
+ *
+ * 因此 `icon` 允许为 **null**：终端在 core 集里没有对应图标（`Terminal` 属于 extended），
+ * 就用等宽字形的 `>_` 当图标 —— 见 [CapsuleBar]。
  */
-enum class ShellTab(val label: String, val icon: ImageVector) {
-    START("启动", Icons.Filled.PlayArrow),
-    UPDATE("更新", Icons.Filled.Refresh),
-    PLUGINS("插件", Icons.Filled.Add),
-    DSH("DSH", Icons.Filled.Home),
+enum class ShellTab(val label: String, val icon: ImageVector?, val inCapsule: Boolean) {
+    START("启动", Icons.Filled.PlayArrow, true),
+    PLUGINS("插件", Icons.Filled.Add, true),
+    TERMINAL("终端", null, true),
+    UPDATE("更新", Icons.Filled.Refresh, false),
+    DSH("DSH", Icons.Filled.Home, false),
 }
 
 /**
@@ -123,6 +135,13 @@ fun AppShell(
     val ui by vm.ui.collectAsState()
     val drawerState = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
+
+    // 终端会话挂在**外壳**上（不在 tab 分支里）：切到别的 tab 再切回来，会话与滚动都还在；
+    // 只有外壳销毁（退出 App / Activity 重建）才断开 —— 否则会留下没人管的 shell 进程。
+    val terminalState = rememberTerminalPaneState()
+    DisposableEffect(Unit) {
+        onDispose { terminalState.dispose() }
+    }
 
     var tab by remember { mutableStateOf(initialTab) }
     var showAbout by remember { mutableStateOf(false) }
@@ -165,6 +184,7 @@ fun AppShell(
                         scope.launch { drawerState.close() }
                         action()
                     },
+                    onOpenUpdates = { tab = ShellTab.UPDATE },
                     onOpenSettings = onOpenSettings,
                     onOpenProvision = onOpenProvision,
                     onOpenDiagnostics = onOpenDiagnostics,
@@ -211,6 +231,7 @@ fun AppShell(
                                 ShellTab.START -> "SunsetLinux"
                                 ShellTab.UPDATE -> "更新"
                                 ShellTab.PLUGINS -> "插件"
+                                ShellTab.TERMINAL -> "终端"
                                 ShellTab.DSH -> "DSH Web"
                             },
                             style = MaterialTheme.typography.titleLarge,
@@ -220,6 +241,15 @@ fun AppShell(
                             style = MaterialTheme.typography.labelSmall,
                             color = if (ui.state == io.github.sunsetrne.sunsetlinux.core.EnvState.ERROR) Danger else TextMuted,
                             maxLines = 1,
+                        )
+                    }
+                    // DSH 入口：从底栏挪到顶栏 —— 随时可点，也不再挤占底栏那一格。
+                    // 点开是 DSH Web 页面；返回手势/返回键回主界面（见 PredictiveBackHandler 与 DshWebPane.onBack）。
+                    IconButton(onClick = { tab = ShellTab.DSH }) {
+                        Icon(
+                            imageVector = Icons.Filled.Home,
+                            contentDescription = "打开 DSH",
+                            tint = if (tab == ShellTab.DSH) MaterialTheme.colorScheme.primary else TextSecondary,
                         )
                     }
                     ModePillSmall(ui)
@@ -279,6 +309,14 @@ fun AppShell(
                             androidx.compose.runtime.LaunchedEffect(Unit) { pluginsState.refresh() }
                             PluginsPane(state = pluginsState, modifier = Modifier.fillMaxSize())
                         }
+
+                        ShellTab.TERMINAL -> TerminalPane(
+                            state = terminalState,
+                            mode = ui.mode,
+                            envRunning = ui.state == EnvState.RUNNING,
+                            onGoStart = { tab = ShellTab.START },
+                            modifier = Modifier.fillMaxSize(),
+                        )
 
                         ShellTab.DSH -> Unit // 上面已单独处理
                     }
@@ -385,6 +423,7 @@ private fun MessageBanner(
 private fun DrawerBody(
     ui: LauncherViewModel.UiState,
     onNavigate: (() -> Unit) -> Unit,
+    onOpenUpdates: () -> Unit,
     onOpenSettings: (String?) -> Unit,
     onOpenProvision: () -> Unit,
     onOpenDiagnostics: () -> Unit,
@@ -421,6 +460,10 @@ private fun DrawerBody(
         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
         Spacer(Modifier.height(8.dp))
 
+        // 更新从底栏挪到侧边栏：低频，但要从任何页面都够得着（底栏只留启动/插件/终端）
+        DrawerItem(Icons.Filled.Refresh, "更新", "频道清单 / 层更新，只下变化的那一层") {
+            onNavigate(onOpenUpdates)
+        }
         DrawerItem(Icons.Filled.Refresh, "重新部署 / 首启引导", "选模式、装模块、铺层") {
             onNavigate(onOpenWelcome)
         }
@@ -521,7 +564,7 @@ private fun CapsuleBar(
             horizontalArrangement = Arrangement.spacedBy(6.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            ShellTab.entries.forEach { entry ->
+            ShellTab.entries.filter { it.inCapsule }.forEach { entry ->
                 val active = entry == selected
                 val shape = RoundedCornerShape(999.dp)
                 Surface(
@@ -535,17 +578,31 @@ private fun CapsuleBar(
                         Modifier.padding(horizontal = 16.dp, vertical = 9.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Icon(
-                            imageVector = entry.icon,
-                            contentDescription = null,
-                            tint = if (active) MaterialTheme.colorScheme.primary else TextMuted,
-                            modifier = Modifier.size(17.dp),
-                        )
+                        val tint = if (active) MaterialTheme.colorScheme.primary else TextMuted
+                        if (entry.icon != null) {
+                            Icon(
+                                imageVector = entry.icon,
+                                contentDescription = null,
+                                tint = tint,
+                                modifier = Modifier.size(17.dp),
+                            )
+                        } else {
+                            // 终端：core 图标集里没有 Terminal（extended 才有，本项目不引），
+                            // 用等宽字形的 ">_" 当图标 —— 零依赖且一眼就是终端。
+                            Text(
+                                text = ">_",
+                                fontFamily = MonoFamily,
+                                fontSize = 13.sp,
+                                lineHeight = 13.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = tint,
+                            )
+                        }
                         Spacer(Modifier.width(7.dp))
                         Text(
                             text = entry.label,
                             style = MaterialTheme.typography.labelLarge,
-                            color = if (active) MaterialTheme.colorScheme.primary else TextMuted,
+                            color = tint,
                             fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
                         )
                     }
