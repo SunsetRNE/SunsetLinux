@@ -45,6 +45,8 @@ https://<用户名>.github.io/<仓库名>/stable/channel.json
 |---|---|---|
 | `main` | 正式版源码 | 跑全量回归 → 通过则发布到 **`/stable/`** 频道 |
 | `beta` | 预发布源码 | 跑全量回归 → 通过则发布到 **`/beta/`** 频道 |
+| `channel` | **只有频道数据**（公有 key/加密私钥备份/说明 + `channel.yml` 本身） | `channel/channel.json` 变化 → 签名 + 独立验签 → 发 gh-pages `/channel/` |
+| `layers` | **层产物的传送带**（orphan；只有分发产物 + `layers-release.yml`） | 建/更新 Release 并存资产，打印 `publish-channel` 用的 base-url（见 §5.3） |
 | `feat/*`、`fix/*` | 开发 | 只跑**回归门禁**，不发布 |
 
 **合并方向**：`feat/*` → `beta` →（验收后）→ `main`。
@@ -52,7 +54,7 @@ https://<用户名>.github.io/<仓库名>/stable/channel.json
 
 ---
 
-## 二·五、拓扑：**三条线路 + 多节点并行**
+## 二·五、拓扑：**四条线路 + 多节点并行**
 
 ```
 线路① 回归门禁 ci.yml          每条推送/PR，三个 job 并行（各占一个 runner）
@@ -68,7 +70,16 @@ https://<用户名>.github.io/<仓库名>/stable/channel.json
       ├─ 跑在**自带 arm64 标签的自建 runner**上（244 MiB、要真 chroot）
       ├─ 增量：按输入选择 --skip-base/--skip-runtime（日常只重打 dsh 层）
       └─ gen-manifest →（有私钥时）sign + 独立验签 → 制品/gh-pages /channel/
+                                              │
+线路④ 层托管 layers-release.yml（layers 分支）   │ 不在 runner 上构建，只"收集 + 上传"
+      ├─ staging 分支（本机构建的 .erofs.zst/.gz，构建机不需要 token）
+      └─ gh release create/upload → Release 资产；打印 base-url 供 publish-channel（§5.3）
 ```
+
+> 线路③ 与 ④ 是**两条不同的路，按"层从哪里来"选一条**：
+> ③ 让 CI 在自建 arm64 runner 上**构建**层（需要你注册 runner）；
+> ④ 让**你自己的机器**构建，CI 只负责把产物放到 Release（不需要 runner，但产物要在
+> `layers` 分支过一遍 git）。两者产出的都是同一套 `<id>-<version>.erofs.{zst,gz}`。
 
 **为什么要拆**（都是实测数字）：
 
@@ -140,7 +151,7 @@ https://<用户名>.github.io/<仓库名>/stable/channel.json
 
 | Secret | 用途 | 缺失时 |
 |---|---|---|
-| `CHANNEL_SIGNING_KEY` | Ed25519 私钥，签 `channel.json` | ⚠️ **当前工作流并未使用它**：`release.yml` 只发布 APK + 模块 + `index.json`；**层与频道清单是手工发布的**（见 §六与 `docs/updates.md` §3）。配不配都不影响 CI 通过 —— 这条以前写成"缺失即失败"，是文档与实现的漂移，已更正 |
+| `CHANNEL_SIGNING_KEY` | Ed25519 私钥，签 `channel.json` | **`channel.yml` 用它**（仅在 `channel` 分支推送 `channel/channel.json` 时触发）：缺失时该工作流**直接失败**，绝不跳过签名发布。`release.yml` 不用它（它只发 APK + 模块 + `index.json`） |
 | `ANDROID_KEYSTORE_BASE64` | 正式签名 keystore（base64） | 未配置时只出 **debug 包**，并在 Release 说明里标注 |
 | `ANDROID_KEYSTORE_PASSWORD` / `ANDROID_KEY_ALIAS` / `ANDROID_KEY_PASSWORD` | 签名口令 | 同上 |
 
@@ -164,11 +175,72 @@ tools/channel/sunsetlinux-channel publish-channel \
 # 3) 把打印出来的文件清单整体上传到 <base-url>，然后把 URL + 公钥 + 指纹发给用户
 ```
 
-> ⚠️ **托管选型有个硬约束**：GitHub Pages 单文件上限 **100 MB**、仓库软上限 **1 GB**。
-> 一次全量频道 244 MB → gh-pages 大约 **4 次**就撑满，而且单文件 73.5 MB（`runtime-*.erofs.gz`）
-> 已经贴着 100 MB 上限。**建议：层文件放对象存储/CDN（R2、S3、OSS…），
-> `channel.json` 与 `.sig` 放哪都行**（清单里的 `url` 是绝对地址，可以指向另一个域名）。
-> 用户只信公钥，跟你用什么托管无关。
+> ⚠️ **托管选型：已定 —— GitHub Release 资产（"纯存储"）+ `layers` 分支收集**（见 §5.3）。
+> 硬约束回顾：gh-pages **单文件 ≤ 100 MB、已发布站点 ≤ 1 GB**，一次全量频道 244 MB
+> → 约 **4 次**就撑满，而 `runtime-*.erofs.gz` 73.5 MB 已经贴着单文件上限。
+> Release 资产没有这个站点上限，所以：**层 → Release 资产；清单/APK/模块 → 仍走 gh-pages**。
+> 清单里的 `url` 本来就是绝对地址，可以指向另一个域名；用户只信公钥，跟你用什么托管无关。
+
+### 5.3 层放 Release、构建机不放 token：`layers` 分支 → Release 资产
+
+**为什么中间要一个分支**：构建层需要 arm64 + 真 chroot，通常是你自己的机器；那台机器上不一定
+想放 GitHub token。于是分工成：本机构建 → 产物推到 `layers` 分支 → CI 收集并上传到 Release。
+构建机上不需要任何 token/私钥，**只有 CI 需要 `contents: write`**（用它自带的 `GITHUB_TOKEN`）。
+
+```bash
+# 1) 本机构建（arm64 + 真 chroot）。想省一半体积就加 --no-gzip-fallback：
+#    清单里不会出现悬空的 url_gz（gen-manifest 只在 .gz 实际存在时才写那几个字段）。
+bash rootfs/build-layers.sh --out-dir dist --runtime-dir runtime/root --dsh-dist-tag next
+
+# 2) staging 分支：**在干净目录里另起一个仓库**，只放"分发产物 + layers-release.yml"
+#    ⚠️ 两个坑（都会静默出错）：
+#      · `git checkout --orphan layers` 之后工作区里**仍是整棵源码树**，`git add -A` 会把源码一起提交；
+#      · 仓库根的 .gitignore 挡了 `*.erofs` / `*.erofs.zst` / `*.erofs.gz`，直接 add 会被**静默漏掉**。
+#    干净目录里另起仓库同时避开这两点（新仓库没有那份 .gitignore），也天然是 orphan：
+mkdir -p /tmp/sunsetlinux-layers && cd /tmp/sunsetlinux-layers
+cp /path/to/dist/*.erofs.zst .                     # 需要纯 CLI 的 gzip 回退时再加 *.erofs.gz
+mkdir -p .github/workflows
+cp <repo>/.github/workflows/layers-release.yml .github/workflows/
+printf 'layers-%s\n' "$(date -u +%Y%m%d)" > TAG       # 可选；不写就自动用 UTC 时间戳
+git init -b layers && git add -A && git commit -m "layers: $(date -u +%Y-%m-%d)"
+git remote add origin git@github.com:SunsetRNE/SunsetLinux.git
+git push --force origin layers
+
+# 3) CI 建/更新 Release 并上传，然后把 base-url 与每个文件的 sha256 打进 job summary
+
+# 4) 回到有层文件的那台机器，按 summary 里的 base-url 生成清单：
+tools/channel/sunsetlinux-channel publish-channel \
+    --base-url https://github.com/SunsetRNE/SunsetLinux/releases/download/<tag> \
+    --name "SunsetLinux 官方" --dsh-dist-tag next
+#    把 dist/channel/channel.json 推到 channel 分支 → channel.yml 签名 + 用公钥独立验签 + 发 /channel/
+```
+
+> 为什么推荐 orphan：**GitHub 只跑"被推送的那个分支上存在"的工作流**，所以 staging 分支
+> 只带 `layers-release.yml`（不带 `ci.yml`）就不会触发全量回归/Apk 构建。
+> 另外 `ci.yml` 的 `branches-ignore` 也加了 `layers` 作为兜底（万一有人基于 main 建这个分支）。
+
+**必须知道的三件事**（都是实测/官方文档级的事实，不是猜测）：
+
+1. **下载端都会跟 302**（Release 地址会跳到 `release-assets.githubusercontent.com`）：
+   App 用 `HttpURLConnection`（`instanceFollowRedirects = true`）；CLI 侧 `curl -fL` / `wget`；
+   Node 工具用 `fetch`（默认 follow）；`runtime/proot` 的 `linuxctl update` 只吃本地文件，
+   下载由 App/CLI 负责。
+   ⚠️ 但 `channel.yml` 的"层 URL 必须已可下载"预检原来**没带 `-L`**：实测同一 URL 无 `-L`
+   得 **302**、加 `-L` 得 **206** —— 会把完全正常的 Release 清单判成"层下载不到"而拒发。
+   已修（`curl -sL`），这条是走 Release/任何重定向托管的**前提**。
+2. **裸 `.erofs` 不能进分支**：runtime 裸镜像 240 MB，超过 git **单文件 100 MB 硬限**，
+   而下载端从不使用它（分发物一律 `.zst`/`.gz`）。`layers-release.yml` 会把它当错误拒绝。
+3. **分支只是传送带，不是"仓库外的存储"**：产物 push 进分支就进了 git 对象库，
+   `git clone` 会跟着变大 —— Release 解决的是"Pages 站点 1 GB 上限"，**没有**解决"仓库变大"。
+   所以 staging 分支**每次重置**（orphan 单提交 + `--force`），不要累积历史。
+
+**保留策略**：Release 资产没有站点上限，但**被清单引用过的层不能随便删**（删了旧版本就回退不了）。
+`layers-release.yml` 只负责上传，清理旧 release 由人决定。tag 形如 `layers-<日期>`，
+**只是存储标识**，不要当成产品版本（本项目刻意不用 tag 做发布，见 §一）。
+
+> 可选（未实现）：让 CI 直接生成清单也能做 —— 层文件既然到了分支，解压复算 `sha256_raw`
+> 不需要 chroot/arm64，runner 完全干得了。但那会让"本机 `publish-channel` 真解压复算"这条
+> 已被验证的路径变成两条，先不引入；哪天嫌第 4 步麻烦再说。
 
 ### 5.2 `CHANNEL_SIGNING_KEY` 到底怎么弄（两种模型，二选一）
 

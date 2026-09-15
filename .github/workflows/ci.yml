@@ -29,7 +29,11 @@ on:
     # ★ main / beta **不在这里触发**：它们交给 release.yml（发布工作流会 workflow_call 本门禁）。
     #   否则同一次推送会跑两遍 CI，而且两个实例落进同一个 concurrency 组，互相取消 ——
     #   实测把「发布」的门禁误杀过（发布直接失败，看起来像代码有问题）。
-    branches-ignore: [main, beta]
+    # ★ layers 也不在这里触发：那是"层产物 → Release 资产"的传送带分支
+    #   （见 layers-release.yml），推的是一堆二进制，跑全量 CI 毫无意义。
+    #   注意 GitHub 只跑**被推送分支上存在**的工作流：推荐把 layers 建成分支孤儿
+    #   （orphan），只带 layers-release.yml + 产物，本行只是"万一基于 main 建分支"的兜底。
+    branches-ignore: [main, beta, layers]
   pull_request:
   workflow_dispatch:
   # 允许发布工作流复用本门禁（release.yml 里 `uses: ./.github/workflows/ci.yml`）

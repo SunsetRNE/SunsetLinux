@@ -15,16 +15,19 @@
 | `main` | 源码主线（= 正式通道） | 人 |
 | `beta` | 与 main 同内容（= 预发布通道） | 人（`git push origin main:beta` 快进即可） |
 | `channel` | **只有频道数据**：`channel.pub`、`channel-key-backup.enc`、`KEY-BACKUP.md`、签名工作流 | 人 + 该分支的 CI 自动补 `.sig` |
+| `layers` | **层产物的传送带**（orphan：只有 `.erofs.zst`/`.gz` + `layers-release.yml` + 可选 `TAG`）→ CI 上传到 Release | 人（每次 `--force` 重置） |
 | `gh-pages` | 发布产物：`/stable/`、`/beta/`、`/channel/` | **CI 独占，不要手工改** |
 
-**CI 三条线路**（详见 `docs/release-ci.md` §二·五）：
+**CI 四条线路**（详见 `docs/release-ci.md` §二·五）：
 
 1. `ci.yml` 回归门禁 —— 三个**并行** job：`shell`（运行时断言 bash+mksh、mksh 闸门、.sh 语法）、
-   `node`（WebUI 纯函数、版本一致性、status 契约、.mjs 语法）、`android`（构建+47 单测，上传制品 `apk-debug`）。
+   `node`（WebUI 纯函数、版本一致性、status 契约、.mjs 语法）、`android`（构建+单测，上传制品 `apk-debug`）。
 2. `release.yml` 发布 —— `beta`/`main` 推送触发；**复用 ① 的 APK 制品**（不再重编），加模块 zip 与
    `index.json`，发到 gh-pages 的 `/beta/` 或 `/stable/`。
 3. `layers.yml` 层与频道 —— **手动触发**，跑在自建 arm64 runner 上（244 MiB、要真 chroot），
    支持 `--skip-*` 增量重编；有 `CHANNEL_SIGNING_KEY` 就签名+独立验签。
+4. `layers-release.yml` 层托管 —— `layers` 分支推送触发；**不构建**，只把 staging 分支里的
+   分发产物传到 Release 资产（"Release 当纯存储"），并打印 `publish-channel` 用的 base-url。
 
 **已发布的产物**（gh-pages `stable/`）：APK、`sunsetlinux-module-1.0.0.zip`、`index.json`。
 门禁那轮实测：脚本断言 20/20（bash 与 mksh 各一遍）、proot 18/18、WebUI 60/60、版本一致性 16/16、
@@ -38,21 +41,18 @@
 
 ## 二、需要你操作的（按优先级）
 
-1. **开 Pages**：Settings → Pages → Build and deployment → Source **Deploy from a branch** →
-   Branch **`gh-pages`** / **`(root)`** → Save，勾 `Enforce HTTPS`。
-   生效后：`https://sunsetrne.github.io/SunsetLinux/stable/`（`/beta/` 同理；`/channel/` 等清单发布后出现）。
-   > ⚠️ 别选 `main`：那是源码分支，Pages 会去构建 Jekyll，`/stable/…` 全是 404。
-2. **配 Secret `CHANNEL_SIGNING_KEY`**：值是私钥全文（`channel.key` 的内容，含 BEGIN/END 两行）。
-   来源二选一：① 容器内 `~/.sunsetlinux-keys/channel.key`；② 用口令解密 `channel` 分支的
-   `channel-key-backup.enc`（命令见 `channel/KEY-BACKUP.md`）。配好后 `channel` 分支一推清单，
-   CI 就会签名 + 用仓库里的公钥独立验签 + 发到 gh-pages `/channel/`。
+1. ~~开 Pages~~ ✅ **已完成**（`/stable/`、`/beta/` 都在线；`/channel/` 等清单发布后出现）。
+2. ~~配 Secret `CHANNEL_SIGNING_KEY`~~ ✅ **已完成**（你已配好；`channel` 分支一推清单，
+   CI 就签名 + 用仓库里的公钥独立验签 + 发到 gh-pages `/channel/`）。
 3. **重建层镜像**：现有 `dist/*.erofs` 是**改名完成之前**构建的，里面还留着死文件
-   `/opt/dshroid/*.sh`（不影响启动 —— `start.sh` 会把模块里的新版同步到 `/opt/sunsetlinux`，
-   但镜像该重打）。两条路：本地/arm64 机器上 `bash rootfs/build-layers.sh` 后
-   `sunsetlinux-channel publish-channel --base-url …`；或注册自建 arm64 runner 用 `layers.yml`。
-4. **托管选型**：层文件一次全量 **244 MiB**（base 18.6+26.5 / runtime 46.5+73.5 / dsh 31.2+47.8）。
-   gh-pages 单文件上限 100 MB、仓库软上限 1 GB → **约 4 次就满**；建议层放对象存储/CDN，
-   清单与 APK/模块放 gh-pages（清单里的 `url` 是绝对地址，可跨域名）。
+   `/opt/dshroid/*.sh`（不影响启动 —— `start.sh` 启动时会把模块里的新版同步到 `/opt/sunsetlinux`，
+   但镜像该重打）。必须在**有 arm64 + 真 chroot 的机器**上跑 `rootfs/build-layers.sh`
+   （本工作容器实测 `CapEff=0`、`mount` 是假的，跑不了）。
+4. ~~托管选型~~ ✅ **已定：Release 当纯存储 + `layers` 分支传送带**。层（244 MiB，只出 zst 时
+   101 MiB）放 Release 资产，清单/APK/模块仍放 gh-pages。构建机不需要 token：
+   产物推到 `layers` 分支 → `layers-release.yml` 收集上传 → 打印 `publish-channel` 用的
+   base-url。完整步骤见 `docs/release-ci.md` **§5.3**（含三条必须知道的事：下载端都跟 302、
+   裸 `.erofs` 超 git 单文件 100 MB 硬限不能进分支、staging 分支每次要 `--force` 重置）。
 
 ---
 
@@ -104,3 +104,11 @@ git ls-remote https://github.com/SunsetRNE/SunsetLinux.git | grep gh-pages   # �
 - 未认证的 GitHub API 限额 **60 次/小时**：让 AI 盯 CI 时要么给 token，要么直接贴日志。
 - `android-actions/setup-android` 的默认包列表含**已被移除的 `tools` 包**，必须显式给 `packages:`。
 - 单元测试夹具必须在**仓库内可跟踪**的路径（`testdata/fixtures/`），否则 CI 上会"SKIP 却显示通过"。
+- **"能不能下载"的预检必须带 `curl -L`**：Release 资产地址会 302 跳到
+  `release-assets.githubusercontent.com`（实测：同一 URL 无 `-L` 得 **302**、加 `-L` 得 **206**）。
+  `channel.yml` 原来没带，会把完全正常的 Release 清单判成"层下载不到"而拒发；已修。
+- **层产物进 git 有两道静默坑**：①仓库根 `.gitignore` 挡了 `*.erofs`/`*.erofs.zst`/`*.erofs.gz`，
+  `git add` 会**不报错地漏掉**；②`git checkout --orphan` 之后工作区里仍是整棵源码树，
+  `git add -A` 会把源码一起提交。→ 在**干净目录里另起一个仓库**再 `push --force`（`release-ci.md` §5.3）。
+- **mksh 的坑不止语法**：`/dev/tcp`、`local x=()` 之类"语法闸门抓不到"的运行时差异，
+  只有真跑或做双解释器回归才看得出来（`runtime/proot/selftest-funcs.sh` 就是为此加的）。
