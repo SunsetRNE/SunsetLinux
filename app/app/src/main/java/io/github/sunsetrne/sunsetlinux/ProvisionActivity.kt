@@ -51,6 +51,7 @@ import io.github.sunsetrne.sunsetlinux.core.DshRuntime
 import io.github.sunsetrne.sunsetlinux.core.EnvMode
 import io.github.sunsetrne.sunsetlinux.core.LinuxCtl
 import io.github.sunsetrne.sunsetlinux.core.Prefs
+import io.github.sunsetrne.sunsetlinux.core.ProvisionPlan
 import io.github.sunsetrne.sunsetlinux.ui.components.DshCard
 import io.github.sunsetrne.sunsetlinux.ui.components.Pill
 import io.github.sunsetrne.sunsetlinux.ui.components.SectionLabel
@@ -197,11 +198,52 @@ class ProvisionActivity : ComponentActivity() {
             appendLog("$ linuxctl ${args.joinToString(" ")}")
             val provision = ctl.stream(args) { appendLog(it) }
 
-            when {
-                provision.ok -> appendLog("✓ provision 完成")
-                provision.exitCode == 2 -> appendLog("✓ 环境已经部署过（退出码 2），跳过。")
-                else -> {
-                    appendLog("✗ provision 失败：${provision.message}")
+            // ★ 分诊：`linuxctl provision` 只建目录/可写层/配置，**从不构建层**。
+            //   层缺失时它返回 ok:false + missing_layers —— 真机上向导原先就在这里以
+            //   "provision 失败"收场，而其实缺的是"构建那一步"（见 core/ProvisionPlan.kt）。
+            val missing = ProvisionPlan.missingLayers(provision.stdout)
+            val step = ProvisionPlan.nextStep(
+                mode = picked,
+                exitCode = provision.exitCode,
+                missing = missing,
+                suAvailable = suAvailable.value == true,
+            )
+            appendLog(ProvisionPlan.explain(step, missing))
+
+            when (step) {
+                ProvisionPlan.Step.DONE -> appendLog("✓ provision 完成（层齐）")
+
+                ProvisionPlan.Step.BUILD_LAYERS -> {
+                    appendLog("$ sh /data/adb/modules/sunsetlinux/bin/device-provision.sh --seeds …")
+                    val build = ctl.streamDeviceProvision(seedDir.value) { appendLog(it) }
+                    if (!build.ok) {
+                        appendLog("✗ 设备侧原生构建失败（退出码 ${build.exitCode}）：${build.message}")
+                        appendLog("  日志：${ctl.home}/cache/provision.log")
+                        appendLog("  也可以自己在 root 终端跑：sh /data/adb/modules/sunsetlinux/bin/device-provision.sh --seeds ${ctl.home}/seeds")
+                        withMain { running.value = false; result.value = false }
+                        return@launch
+                    }
+                    appendLog("✓ 设备侧原生构建完成")
+                    // 构建完再看一次状态：层是否真的齐了（不靠"命令返回 0"就宣布成功）
+                    val st = ctl.status()
+                    val stillMissing = ProvisionPlan.KNOWN_LAYERS.filter { st.layer(it)?.version == null }
+                    if (stillMissing.isNotEmpty()) {
+                        appendLog("✗ 构建跑完了，但状态里仍然缺层：${stillMissing.joinToString("、")}")
+                        appendLog("  请把上面的输出 + ${ctl.home}/cache/provision.log 发给维护者。")
+                        withMain { running.value = false; result.value = false }
+                        return@launch
+                    }
+                    appendLog("✓ 三层都在（${ProvisionPlan.KNOWN_LAYERS.joinToString("、")}）")
+                }
+
+                ProvisionPlan.Step.NEED_CHANNEL -> {
+                    appendLog("✗ 这一步在 proot 模式下做不了：先在「更新」页从频道安装三层，再回来启动。")
+                    withMain { running.value = false; result.value = false }
+                    return@launch
+                }
+
+                ProvisionPlan.Step.FAILED -> {
+                    appendLog("✗ 部署没有完成：${provision.message}")
                     withMain { running.value = false; result.value = false }
                     return@launch
                 }

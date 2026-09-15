@@ -15,8 +15,10 @@ android {
         targetSdk = 35
         // 版本号规则：每次对外发布都要 +1（Android 只按 versionCode 判"这是不是新版"）。
         // 0.2.0：内置终端、DSH 入口上顶栏、更新进侧边栏、内置官方频道。
-        versionCode = 2
-        versionName = "0.2.0"
+        // 0.2.1：部署向导缺层时会去跑 device-provision.sh（此前只调 linuxctl provision，
+        //        而那个命令**不构建层** —— 真机上向导必然以 "provision 失败" 收场）。
+        versionCode = 3
+        versionName = "0.2.1"
     }
 
     // ────────────────────────────────────────────────────────────────────────

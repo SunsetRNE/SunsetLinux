@@ -270,9 +270,24 @@ apksigner verify --print-certs <旧 CI 包>             → 84be9523…  ← 与
 `oneshot-setup.sh` 的"找 bash"那节也换成**行为探测**（用 `sh` 跑一次 `--help`：旧版会打印
 「需要 bash」并 exit 1，新版正常打印用法），体检因此能直接指出"你装的是旧模块"。
 
-**同时核出来的另一件事（尚未修，见 HANDOFF §三·0）**：真机上 `etc/state.json` 的
-`generator` 是 `linuxctl provision`，而 **`linuxctl provision` 只建目录 / upper.img / 写 config，
-从不构建层** —— App 的「首次部署向导（推荐）」走的正是它，所以在没有预置层的机器上必然做不成事。
+**同时核出来的另一件事（App 0.2.1 已修）**：真机上 `etc/state.json` 的 `generator` 是
+`linuxctl provision`，而 **`linuxctl provision` 只建目录 / upper.img / 写 config，从不构建层**
+—— App 的「首次部署向导」走的正是它，所以在没有预置层的机器上必然以"provision 失败"收场。
+
+修法（App 0.2.1/3）：新增 `core/ProvisionPlan.kt` 做**分诊**（纯函数、可单测）——
+`linuxctl provision` 之后读它 stdout 里的 `missing_layers`（顺带修了 `Proc.stream`
+**把 stdout 整个丢掉**的老毛病，那个 JSON 正是打在 stdout）：
+
+| 情况 | 下一步 |
+|---|---|
+| 退出码 0 / 2（已部署） | 直接 start |
+| 缺层 + root 模式 + 有 su | 跑 `device-provision.sh --seeds …`（流式输出；已有层自动跳过），再用 `status` **复核三层真的齐了**才宣布成功 |
+| 缺层 + proot 模式 | 明说"proot 没有真 chroot，去频道装层"，不让用户白等 |
+| 解析不出缺什么 / 没有 su | FAILED（**不猜着跑一次半小时的构建**） |
+
+回归：`ProvisionPlanTest` 9 条 + `ProvisionWiringTest` 3 条（源码级契约：向导里必须还有
+`ProvisionPlan.nextStep` / `streamDeviceProvision`，脚本路径与 `--seeds` 不能漂移，
+`Proc.stream` 不能又把 stdout 丢了）。App 单测 **74/0**。
 
 ### 3.7 ★ 模块 WebUI 图标化 + 内置官方频道 + 模块 1.0.1（2026-09-16 第二批）
 

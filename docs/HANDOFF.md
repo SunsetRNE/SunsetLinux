@@ -9,9 +9,15 @@
 ## 〇、一分钟版
 
 - 分支：`main` = `beta` = **本次那个提交**；`channel` = `0d1efff`；`gh-pages` 由 CI 独占。
-- 发布：本次推送会覆盖 `/stable/`、`/beta/`，产出 **模块 1.0.5**、**App 0.2.0**（run 号见下载页）。
+- 发布：`/stable/` **run 42**、`/beta/` **run 43** 已发布 `abb321f`，**模块 1.0.5**；
+  随后 App 侧修复再推一次 → **App 0.2.1**（run 号见下载页）。
 - **下载页（别点 GitHub Releases，那里永远是空的）**：
   <https://sunsetrne.github.io/SunsetLinux/> → `/stable/`（正式）· `/beta/`（预发布）。
+- **内置官方频道的公开指纹**（与 `core/Prefs.kt` 里写死的那把是同一把，App 自带的
+  `OfficialChannelContractTest` 会**逐字比对**这段文本，改这里必须同步改代码）：
+  - URL：`https://sunsetrne.github.io/SunsetLinux/channel/channel.json`
+  - ed25519 公钥：`YXoAcwa3clZCRd7+DlIHMS3cQ40HlyXVSKblvX5Ye1M=`
+  - 指纹：`ed25519:06:d0:c4:4d:29:1c:ef:66`
 - **你自己那台机器（2026-09-16 05:10 实测）**：模块还是 **1.0.3**；`/data/sunsetlinux/` 里
   `layers/` **是空的**、`upper.img`（8 GiB 稀疏）与 `etc/state.json` 是 `linuxctl provision` 建的
   （它不构建层）、`seeds/` 里两个种子**都已下好**（29.9 MB + 29.8 MB）→ root 模式起不来、
@@ -47,6 +53,7 @@ CI 四条线路：① `ci.yml` 回归门禁（shell / node / android 三并行�
 | 10 | `2113217` | **proot 能力审计 + 随包 proot 5.1.0(2014) → 5.4.0**；修 `--link2symlink` 在老 proot 上直接 fatal；修 bundle 工具自检判据 | bundle 988,717 B / `3d72e0c3…`；两版 proot 实测两条分支；`--verify` 通过 |
 | 11 | `bfabbc8` | 把"CI 不产出 proot bundle"**说出来**（不再静默跳过） | job summary 有 ⚠️/✅ 分支 |
 | 12 | *(本次)* | **`device-provision.sh` mksh 化 —— 拆掉设备侧首次部署的 bash 依赖**（下一节详述） | 新增 `tools/provision-selftest.mjs`（28 条，进 CI）；mksh+bash 下真跑内层到「准备 base 阶段」；模块 **1.0.5** |
+| 13 | *(本次)* | **修 App「首次部署向导」：缺层时真的去建层** —— 它原先只调 `linuxctl provision`，而那个命令只建目录/可写层/配置、**从不构建层**，于是真机上向导必然以"provision 失败"收场；现在缺层时改调 `device-provision.sh`（root 模式），proot 模式明确指向频道 | 新增 `ProvisionPlanTest`（9 条）+ `ProvisionWiringTest`（3 条）；顺带修 `Proc.stream` 把 stdout 丢掉的老毛病（`missing_layers` 就在 stdout）；App 单测 **74/0**；App 0.2.1/3 |
 
 ### 第 12 条到底修了什么 —— 一句话：**真机上根本跑不了首次部署**
 
@@ -113,12 +120,10 @@ CI 四条线路：① `ci.yml` 回归门禁（shell / node / android 三并行�
 
 ## 三、下一步技术清单（方向已定，尚未开工）
 
-0. **让 App 的「首次部署向导」真的能建层**（本轮真机核出来的空缺，优先级最高）
-   - 现状：`ProvisionActivity` 走 `LinuxCtl.provision()` → `linuxctl provision`，**只建目录/upper.img**；
-     层缺失时它以 `ok:false` 结束，用户看到"provision 失败"，而其实**缺的是构建这一步**。
-   - 做法：层缺失时改调 `device-provision.sh`（走已有的 `su -c` 通道，逐行流式输出已有）；
-     `provision` 只作为"目录树/upper.img"的幂等前置。顺带把 ProvisionActivity 的文案与
-     `docs/install.md`「方式 A：App 向导（推荐）」对齐 —— 现在那句"会自动下载并校验"是空的。
+0. ~~让 App 的「首次部署向导」真的能建层~~ → **本次已做**（见 §一 第 13 条）：
+   `ProvisionPlan` 分诊（`linuxctl provision` 只铺目录/可写层/配置 → 缺层则 root 模式跑
+   `device-provision.sh`、proot 模式指向频道），并用 `status` 复核三层是否真的齐了。
+   **仍需真机验收**：装 App 0.2.1 → 点向导 → 看它是否走到"设备侧原生构建"并产出三层。
 
 1. **proot 运行时进 `jniLibs` + App 自动解压**（建议先做）
    - 现状：App 里**没有 `assets/`**，doctor 那句"App 应随包携带 proot"一直是空的 → 非 root 模式开箱即用不了；

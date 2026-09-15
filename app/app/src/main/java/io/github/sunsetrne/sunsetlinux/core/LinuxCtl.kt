@@ -47,6 +47,29 @@ object DshPaths {
         val home = linuxHome(context, mode)
         return listOf("$home/bin/linuxctl", "$home/bin/linuxctl.sh")
     }
+
+    /**
+     * **设备侧原生构建脚本**（`device-provision.sh`）的候选位置。
+     *
+     * 为什么是它、而不是 `linuxctl provision`：后者只建目录 / `upper.img` / 配置，
+     * **从不构建层**。真正"在设备上把三层 erofs 造出来"的只有这个脚本
+     * （真 chroot 里跑 apt + npm）—— 所以 App 的部署向导必须会调它，否则在
+     * 没有预置层的机器上向导必然以"provision 失败"收场（真机实测，见 docs/HANDOFF.md §三·0）。
+     *
+     * 模块铺的那份优先：模块升级会同步它；`$LINUX_HOME/bin/` 下那份是部署时被
+     * 脚本自己拷过去的，作为模块目录不可读时的后备。
+     *
+     * ⚠️ App 进程**无权 stat `/data/adb/...`**，所以这里只给候选，真正的存在性判断
+     * 必须在 `su` 里做（见 [LinuxCtl.streamDeviceProvision]）。
+     */
+    fun provisionScriptCandidates(context: Context, mode: EnvMode): List<String> = when (mode) {
+        EnvMode.ROOT -> listOf(
+            "/data/adb/modules/sunsetlinux/bin/device-provision.sh",
+            "${linuxHome(context, mode)}/bin/device-provision.sh",
+        )
+        // proot 模式没有真 chroot / mount，构建不了层：层只能从频道或种子目录来。
+        EnvMode.PROOT -> emptyList()
+    }
 }
 
 /** POSIX 单引号转义：`it's` → `'it'\''s'`。所有进入 shell 的参数都必须过这一层。 */
@@ -213,6 +236,55 @@ class LinuxCtl(private val context: Context, val mode: EnvMode) {
             EnvMode.PROOT -> prootCommand(args)
         }
         return Proc.stream(cmd, env = baseEnv(), cwd = workDir(), onLine = onLine)
+    }
+
+    /**
+     * 跑**设备侧原生构建**（`device-provision.sh`）：在真 chroot 里装 Ubuntu base → Node+pnpm
+     * → DSH，每层打成 erofs 只读镜像。这是"在手机上建层"的**唯一**途径。
+     *
+     * 几个刻意的选择：
+     * - **只有 root 模式**：它要真 chroot + mount + `unshare -m`，proot 里做不到；
+     * - 用 `sh <脚本>` 而不是直接 `exec` 它：脚本住在 `/data/adb/modules/...`（vfat/mount
+     *   不一定带执行位），而它本身第一行就是 `#!/system/bin/sh`；设备上**没有 bash**
+     *   （1.0.5 起脚本已 mksh 原生，见根目录脚本的文件头）。
+     * - 种子目录：默认 `$LINUX_HOME/seeds`（`device-provision.sh` 的默认值也是它，
+     *   两边一致）；脚本对已有层是幂等的（存在即跳过），所以向导可以放心一直调它。
+     *
+     * **阻塞 / 无超时**（可能跑十几分钟到半小时）——调用方负责放到 IO 线程。
+     */
+    fun streamDeviceProvision(seedsDir: String?, onLine: (String) -> Unit): CtlResult {
+        if (mode != EnvMode.ROOT) {
+            return CtlResult.fail(
+                "只有 root 模式能在设备上原生构建层（需要真 chroot + mount）；" +
+                    "proot 模式请从频道安装层。",
+            )
+        }
+        val script = provisionShellScript(seedsDir)
+        return Proc.stream(listOf("su", "-c", script), env = baseEnv(), cwd = null, onLine = onLine)
+    }
+
+    /**
+     * 构建脚本的 shell 包装：
+     * `PATH=...; prov=''; for c in <候选>; do [ -f "$c" ] && { prov="$c"; break; }; done; ...`
+     *
+     * 存在性判断必须在 `su` 里做 —— App 进程读不到 `/data/adb/`。找不到时**明确报错**
+     * （退出码 127 + 人能看懂的一句话），不要让用户看到 `sh: not found` 的原文。
+     */
+    private fun provisionShellScript(seedsDir: String?): String {
+        val candidates = DshPaths.provisionScriptCandidates(context, mode)
+        val seeds = seedsDir?.trim()?.takeIf { it.isNotEmpty() } ?: "$home/seeds"
+        return buildString {
+            append(linuxPathEnv)
+            append("; prov=''; ")
+            append("for c in")
+            candidates.forEach { append(' ').append(shQuote(it)) }
+            append("; do [ -f \"\$c\" ] && { prov=\"\$c\"; break; }; done; ")
+            append("if [ -z \"\$prov\" ]; then ")
+            append("echo '找不到 device-provision.sh：请先安装/升级 KernelSU 模块（≥1.0.5），或检查模块是否被禁用' >&2; ")
+            append("exit 127; fi; ")
+            append("echo \"# device-provision.sh：\$prov（种子目录：").append(seeds).append("）\"; ")
+            append("exec /system/bin/sh \"\$prov\" --seeds ").append(shQuote(seeds))
+        }
     }
 
     // ---------------------------------------------------------------- 内部

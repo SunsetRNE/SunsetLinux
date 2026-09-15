@@ -159,19 +159,27 @@ internal object Proc {
             return CtlResult.fail(friendlyStartFailure(cmd.first(), e))
         }
 
+        val stdout = StringBuilder()
         val stderr = StringBuilder()
         val errReader = pump(process.errorStream) { line ->
             stderr.append(line).append('\n')
             onLine(line)
         }
 
+        // ★ stdout 必须一起收（这里原来直接丢掉了，返回的 CtlResult.stdout 永远是空串）。
+        //   为什么必须修：`linuxctl provision` 把结果 JSON **打在 stdout**（emit），而部署向导
+        //   要靠它里面的 `missing_layers` 判断"层缺不缺、要不要去构建"（core/ProvisionPlan.kt）。
+        //   丢了 stdout 就只能靠退出码猜，而"缺层"和"其它失败"的退出码都是 1。
         process.inputStream.bufferedReader().useLines { lines ->
-            lines.forEach { line -> onLine(line) }
+            lines.forEach { line ->
+                stdout.append(line).append('\n')
+                onLine(line)
+            }
         }
 
         val code = process.waitFor()
         errReader.join(1500)
-        return CtlResult(code, "", stderr.toString().trim())
+        return CtlResult(code, stdout.toString().trim(), stderr.toString().trim())
     }
 
     private fun pump(src: java.io.InputStream, sink: StringBuilder): Thread {

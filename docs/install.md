@@ -65,11 +65,16 @@ Provisioning 会：建目录树 → 铺三层 erofs → 创建可写层镜像 �
 ### 方式 A：App 向导
 
 在 `ProvisionActivity` 里：选模式 → 选频道（或选"使用离线种子"）→ 点开始。
-App 会通过 `su -c` 调用 `linuxctl provision` 并显示进度。
 
-> ⚠️ **目前它只能铺层、不能建层**：层缺失时它会以 `ok:false` 结束（提示去跑
-> `device-provision.sh`）。所以第一次部署请走**方式 B** 或**方式 C**；把向导接到
-> `device-provision.sh` 是待办（见 `docs/HANDOFF.md` §三·0）。
+向导会分两步走，并在日志里说清每一步：
+
+1. `su -c linuxctl provision` —— 建目录树 / `upper.img` / 配置（**它不构建层**）；
+2. 若还缺层，**root 模式**会接着跑 `device-provision.sh`（设备侧原生构建，真 chroot 里装
+   apt + npm；十几分钟到半小时，已有层会跳过）；**proot 模式**没有真 chroot，
+   只能去「更新」页从频道装层，向导会直接这么提示。
+
+> App **0.2.1 起**才是上面这个行为；0.2.0 及更早只调第 1 步 —— 在没有预置层的机器上会以
+> "provision 失败"收场（那不是坏了，是缺"构建"这一步）。
 
 ### 方式 B：设备侧原生构建（在 root 终端执行，不需要 bash / Termux）
 
