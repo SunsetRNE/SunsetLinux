@@ -12,7 +12,8 @@
 | 文件 | 谁产出 | 说明 |
 |---|---|---|
 | `channel.json` | **你的本机**：`sunsetlinux-channel publish-channel --base-url …` | 清单；里面的层 `url` 指向 CDN/对象存储 |
-| `channel.pub` | 你的本机：`sunsetlinux-channel keygen` | 公钥，**不是秘密**；用户拿它与指纹核对 |
+| `channel.pub` | 你的本机：`sunsetlinux-channel keygen` | 公钥，**不是秘密**；用户拿它与指纹核对。当前指纹：见 `KEY-BACKUP.md` |
+| `channel-key-backup.enc` | 你的本机（加密后） | 私钥的**加密**备份（AES-256-CBC + PBKDF2）；无口令时只是随机字节。解密与轮换步骤见 `KEY-BACKUP.md` |
 | `channel.json.sig` | **CI 自动生成**（不要手工放） | 对 `channel.json` 原始字节的 Ed25519 签名 |
 
 ## 怎么发
