@@ -1,0 +1,53 @@
+{
+  "schema": 1,
+  "name": "SunsetLinux 官方",
+  "generated_at": "2026-09-15T22:57:52Z",
+  "layers": [
+    {
+      "id": "base",
+      "version": "24.04.3-l1",
+      "transport": "zstd",
+      "url": "https://github.com/SunsetRNE/SunsetLinux/releases/download/layers-20260916/base-24.04.3-l1.erofs.zst",
+      "sha256": "edc4994dc130b3bf3a938239a75fe9ab654a680f3089b7e416b2e11df240df09",
+      "size": 19478637,
+      "sha256_raw": "ff47c96aa94e0dddb579c65cdf51e7b852d33ebb9fd81b8bc4643100669b5e7d",
+      "size_raw": 99893248,
+      "transport_gz": "gzip",
+      "url_gz": "https://github.com/SunsetRNE/SunsetLinux/releases/download/layers-20260916/base-24.04.3-l1.erofs.gz",
+      "sha256_gz": "5fff653c2e85c32e9017398ff4062331361b11c265d5438f58ddb1877805bf71",
+      "size_gz": 27762420
+    },
+    {
+      "id": "runtime",
+      "version": "1.0.0",
+      "transport": "zstd",
+      "url": "https://github.com/SunsetRNE/SunsetLinux/releases/download/layers-20260916/runtime-1.0.0.erofs.zst",
+      "sha256": "a336d278a8abd9b26e9252ab1e3bbf16ecf2b57d5e0e08e80fafbbc64c8825a5",
+      "size": 48736940,
+      "sha256_raw": "e6571af1585fed7e6f95b73fe00ca910a10e914f44e5bf2aa3f89292350e4cfe",
+      "size_raw": 240828416,
+      "transport_gz": "gzip",
+      "url_gz": "https://github.com/SunsetRNE/SunsetLinux/releases/download/layers-20260916/runtime-1.0.0.erofs.gz",
+      "sha256_gz": "a22ff26aa5a2aa3ebee9d2fe94148327172826a56ccd9c73a51a960a100934df",
+      "size_gz": 77067997
+    },
+    {
+      "id": "dsh",
+      "version": "0.1.5-rc.2",
+      "transport": "zstd",
+      "url": "https://github.com/SunsetRNE/SunsetLinux/releases/download/layers-20260916/dsh-0.1.5-rc.2.erofs.zst",
+      "sha256": "04ddce5f5edee710fc7466d46db40c70b06b11cbdc3d4bad0e2b9d8b9e25e820",
+      "size": 32753059,
+      "sha256_raw": "d9674df77923341e39759750c36f57bb53e481296129dd4e1cb80864faa60c29",
+      "size_raw": 211259392,
+      "transport_gz": "gzip",
+      "url_gz": "https://github.com/SunsetRNE/SunsetLinux/releases/download/layers-20260916/dsh-0.1.5-rc.2.erofs.gz",
+      "sha256_gz": "30333242466252e5b0099bf1e14a34003b1d58fb93c8541b20fd18e4c247c1d9",
+      "size_gz": 50146411
+    }
+  ],
+  "dsh_npm": {
+    "dist_tag": "next",
+    "package": "@deepseek-ai/dsh"
+  }
+}
