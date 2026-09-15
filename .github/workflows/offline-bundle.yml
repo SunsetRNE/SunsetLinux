@@ -1,0 +1,124 @@
+# ============================================================================
+# 内置（离线）包：从**频道**拉层 → 按组合打包 → 挂到 Release
+#
+# ## 为什么在 CI 里做（而不是让各人的机器打包）
+#   离线包的输入是"已发布的层"，而层已经在 `layers-<日期>` 那个存储 Release 里、
+#   并且**签名频道清单**里有每层的 sha256 / sha256_raw。所以打包这件事完全可以
+#   在 runner 上做：下载 → 逐层校验 → 拼装 → 上传。构建机不需要 arm64，也不需要私钥。
+#
+# ## 为什么"下载而不是本地产物"
+#   `dist/` 是 gitignore 的，runner 上只有源码；而频道清单是**唯一事实源**
+#   （每层都有 sha256/sha256_raw，能当场验）。这样 CI 打出来的包与用户从 App
+#   装到的东西**必然同源** —— 不会出现"CI 用旧层打了包"这种漂移。
+#
+# ## 触发
+#   · 改动本工具或本工作流时自动跑（这样改完就能看到产物，不用等发布）；
+#   · 也可以手动 workflow_dispatch。
+# ============================================================================
+name: 内置离线包
+
+on:
+  push:
+    paths:
+      - 'tools/offline-bundle/**'
+      - '.github/workflows/offline-bundle.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write          # 把产物挂到 Release 上
+
+concurrency:
+  group: offline-bundle-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  bundle:
+    name: 打包四个组合并挂到 Release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: 取频道清单并逐层下载 + 校验
+        run: |
+          set -euo pipefail
+          SITE="https://${{ github.repository_owner }}.github.io/${{ github.repository }}"
+          mkdir -p dist/bundles
+          curl -fsSL "$SITE/channel/channel.json"     -o dist/channel.json
+          curl -fsSL "$SITE/channel/channel.json.sig" -o dist/channel.json.sig
+          [ -s dist/channel.json ] || { echo "::error::拿不到频道清单（/channel/channel.json）"; exit 1; }
+
+          # 用清单当唯一事实源：文件名按 <id>-<版本>.erofs.zst 落，并顺手生成
+          # dist/SHA256SUMS.layers.txt（mk-bundle 会从里面取 sha256_raw/size_raw）
+          node - <<'NODE' > dist/layers.tsv
+          const fs = require('node:fs');
+          const m = JSON.parse(fs.readFileSync('dist/channel.json', 'utf8'));
+          for (const l of m.layers ?? []) {
+            const url = l.url || l.url_gz;
+            const sha = l.url ? l.sha256 : l.sha256_gz;
+            if (!url || !sha) continue;
+            const ext = url.endsWith('.gz') ? 'gz' : 'zst';
+            console.log([l.id, l.version, url, sha, ext, l.sha256_raw ?? '', l.size_raw ?? ''].join('\t'));
+          }
+          NODE
+          [ -s dist/layers.tsv ] || { echo "::error::频道清单里没有层"; exit 1; }
+
+          : > dist/SHA256SUMS.layers.txt
+          while IFS=$'\t' read -r id ver url sha ext raw rawsize; do
+            f="dist/$id-$ver.erofs.$ext"
+            echo "下载 $id $ver ← $url"
+            curl -fsSL "$url" -o "$f"
+            got="$(sha256sum "$f" | awk '{print $1}')"
+            [ "$got" = "$sha" ] || { echo "::error::$f sha256 与频道清单不符：$got ≠ $sha"; exit 1; }
+            # 只有清单里确实带了 raw 值才写进 SHA256SUMS：**绝不填 0 冒充**
+            # （填了 App 会拿全零去核对解压结果，必然失败）
+            if [ -n "$raw" ] && [ -n "$rawsize" ]; then
+              printf '%s-%s.erofs  %s  %s\n' "$id" "$ver" "$rawsize" "$raw" >> dist/SHA256SUMS.layers.txt
+            fi
+          done < dist/layers.tsv
+          echo "层已就绪："; ls -l dist/*.erofs.* | awk '{print "  ", $5, $9}'
+
+      - name: 取 proot 运行时（非 root 组合要用）
+        run: |
+          set -euo pipefail
+          # proot 包不是"层"，走的是 layers 存储 Release 的资产；没有就说明还没发过，
+          # 那种情况下含 proot 的组合会被 mk-bundle 明确拒绝（不会静默少一块）。
+          URL="$(curl -fsSL "https://api.github.com/repos/${{ github.repository }}/releases?per_page=50" \
+                 | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const rs=JSON.parse(s);for(const r of rs){if(!String(r.tag_name||"").startsWith("layers-"))continue;const a=(r.assets||[]).find(x=>/^proot-bundle-.*\.tar\.gz$/.test(x.name));if(a){console.log(a.browser_download_url);break}}})' || true)"
+          if [ -n "${URL:-}" ]; then
+            curl -fsSL "$URL" -o "dist/$(basename "$URL")"
+            echo "已取 proot：$(basename "$URL")"
+          else
+            echo "::warning::layers-20260916 里没有 proot-bundle-*.tar.gz；本次跳过含 proot 的组合"
+          fi
+
+      - name: 打包（每个变体打完立刻校验）
+        run: node tools/offline-bundle/mk-bundle.mjs --available --dir dist --out dist/bundles
+
+      - name: 回归（合成部件全链路 + 负例）
+        run: node tools/offline-bundle/selftest.mjs
+
+      - name: 上传制品（供人工取用/排障）
+        uses: actions/upload-artifact@v4
+        with:
+          name: offline-bundles
+          path: dist/bundles/*.bin
+          retention-days: 14
+
+      - name: 挂到 Release（v<App 版本>）
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          APP_VER="$(sed -n 's/^[[:space:]]*versionName[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' app/app/build.gradle.kts | head -n1)"
+          [ -n "$APP_VER" ] || { echo "::error::读不出 App 版本"; exit 1; }
+          TAG="v$APP_VER"
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            echo "::warning::$TAG 还不存在（还没发过正式版？）—— 制品已上传为 workflow artifact，暂不挂 Release"
+            exit 0
+          fi
+          gh release upload "$TAG" dist/bundles/*.bin dist/bundles/*.json --clobber
+          echo "- 内置离线包已挂到 https://github.com/${{ github.repository }}/releases/tag/$TAG" >> "$GITHUB_STEP_SUMMARY"

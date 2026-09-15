@@ -83,12 +83,19 @@ jobs:
             exit 1
           done
 
-          files="$(ls -1 *.erofs.zst *.erofs.gz 2>/dev/null || true)"
-          if [ -z "$files" ]; then
+          # 上传的东西分两类（都是"分发产物"，只是角色不同）：
+          #   · 层：`*.erofs.zst` / `*.erofs.gz`（频道清单引用它们）
+          #   · proot 运行时：`proot-bundle-*.tar.gz`（**非 root 模式的必需件**；
+          #     内置离线包的 minimal / ubuntu-proot 组合也要用它）
+          # 裸 `.erofs` 依旧禁止（超 git 单文件 100 MB 硬限，且下载端从不用它）。
+          layers="$(ls -1 *.erofs.zst *.erofs.gz 2>/dev/null || true)"
+          if [ -z "$layers" ]; then
             echo "::error::staging 分支根目录里没有 *.erofs.zst / *.erofs.gz。"
             echo "::error::先在 arm64 机器上跑 rootfs/build-layers.sh，把分发产物放到分支根目录再推。"
             exit 1
           fi
+          extra="$(ls -1 proot-bundle-*.tar.gz proot-bundle-*.tar.gz.sha256 2>/dev/null || true)"
+          files="$(printf '%s\n%s\n' "$layers" "$extra" | sed '/^$/d')"
           echo "待上传："
           printf '  %s\n' $files
           {

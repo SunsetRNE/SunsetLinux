@@ -1,0 +1,33 @@
+{
+  "_comment": "内置形态的**唯一事实源**：App 的每个「包」内嵌哪些东西，全看这张表。新增/调整组合只改这里，打包工具与 CI 都读它。",
+  "format": "sunsetlinux-bundle",
+  "layout": "layers-split-v1",
+  "parts_legend": {
+    "base": "Ubuntu 基础层（erofs，完整 rootfs）",
+    "runtime": "运行层（Node + pnpm + 工具）",
+    "dsh": "DSH 层（npm 全局安装 + web profile）",
+    "proot": "非 root 模式的 proot 运行时（自带动态依赖，解到 $LINUX_HOME/proot）"
+  },
+  "variants": {
+    "minimal": {
+      "label": "最小包（非内嵌）",
+      "embed": ["proot"],
+      "note": "只带必要的 root 环境组件（proot 运行时）；Ubuntu 根文件系统与 dsh 走频道/离线包 —— APK 体积最小"
+    },
+    "ubuntu": {
+      "label": "内嵌 Ubuntu",
+      "embed": ["base", "runtime"],
+      "note": "装完即可离线拥有 Ubuntu 基础环境（root 模式可用）；dsh 与 proot 另取"
+    },
+    "ubuntu-proot": {
+      "label": "内嵌 Ubuntu + proot",
+      "embed": ["base", "runtime", "proot"],
+      "note": "root / 非 root 两种模式都能离线起步（不含 dsh）"
+    },
+    "ubuntu-proot-dsh": {
+      "label": "内嵌 Ubuntu + proot + dsh",
+      "embed": ["base", "runtime", "proot", "dsh"],
+      "note": "完全离线：装完开机即可用，不需要任何网络下载"
+    }
+  }
+}
