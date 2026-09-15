@@ -136,6 +136,126 @@ jobs:
         env:
           CHANNEL_DIR: ${{ steps.ch.outputs.dir }}
 
+      # 人看的下载页。为什么需要它：gh-pages 上只有 index.json / APK / 模块 zip，
+      # 没有 index.html —— 于是：
+      #   · 站点根 https://<owner>.github.io/<repo>/ 直接 404（用户第一反应就是点这里）
+      #   · /stable/ 会被 Pages 当成 index.json 返回，浏览器里是一坨 JSON
+      # 所以每次发布都生成一个自包含的 index.html（内联 CSS、零外部资源、深色单色），
+      # 顺手再生成一份站点根页面（只在 stable 通道生成，免得 beta 覆盖它）。
+      - name: 生成下载页（通道页 + 站点根页）
+        env:
+          CHANNEL_DIR: ${{ steps.ch.outputs.dir }}
+          CHANNEL_LABEL: ${{ steps.ch.outputs.label }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, html
+
+          out = "dist/_publish"
+          ch = os.environ.get("CHANNEL_DIR", "")
+          label = os.environ.get("CHANNEL_LABEL", ch)
+          idx = json.load(open(os.path.join(out, "index.json"), encoding="utf-8"))
+          mod = idx.get("module_version", "")
+          files = idx.get("files", [])
+          apk = next((f for f in files if f["name"].endswith(".apk")), None)
+          modzip = next((f for f in files if f["name"].endswith(".zip")), None)
+
+          def human(n):
+              n = float(n)
+              for u in ("B", "KiB", "MiB", "GiB"):
+                  if n < 1024 or u == "GiB":
+                      return f"{n:.0f} {u}" if u == "B" else f"{n:.1f} {u}"
+                  n /= 1024.0
+
+          CSS = """
+          :root{color-scheme:dark}
+          *{box-sizing:border-box}
+          body{margin:0;background:#0A0A0A;color:#F5F5F5;
+            font:-apple-system,BlinkMacSystemFont,"Noto Sans CJK SC","PingFang SC",sans-serif;
+            line-height:1.6;-webkit-text-size-adjust:100%}
+          main{max-width:720px;margin:0 auto;padding:28px 20px 64px}
+          h1{font-size:26px;margin:0 0 4px;letter-spacing:.5px}
+          h2{font-size:15px;margin:28px 0 10px;color:#A3A3A3;font-weight:600}
+          .sub{color:#A3A3A3;font-size:13px;margin:0 0 22px}
+          .sub code{color:#F5F5F5}
+          a{color:#F5F5F5}
+          .btn{display:block;padding:15px 18px;margin:10px 0;border:1px solid #3D3D3D;border-radius:16px;
+            background:#141414;text-decoration:none;font-size:16px}
+          .btn.primary{background:#F5F5F5;color:#000;border-color:#F5F5F5;font-weight:600}
+          .btn small{display:block;font-weight:400;font-size:12px;opacity:.7;margin-top:3px}
+          .btn.ghost{background:transparent;font-size:14px;padding:11px 18px}
+          ol{padding-left:22px;margin:0}
+          li{margin:6px 0}
+          table{width:100%;border-collapse:collapse;font-size:12px;font-family:ui-monospace,Menlo,monospace}
+          th,td{text-align:left;padding:7px 6px;border-bottom:1px solid #2A2A2A;word-break:break-all}
+          th{color:#6E6E6E;font-weight:500}
+          .note{color:#6E6E6E;font-size:12px;margin-top:18px}
+          .tag{display:inline-block;border:1px solid #3D3D3D;border-radius:999px;padding:2px 10px;font-size:12px;color:#A3A3A3}
+          """
+
+          def page(title, subtitle, body):
+              return ("<!doctype html>\n<html lang=\"zh-CN\"><head><meta charset=\"utf-8\">\n"
+                      "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\n"
+                      f"<title>{html.escape(title)}</title><style>{CSS}</style></head><body><main>\n"
+                      f"<h1>SunsetLinux</h1>\n<p class=\"sub\">{subtitle}</p>\n{body}\n"
+                      "<p class=\"note\">层镜像（base / runtime / dsh）不在这个页面 —— "
+                      "它们走频道分发：App 的「内置官方频道」，或终端里 <code>linuxctl update</code>。</p>\n"
+                      "<p class=\"note\"><a href=\"https://github.com/"
+                      + os.environ.get("GITHUB_REPOSITORY", "") + "\">仓库</a> · "
+                      "本页由 CI 生成（每次发布重写），别手工改 gh-pages。</p>\n"
+                      "</main></body></html>\n")
+
+          # ---- 通道页 ----
+          dl = []
+          if apk:
+              dl.append(f'<a class="btn primary" href="{html.escape(apk["name"])}">下载 App（APK）'
+                        f'<small>{human(apk["size"])} · 覆盖安装即可，数据不丢</small></a>')
+          if modzip:
+              dl.append(f'<a class="btn" href="{html.escape(modzip["name"])}">下载 KernelSU 模块'
+                        f'<small>{human(modzip["size"])} · 用 KernelSU 管理器安装，然后重启一次</small></a>')
+          dl.append('<a class="btn ghost" href="index.json">index.json（给脚本/机器读）</a>')
+
+          steps = ("<ol><li>装上面的 APK（App）。</li>"
+                   "<li>在 KernelSU 管理器里装模块 zip，然后<b>重启一次</b>（让模块把脚本铺到 /data/sunsetlinux）。</li>"
+                   "<li>打开 App → 部署向导；或 root 终端里跑 "
+                   "<code>sh /data/adb/modules/sunsetlinux/bin/oneshot-setup.sh --run</code>。</li>"
+                   "<li>终端里 <code>linuxctl doctor</code> 可一键自检。</li></ol>")
+
+          rows = "".join(
+              f'<tr><td>{html.escape(f["name"])}</td><td>{human(f["size"])}</td>'
+              f'<td>{html.escape(f["sha256"])}</td></tr>' for f in files)
+
+          other = "beta" if ch == "stable" else "stable"
+          subtitle = (f'<span class="tag">{html.escape(label)}</span> '
+                      f'模块 <code>{html.escape(str(mod))}</code> · '
+                      f'commit <code>{html.escape(idx.get("commit","")[:7])}</code> · '
+                      f'构建于 {html.escape(idx.get("built_at",""))} · '
+                      f'run #{idx.get("run_number","")}')
+          body = ("<h2>下载</h2>\n" + "\n".join(dl) +
+                  "\n<h2>安装顺序</h2>\n" + steps +
+                  "\n<h2>文件与校验</h2>\n<table><tr><th>文件</th><th>大小</th><th>sha256</th></tr>"
+                  + rows + "</table>" +
+                  f'\n<p class="note">另一个通道：<a href="../{other}/">{other}</a></p>')
+          open(os.path.join(out, "index.html"), "w", encoding="utf-8").write(
+              page(f"SunsetLinux · 下载（{ch}）", subtitle, body))
+
+          # ---- 站点根页（只在 stable 生成；beta 发布不碰它，免得来回覆盖）----
+          if ch == "stable":
+              root = "dist/_root"
+              os.makedirs(root, exist_ok=True)
+              rbody = (
+                  '<a class="btn primary" href="stable/">正式版（stable）'
+                  f'<small>模块 {html.escape(str(mod))} · 当前推荐</small></a>\n'
+                  '<a class="btn" href="beta/">预发布版（beta）<small>下一版候选，可能不稳定</small></a>\n'
+                  '<h2>这是什么</h2>\n'
+                  '<ol><li>Android 上的真 chroot + overlayfs Ubuntu 24.04 环境，跑原生 DSH。</li>'
+                  '<li>装 App + KernelSU 模块，即可在手机上得到完整的 DSH 运行环境。</li>'
+                  '<li>层镜像可增量更新；环境与 App 生命周期解耦（App 被杀不影响）。</li></ol>')
+              open(os.path.join(root, "index.html"), "w", encoding="utf-8").write(
+                  page("SunsetLinux · 下载", "Android 上的原生 DSH 运行环境", rbody))
+          print("已生成 dist/_publish/index.html" + (" 与 dist/_root/index.html" if ch == "stable" else ""))
+          PY
+
       - name: 发布到 gh-pages 的对应目录
         uses: peaceiris/actions-gh-pages@v4
         with:
@@ -143,6 +263,17 @@ jobs:
           publish_dir: dist/_publish
           destination_dir: ${{ steps.ch.outputs.dir }}
           keep_files: true          # ★ 关键：不要抹掉另一个通道的目录
+
+      # 站点根页：destination_dir 留空 = gh-pages 根目录。keep_files: true 只增不删，
+      # 所以 /stable/ 与 /beta/ 不受影响（发布通道那一步已经在用同一个机制）。
+      # 只在 stable 跑，避免 beta 发布把根页的"当前推荐版本"覆盖成 beta 的。
+      - name: 发布站点根页（仅 stable）
+        if: steps.ch.outputs.dir == 'stable'
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: dist/_root
+          keep_files: true
 
       - name: 输出下载地址
         run: |

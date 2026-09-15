@@ -19,6 +19,18 @@
 **采用 `gh-pages` 分支**：CI 把产物推到该分支的固定目录，网页与频道都从同一处取。
 这同时解决了"频道 URL 从哪来"的问题 —— **频道就是 Pages 上的一个静态文件**。
 
+> ⚠️ **所以仓库的 Releases 页面永远是空的 —— 那是设计，不是没发出去**。
+> 用户（和未来的你）第一反应是点仓库的 "Releases"，那里什么都看不到；真正的下载页是：
+>
+> - 站点根：`https://sunsetrne.github.io/SunsetLinux/`（**2026-09-16 起有页面**了，链到两个通道）
+> - 正式：`https://sunsetrne.github.io/SunsetLinux/stable/`（`index.html` 由 CI 每次发布生成）
+> - 预发布：`https://sunsetrne.github.io/SunsetLinux/beta/`
+>
+> 这两个 `index.html` 是 `release.yml` 的「生成下载页」步骤写的：列出 APK / 模块 zip /
+> `index.json`，带版本、commit、构建时间与每个文件的 sha256，并给一段"安装顺序"。
+> 站点根页**只在 stable 通道生成**（否则 beta 发布会把"当前推荐版本"覆盖成 beta 的）。
+> 在它之前，`/stable/` 会被 Pages 当成 `index.json` 返回 —— 浏览器里是一坨 JSON。
+
 ```
 gh-pages 分支
   /beta/           ← beta 频道

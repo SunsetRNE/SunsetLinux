@@ -30,6 +30,12 @@
    分发产物传到 Release 资产（"Release 当纯存储"），并打印 `publish-channel` 用的 base-url。
 
 **已发布的产物**（gh-pages `stable/`）：APK、`sunsetlinux-module-1.0.3.zip`、`index.json`。
+
+**⚠️ 下载页在哪（别去点仓库的 Releases，那里永远是空的）**：本项目**刻意不用 tag**，
+产物不发 GitHub Releases，而是 Pages 上的静态目录：
+<https://sunsetrne.github.io/SunsetLinux/stable/>（预发布 `/beta/`）。
+2026-09-16 起 `release.yml` 每次发布都会生成 `index.html`（下载按钮 + 版本 + sha256 + 安装顺序），
+站点根 <https://sunsetrne.github.io/SunsetLinux/> 也有一页链到两个通道（只在 stable 生成）。
 门禁那轮实测：脚本断言 20/20（bash 与 mksh 各一遍）、proot 18/18、**proot 纯函数 65/65**、
 WebUI 64/64、版本一致性 16/16、契约通过、Android 构建 `BUILD SUCCESSFUL`、**单测 62/0**。
 
