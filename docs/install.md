@@ -97,7 +97,26 @@ sh /data/adb/modules/sunsetlinux/bin/device-provision.sh --seeds /data/sunsetlin
   **1.0.5** 还能一路跑到 `printf: bad %q`（Android 的 mksh 没有 `%q`）——升到 1.0.6 即可。
 - 这一步要跑 apt + npm，**十几分钟到半小时**；日志在 `/data/sunsetlinux/cache/provision.log`。
 
-### 方式 C：从已发布的层安装（最快）
+### 方式 C：从官方频道安装（**最快，几分钟**）
+
+App →「更新」页 → 官方频道（App 内置）：三层会直接列出来，点安装即可。
+App 自己会解 `.zst`（共 96 MB），装完点「启动环境」。
+
+> 纯 CLI（没有 App 或想手敲）：从 Release 下载 `.gz`（共 155 MB）→ `gzip -d` → `linuxctl update`：
+> ```bash
+> B=https://github.com/SunsetRNE/SunsetLinux/releases/download/layers-20260916
+> cd /data/sunsetlinux/cache
+> curl -fsSL -o base.erofs.gz    $B/base-24.04.3-l1.erofs.gz
+> curl -fsSL -o runtime.erofs.gz $B/runtime-1.0.0.erofs.gz
+> curl -fsSL -o dsh.erofs.gz     $B/dsh-0.1.5-rc.2.erofs.gz
+> gzip -d base.erofs.gz runtime.erofs.gz dsh.erofs.gz
+> /data/sunsetlinux/bin/linuxctl update base    /data/sunsetlinux/cache/base.erofs    --version 24.04.3-l1
+> /data/sunsetlinux/bin/linuxctl update runtime /data/sunsetlinux/cache/runtime.erofs --version 1.0.0
+> /data/sunsetlinux/bin/linuxctl update dsh     /data/sunsetlinux/cache/dsh.erofs     --version 0.1.5-rc.2
+> /data/sunsetlinux/bin/linuxctl start
+> ```
+
+### 方式 C′：同一件事的老写法（`linuxctl update` 逐个层）
 
 如果频道里已有构建好的层，可以直接下载安装，跳过在设备上跑 apt：
 
