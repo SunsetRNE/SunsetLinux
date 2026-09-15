@@ -1,0 +1,176 @@
+# ============================================================================
+# 频道签名与发布（`channel` 分支专用）
+#
+# ## 为什么要单独一个工作流
+#   频道清单（channel.json）有一个**硬约束**：里面的 `sha256_raw` / `size_raw`
+#   必须是**真解压**层镜像算出来的（手填/换算会让 App 解压中途失败，实测差过
+#   28672 字节）。而层镜像约 244 MB、还要 arm64 + 真 chroot —— 所以**清单只能在
+#   有层文件的那台机器上生成**，CI 生成不了。
+#
+#   于是分工是这样（各干自己擅长的）：
+#     本机   ：build-layers → publish-channel 生成 channel.json（**不需要私钥**）
+#     本工作流：拿到清单 → 用 Secret 里的私钥签名 → 验签 → 发布到 gh-pages
+#
+#   好处：**私钥只存在于 GitHub Secret 与你的离线备份里**，不需要放在天天用的机器上；
+#         而清单生成仍然留在有层文件的地方，不假装 CI 能做到它做不到的事。
+#
+# ## 这个分支放什么
+#   channel/channel.json      清单（由本机 publish-channel 产出后提交上来）
+#   channel/channel.pub       频道公钥（**不是秘密**，用户拿它核对指纹）
+#   channel/README.md         说明
+#   （channel.json.sig 由本工作流生成并提交回来，不要手工放）
+#
+#   工具不放在这个分支上：本工作流会另外检出 `main` 到 `.src/`，用那里的
+#   `tools/channel/{sign,verify}.mjs` —— 避免"工具在这个分支上有一份副本"这种漂移。
+#   所以本分支可以是个 **orphan 分支**（只放频道数据，不含产品代码）。
+#
+# ## 私钥怎么进 Secret（绝不提交）
+#   本机生成一次：
+#     tools/channel/sunsetlinux-channel keygen --out-dir ~/.sunsetlinux-keys
+#   然后二选一：
+#     网页：仓库 Settings → Secrets and variables → Actions → New repository secret
+#           名字 CHANNEL_SIGNING_KEY，值 = channel.key 的**全部内容**（含 BEGIN/END 行）
+#     命令行：gh secret set CHANNEL_SIGNING_KEY < ~/.sunsetlinux-keys/channel.key
+#   ⚠️ 私钥要另存离线备份（丢了就再也签不出"同一个频道"，用户会收到"签名者变了"）；
+#      GitHub Secret 只写不读，网页上再也看不到内容，只能覆盖。
+#
+# ## 安全边界（要清楚）
+#   把私钥放进 CI，等于**任何能改本仓库工作流的人都能签频道**。若这个仓库将来
+#   多人协作，请给 main / channel 分支开分支保护，并限制 Actions 的权限。
+#   只要私钥没泄漏，篡改与冒签都会被 App/CLI 拒绝（验签是信任根）。
+# ============================================================================
+name: 频道签名
+
+on:
+  push:
+    branches: [channel]
+    paths:
+      # 只有**清单本身**变化才触发；本工作流提交回来的 .sig 不会再触发（避免自激循环）
+      - 'channel/channel.json'
+  workflow_dispatch:
+
+# ★ 与 release.yml **共用同一个并发组**：两者都会写 gh-pages。
+#   否则两个运行可能同时在 checkout→写→force push，后到者会覆盖先到者的目录。
+concurrency:
+  group: gh-pages
+  cancel-in-progress: false
+
+permissions:
+  contents: write            # 提交 .sig 回分支 + 推 gh-pages
+
+jobs:
+  sign:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出频道数据（channel 分支）
+        uses: actions/checkout@v4
+
+      - name: 检出工具（main 分支 → .src/）
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          path: .src
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: 前置检查（清单 / 公钥 / Secret）
+        run: |
+          set -euo pipefail
+          [ -f channel/channel.json ] || { echo "::error::缺少 channel/channel.json（先在本机跑 publish-channel 再把清单提交上来）"; exit 1; }
+          [ -f channel/channel.pub ]  || { echo "::error::缺少 channel/channel.pub（把你的公钥提交到这个分支，它不是秘密）"; exit 1; }
+          if [ -z "${{ secrets.CHANNEL_SIGNING_KEY }}" ]; then
+            echo "::error::仓库 Secret CHANNEL_SIGNING_KEY 未配置。绝不跳过签名发布 —— 配置方法见 .github/workflows/channel.yml 顶部注释与 docs/release-ci.md §5.2"
+            exit 1
+          fi
+
+      - name: 清单里的层 URL 必须已经可下载（防止"清单先发了、层还没传"）
+        if: ${{ vars.CHANNEL_SKIP_URL_CHECK != '1' }}
+        run: |
+          set -euo pipefail
+          node -e '
+            const fs=require("node:fs");
+            const j=JSON.parse(fs.readFileSync("channel/channel.json","utf8"));
+            const urls=[];
+            for(const l of j.layers||[]) for(const u of [l.url,l.url_gz]) if(u) urls.push(u);
+            console.log(urls.join("\n"));
+          ' > /tmp/urls.txt
+          fail=0
+          while IFS= read -r u; do
+            [ -n "$u" ] || continue
+            case "$u" in
+              http://*|https://*) ;;
+              *) echo "  [跳过] 相对 URL：$u"; continue ;;
+            esac
+            # 用 Range 请求只取 1 字节：比 HEAD 更可靠（有些 CDN 不支持 HEAD）
+            code="$(curl -s -o /dev/null -w '%{http_code}' -r 0-0 --max-time 30 "$u" || echo 000)"
+            case "$code" in
+              200|206) echo "  [可下载] $code  $u" ;;
+              *)       echo "  [不可用] $code  $u"; fail=1 ;;
+            esac
+          done < /tmp/urls.txt
+          [ "$fail" -eq 0 ] || {
+            echo "::error::清单里有层文件现在下载不到。先把层上传到清单里的地址再重跑；确认要绕过可设仓库变量 CHANNEL_SKIP_URL_CHECK=1";
+            exit 1;
+          }
+
+      - name: 写私钥（仅本次运行可见，权限 0600）
+        run: |
+          set -euo pipefail
+          umask 077
+          printf '%s\n' "${{ secrets.CHANNEL_SIGNING_KEY }}" > "$RUNNER_TEMP/channel.key"
+          chmod 600 "$RUNNER_TEMP/channel.key"
+
+      - name: 签名 channel.json（签的是原始字节，不做任何格式化）
+        run: node .src/tools/channel/sign.mjs --key "$RUNNER_TEMP/channel.key" --in channel/channel.json
+
+      - name: 用公钥独立验签（拿另一条代码路径验证）
+        run: node .src/tools/channel/verify.mjs --pub channel/channel.pub --in channel/channel.json --no-layers
+
+      - name: 清掉私钥（无论成败）
+        if: always()
+        run: rm -f "$RUNNER_TEMP/channel.key"
+
+      - name: 提交签名回 channel 分支
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add channel/channel.json.sig
+          if git diff --cached --quiet; then
+            echo "签名没有变化（清单未改动），跳过提交"
+          else
+            git commit -m "channel: 重新签名（$(date -u +%Y-%m-%dT%H:%M:%SZ)）"
+            git push
+          fi
+
+      - name: 发布到 gh-pages 的 /channel/
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./channel
+          destination_dir: channel
+          keep_files: true          # ★ 不要抹掉 /beta/ 与 /stable/
+
+      - name: 输出给用户的信息
+        run: |
+          set -euo pipefail
+          PUB="$(tr -d '\n' < channel/channel.pub)"
+          FP="$(node --input-type=module -e '
+            import fs from "node:fs";
+            import { loadPublicKey, publicKeyFingerprint } from "./.src/tools/channel/common.mjs";
+            const raw = fs.readFileSync("channel/channel.pub", "utf8").trim();
+            console.log(publicKeyFingerprint(loadPublicKey(raw)));
+          ')"
+          OWNER_LC="$(printf '%s' "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
+          REPO_NAME="${GITHUB_REPOSITORY#*/}"
+          {
+            echo "### 频道已签名并发布"
+            echo ""
+            echo "- 清单 URL：\`https://$OWNER_LC.github.io/$REPO_NAME/channel/channel.json\`"
+            echo "- 公钥：\`$PUB\`"
+            echo "- 指纹：\`$FP\`"
+            echo ""
+            echo "把这三样发给用户（**URL + 公钥 + 指纹**），让用户核对指纹后再订阅。"
+          } >> "$GITHUB_STEP_SUMMARY"
