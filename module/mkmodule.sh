@@ -163,7 +163,9 @@ install -m 0644 "$SELF_DIR/webroot/index.html" "$STAGE/webroot/index.html"
 # ---- 夹具：让 selftest.sh 在真机上也能真跑（否则只能 SKIP 掉全部断言） --------
 mkdir -p "$STAGE/bin/fixtures"
 for f in "${BIN_FIXTURES[@]}"; do
-    src="$REPO_DIR/build/fixtures/$f"
+    # 优先仓库内可跟踪的 testdata/fixtures（build/ 是 gitignore 的，CI 上没有）
+    src="$REPO_DIR/testdata/fixtures/$f"
+    [ -f "$src" ] || src="$REPO_DIR/build/fixtures/$f"
     if [ -f "$src" ]; then
         install -m 0644 "$src" "$STAGE/bin/fixtures/$f"
     else

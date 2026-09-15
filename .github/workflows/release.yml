@@ -59,6 +59,13 @@ jobs:
           java-version: '17'
 
       - uses: android-actions/setup-android@v4
+        with:
+          # ★ 不要用它的默认值（`tools platform-tools`）：`tools` 包**已经从 Google 的
+          #   SDK 仓库移除**，sdkmanager 会报 "Failed to find package 'tools'" 并以 1 退出
+          #   —— 实测就是这样把 CI 卡死的（动作本身没坏，是默认包列表过时了）。
+          #   只装确实需要的：platform-tools + 我们的 compileSdk(35) 平台。
+          #   build-tools 交给 AGP 按需下载（licenses 已由本动作接受）。
+          packages: 'platform-tools platforms;android-35'
 
       - name: 关掉 Gradle 守护进程
         run: echo "org.gradle.daemon=false" >> app/gradle.properties

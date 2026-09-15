@@ -11,7 +11,10 @@ name: 回归门禁
 
 on:
   push:
-    branches: ['**']
+    # ★ main / beta **不在这里触发**：它们交给 release.yml（发布工作流会 workflow_call 本门禁）。
+    #   否则同一次推送会跑两遍 CI，而且两个实例落进同一个 concurrency 组，互相取消 ——
+    #   实测把「发布」的门禁误杀过（发布直接失败，看起来像代码有问题）。
+    branches-ignore: [main, beta]
   pull_request:
   workflow_dispatch:
   # 允许发布工作流复用本门禁（release.yml 里 `uses: ./.github/workflows/ci.yml`）
@@ -21,7 +24,10 @@ on:
 # 同一分支的旧运行自动取消，省 runner
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  # ⚠️ 必须是 false：本门禁会被 release.yml 通过 workflow_call 复用，而"取消进行中的运行"
+  #    分不清"这是新推送的独立跑"还是"发布流程正在等的门禁" —— 实测出现过
+  #    发布 run 的门禁被同分支的新推送取消。宁可排队，也不要误杀发布门禁。
+  cancel-in-progress: false
 
 jobs:
   regression:
@@ -77,6 +83,13 @@ jobs:
           java-version: '17'
 
       - uses: android-actions/setup-android@v4
+        with:
+          # ★ 不要用它的默认值（`tools platform-tools`）：`tools` 包**已经从 Google 的
+          #   SDK 仓库移除**，sdkmanager 会报 "Failed to find package 'tools'" 并以 1 退出
+          #   —— 实测就是这样把 CI 卡死的（动作本身没坏，是默认包列表过时了）。
+          #   只装确实需要的：platform-tools + 我们的 compileSdk(35) 平台。
+          #   build-tools 交给 AGP 按需下载（licenses 已由本动作接受）。
+          packages: 'platform-tools platforms;android-35'
 
       - name: 关掉 Gradle 守护进程（CI 上没必要常驻）
         run: echo "org.gradle.daemon=false" >> app/gradle.properties

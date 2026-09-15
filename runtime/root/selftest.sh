@@ -19,7 +19,11 @@ SELF_DIR="$(cd -- "$(dirname -- "$SELF_PATH")" && pwd -P)"
 REPO_DIR="$(cd "$SELF_DIR/../.." 2>/dev/null && pwd || printf '%s' "$SELF_DIR")"
 # 夹具查找顺序：显式指定 → 脚本同目录/fixtures（**模块安装后自带，真机可用**）→ 仓库 build/fixtures
 FIXTURES=""
-for cand in "${SUNSETLINUX_FIXTURES:-}" "$SELF_DIR/fixtures" "$REPO_DIR/build/fixtures" "$SELF_DIR/../build/fixtures"; do
+# 顺序：显式指定 → 脚本同目录（模块安装后自带 bin/fixtures/）→
+#       **仓库内可跟踪的 testdata/fixtures**（CI 靠这条；build/ 是 gitignore 的）→ 本地 build/
+for cand in "${SUNSETLINUX_FIXTURES:-}" "$SELF_DIR/fixtures" \
+            "$REPO_DIR/testdata/fixtures" "$SELF_DIR/../testdata/fixtures" \
+            "$REPO_DIR/build/fixtures" "$SELF_DIR/../build/fixtures"; do
     [ -n "$cand" ] && [ -d "$cand" ] && { FIXTURES="$cand"; break; }
 done
 TMP="$(mktemp -d)"
@@ -47,8 +51,9 @@ extract_fmt() { # extract_fmt <脚本路径> <输出文件>
 head_ "夹具检查"
 if [ -z "$FIXTURES" ]; then
     printf '  \033[33mSKIP\033[0m 未找到夹具目录，跳过全部断言（不是失败）\n'
-    printf '       查找顺序：$SUNSETLINUX_FIXTURES → %s/fixtures → %s/build/fixtures\n' "$SELF_DIR" "$REPO_DIR"
-    printf '       模块安装后自带 bin/fixtures/；仓库里在 build/fixtures/。\n'
+    printf '       查找顺序：$SUNSETLINUX_FIXTURES → %s/fixtures → %s/testdata/fixtures → %s/build/fixtures\n' \
+        "$SELF_DIR" "$REPO_DIR" "$REPO_DIR"
+    printf '       模块安装后自带 bin/fixtures/；仓库里在 testdata/fixtures/（可用 testdata/fixtures/mkfixtures.sh 重新生成）。\n'
     exit 0
 fi
 for f in erofs-head.bin squashfs-head.bin zstd-head.bin; do
