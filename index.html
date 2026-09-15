@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SunsetLinux · 下载</title><style>
+:root{color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;background:#0A0A0A;color:#F5F5F5;
+  font:-apple-system,BlinkMacSystemFont,"Noto Sans CJK SC","PingFang SC",sans-serif;
+  line-height:1.6;-webkit-text-size-adjust:100%}
+main{max-width:720px;margin:0 auto;padding:28px 20px 64px}
+h1{font-size:26px;margin:0 0 4px;letter-spacing:.5px}
+h2{font-size:15px;margin:28px 0 10px;color:#A3A3A3;font-weight:600}
+.sub{color:#A3A3A3;font-size:13px;margin:0 0 22px}
+.sub code{color:#F5F5F5}
+a{color:#F5F5F5}
+.btn{display:block;padding:15px 18px;margin:10px 0;border:1px solid #3D3D3D;border-radius:16px;
+  background:#141414;text-decoration:none;font-size:16px}
+.btn.primary{background:#F5F5F5;color:#000;border-color:#F5F5F5;font-weight:600}
+.btn small{display:block;font-weight:400;font-size:12px;opacity:.7;margin-top:3px}
+.btn.ghost{background:transparent;font-size:14px;padding:11px 18px}
+ol{padding-left:22px;margin:0}
+li{margin:6px 0}
+table{width:100%;border-collapse:collapse;font-size:12px;font-family:ui-monospace,Menlo,monospace}
+th,td{text-align:left;padding:7px 6px;border-bottom:1px solid #2A2A2A;word-break:break-all}
+th{color:#6E6E6E;font-weight:500}
+.note{color:#6E6E6E;font-size:12px;margin-top:18px}
+.tag{display:inline-block;border:1px solid #3D3D3D;border-radius:999px;padding:2px 10px;font-size:12px;color:#A3A3A3}
+</style></head><body><main>
+<h1>SunsetLinux</h1>
+<p class="sub">Android 上的原生 DSH 运行环境</p>
+<a class="btn primary" href="stable/">正式版（stable）<small>模块 1.0.3 · 当前推荐</small></a>
+<a class="btn" href="beta/">预发布版（beta）<small>下一版候选，可能不稳定</small></a>
+<h2>这是什么</h2>
+<ol><li>Android 上的真 chroot + overlayfs Ubuntu 24.04 环境，跑原生 DSH。</li><li>装 App + KernelSU 模块，即可在手机上得到完整的 DSH 运行环境。</li><li>层镜像可增量更新；环境与 App 生命周期解耦（App 被杀不影响）。</li></ol>
+<p class="note">层镜像（base / runtime / dsh）不在这个页面 —— 它们走频道分发：App 的「内置官方频道」，或终端里 <code>linuxctl update</code>。</p>
+<p class="note"><a href="https://github.com/SunsetRNE/SunsetLinux">仓库</a> · 本页由 CI 生成（每次发布重写），别手工改 gh-pages。</p>
+</main></body></html>
