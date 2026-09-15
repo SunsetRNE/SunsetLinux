@@ -115,13 +115,39 @@ jobs:
           # 可选产物（有就发，没有不算发布失败）：
           #   · proot 运行时 bundle（~1 MiB）—— **非 root 模式没有它就根本起不来**，
           #     而 App 至今没随包带它、也没有下载路径（doctor 里那句"App 应随包携带"一直是空的）。
-          #     放这里至少让用户/App 有一个稳定 URL 可取。
           #   · 离线种子（~59 MiB）—— 只有构建过才有；proot 模式的 provision 需要它。
-          for pat in 'dist/proot-bundle-*.tar.gz' 'dist/proot-bundle-*.tar.gz.sha256' \
-                     'dist/sunsetlinux-seed-*.tar.zst' 'dist/sunsetlinux-seed-*.tar.zst.sha256'; do
+          #
+          # ⚠️ **CI 目前不会产出这两样**（dist/ 是 gitignore 的，runner 上只有源码）——
+          #    所以这一步只在"本地构建过、且把 dist/ 一起带上来"时才有东西可发。
+          #    没有就**明确说出来**，别让它悄悄什么都不做（本项目的规矩：不制造文档/实现漂移）。
+          #    要让它真正产出，下一步：CI 里从 Debian 的 proot arm64 deb 重建 bundle
+          #    （命令已验证可复现：curl deb → dpkg-deb -x → mkproot-bundle.sh --arch arm64；
+          #     跨架构 runner 上需要跳过"运行 --version"那步自检）。
+          found_bundle=0
+          found_seed=0
+          for pat in 'dist/proot-bundle-*.tar.gz' 'dist/proot-bundle-*.tar.gz.sha256'; do
             # shellcheck disable=SC2086
-            if ls $pat >/dev/null 2>&1; then cp -v $pat "$OUT"/; fi
+            if ls $pat >/dev/null 2>&1; then cp -v $pat "$OUT"/; found_bundle=1; fi
           done
+          for pat in 'dist/sunsetlinux-seed-*.tar.zst' 'dist/sunsetlinux-seed-*.tar.zst.sha256'; do
+            # shellcheck disable=SC2086
+            if ls $pat >/dev/null 2>&1; then cp -v $pat "$OUT"/; found_seed=1; fi
+          done
+          {
+            echo "### 可选产物"
+            echo ""
+            if [ "$found_bundle" -eq 1 ]; then
+              echo "- ✅ proot 运行时 bundle：已随本次发布"
+            else
+              echo "- ⚠️ **本次没有 proot 运行时 bundle**（CI 还不产出它）：非 root 模式的用户拿不到运行时。"
+              echo "  重建命令见 \`docs/STATUS.md\` §3.11 / \`runtime/proot/README.md\` §2.2"
+            fi
+            if [ "$found_seed" -eq 1 ]; then
+              echo "- ✅ 离线种子：已随本次发布"
+            else
+              echo "- ⚠️ 本次没有离线种子（它只在本地构建过 \`tools/seed\` 时存在）"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
 
           python3 - <<'PY'
           import json, hashlib, os, glob, datetime, subprocess
