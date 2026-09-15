@@ -279,12 +279,20 @@ build_proot_args() {
     for spec in $SUNSETLINUX_EXTRA_BINDS; do add_bind "$spec" 0; done
   fi
 
-  # 可选：npm 在 FUSE/不支持硬链接的文件系统上需要 link2symlink 兜底
+  # 可选：npm 在 FUSE/不支持硬链接的文件系统上需要 link2symlink 兜底。
+  # ⚠️ **只有 proot ≥ 5.3 才有这个开关**（随包 bundle 现为 5.4.0）。喂给老 proot（如系统里的
+  #    5.1.0）它会 `unknown option '--link2symlink'` + fatal error，**整个 start 直接起不来**。
+  #    所以先问一次 --help：不支持就跳过并提醒，而不是把 start 拖崩。
   local l2s=""
   l2s=$(json_get_bool "$ETC_DIR/config.json" link2symlink)
   if [[ "$l2s" == "true" || "${SUNSETLINUX_LINK2SYMLINK:-0}" == "1" ]]; then
-    PROOT_ARGS+=(--link2symlink)
-    log "已启用 --link2symlink（npm/硬链接兜底；会让 hard link 表现为 symlink）"
+    if "${PROOT_CMD[@]}" --help 2>&1 | grep -q -- '--link2symlink'; then
+      PROOT_ARGS+=(--link2symlink)
+      log "已启用 --link2symlink（npm/硬链接兜底；会让 hard link 表现为 symlink）"
+    else
+      warn "请求了 --link2symlink，但当前 proot 不支持它（<5.3）—— 已跳过。"
+      warn "  升级随包 bundle（dist/proot-bundle-arm64.tar.gz，含 proot 5.4.0）后即可启用。"
+    fi
   fi
 
   if [[ "$FAKE_ROOT" == "1" ]]; then

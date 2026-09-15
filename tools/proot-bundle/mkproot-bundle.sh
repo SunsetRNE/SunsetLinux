@@ -409,11 +409,17 @@ verify_bundle() {
   [[ -x "$tmp/proot-launch.sh" ]] || chmod 0755 "$tmp/proot-launch.sh" 2>/dev/null || true
   out=$("$tmp/proot-launch.sh" --version 2>&1) || rc=$?
   v=$(printf '%s' "$out" | tr '\n' ' ' | sed -n 's/.*\([0-9]\+\.[0-9]\+\.[0-9]\+\).*/\1/p' | head -1 || true)
-  if (( rc != 0 )) || [[ -z "$v" ]]; then
-    err_ "解包后的 proot 无法运行 --version（退出码 $rc）："
+  # ⚠️ 判据不能是"版本号能不能解析出来"：Debian 的 proot 5.4.0 构建时没塞版本号，
+  #    `--version` 的 banner 末尾直接打印 `-`（实测），而它完全可用。
+  #    真正要证的是"解包后 proot 能用自带 loader 跑起来，且它确实是 proot"：
+  #      ① 退出码 0；② 输出非空；③ `--help` 里能列出 --rootfs。
+  hout=$("$tmp/proot-launch.sh" --help 2>&1 || true)
+  if (( rc != 0 )) || [[ -z "$out" ]] || ! printf '%s' "$hout" | grep -q -- '--rootfs'; then
+    err_ "解包后的 proot 跑不起来（退出码 $rc；--help 里没有 --rootfs）："
     printf '%s\n' "$out" | head -5 >&2
     rm -rf -- "$tmp"; return 1
   fi
+  [[ -n "$v" ]] || v="${S_PROOT_VER:-unknown}"
   log "自检通过：proot $v（自带 loader 加载成功）"
   printf 'VERIFY_OK version=%s\n' "$v"
   rm -rf -- "$tmp"

@@ -391,3 +391,23 @@ su -c '/data/sunsetlinux/bin/linuxctl doctor'
 
 > ✔ 已完成（原第 2 项）：**proot 模式的宿主侧脚本 mksh 化**，见 §4.4。
 
+
+### 3.11 ★ proot「能力缺失」审计：哪些是固有限制、哪些能补（2026-09-16 第五批）
+
+用户："解决后续的 proot 能力部分支持缺失问题（感觉这个坎绕不过去了）"。
+先把差距按**能不能补**分清（完整表见 `runtime/proot/README.md` §2.2），再动手补能补的：
+
+**固有（没有 root 就是没有，别当待办）**：无 mount、无命名空间隔离、无分层（overlay/squashfs）、
+环境根只能在 App 私有目录、sdcard 走 FUSE、生命周期随 App、没有真 capabilities。
+
+**能补的三项（本轮补了两项）**：
+
+| 项 | 之前 | 现在 |
+|---|---|---|
+| 随包 proot 版本 | **5.1.0（2014 年）**，选项只有 14 个 | **5.4.0**（`--link2symlink`、`--kill-on-exit`、`--port`、`--netcoop`、`--mixed-mode` + 十年 ptrace 修复）。bundle 重建：988,717 字节（0.94 MiB），`sha256 3d72e0c3…`，GPLv2 全文 + Debian copyright + SOURCE 齐全，`--verify` 通过 |
+| `--link2symlink` 开关 | 一开配置就 `proot error: unknown option` + fatal —— **整个 start 起不来**（实测 5.1.0） | `start.sh` 先问一次 `--help` 再决定加不加；不支持则跳过 + 提醒（用真实 5.1.0/5.4.0 两个二进制验过两条分支） |
+| proot 运行时 / rootfs 的分发 | **App 没有 `assets/`**，doctor 里"App 应随包携带"一直是空话 → 非 root 用户开箱即用不了 | 发布页现在带 `proot-bundle-arm64.tar.gz`（~1 MiB）与离线种子（~59 MiB），至少有了稳定 URL；**建议下一步塞进 APK assets**（1 MiB 成本） |
+
+顺带修了 `mkproot-bundle.sh` 的自检判据：它原来要求 `--version` 能解析出 `x.y.z`，
+而 Debian 的 5.4.0 构建时没塞版本号、banner 末尾打印的是 `-`——于是**完全可用的 bundle 被判失败**。
+现在判据是"退出码 0 + 输出非空 + `--help` 里有 `--rootfs`"（比版本号更接近"它真的能当 proot 用"）。

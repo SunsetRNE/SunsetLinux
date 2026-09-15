@@ -135,6 +135,27 @@ proot 没有 squashfs 分层，所以字段是**逻辑映射**（键不可省略
 容量测量只在 `provision / update / restore / reset / snapshot(status --refresh-sizes)` 时做一次，
 结果缓存在 `etc/state.json`，`status` 直接读缓存 —— 否则 App 每次轮询状态都要 `du` 一整棵 rootfs。
 
+### 2.2 哪些"能力缺失"其实能补（2026-09-16 审计）
+
+把 §2 的差距按**能不能补**重新分一遍 —— 固有限制别当待办，能补的别当"用户运气不好"：
+
+| 差距 | 性质 | 处置 |
+|---|---|---|
+| 无 mount / 无命名空间隔离 | **固有**（没有 CAP_SYS_ADMIN） | 用 `-b` bind 覆盖常见需求（`/dev` `/proc` `/sys` `/sdcard` …，见 `start.sh`） |
+| 无分层（overlay / squashfs） | **固有** | `update` 走"解包到 staging 再原子换目录" |
+| 环境根只能在 App 私有目录 | **固有**（改路径就得有 root） | `snapshot`/`restore` 让数据可搬迁；文档明示卸载即毁 |
+| sdcard 走 FUSE 慢 | **固有** | — |
+| 生命周期随 App（无开机自启） | **固有** | foreground service + 省电豁免，尽量降低被杀概率 |
+| 不能 chown / mknod / 装包 | 大部分固有 | 装包用显式 `--fake-root`（`-0`），并明确告知这是**伪造 root** |
+| **随包 proot 太旧（5.1.0 / 2014）** | ✅ **可补，已补** | bundle 升级到 **proot 5.4.0**：新增 `--link2symlink`、`--kill-on-exit`、`--port`、`--netcoop`、`--mixed-mode`，外加十年的 ptrace 翻译修复。（`--sysvipc` 连 5.4.0 都没有，别写进文档） |
+| **`--link2symlink` 在老 proot 上直接崩** | ✅ **可补，已补** | 实测 5.1.0 遇到它会 `unknown option '--link2symlink'` + fatal（一开配置就起不来）。`start.sh` 现在先问一次 `--help` 再决定加不加，不支持就跳过 + 提醒 |
+| **proot 运行时没有分发路径** | ⚠️ **只补了一半** | `app/app/src/main/assets/` **不存在** —— doctor 里那句"App 应随包携带"一直是空的，所以**非 root 用户开箱即用不了 proot 模式**。现在发布页会带上 `proot-bundle-arm64.tar.gz`（~1 MiB，稳定 URL）；**建议**下一步直接塞进 APK assets，provision 时解到 `$LINUX_HOME/proot/`（1 MiB 成本极低） |
+| **proot 模式的 rootfs 来源** | ⚠️ **未定** | `provision` 需要离线种子（~59 MiB）；发布页也会带上它。要"开箱即用"就得二选一：APK 内置种子，或走频道下发层（与 §4 的分发选型是同一件事） |
+
+> **结论**：真正绕不过去的只有"没有 root ⇒ 没有 mount / 命名空间 / 分层"这一条；
+> 其余（proot 版本、开关支持、运行时与 rootfs 的分发）都是能补的工程问题 —— 本文已补掉前两项，
+> 后两项卡在"分发选型"，见 `docs/STATUS.md` §七。
+
 ---
 
 ## 3. 相对 DSHA 的改进（逐条对应 findings §3）

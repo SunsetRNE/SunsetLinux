@@ -112,6 +112,17 @@ jobs:
           cp -v dist/*module*.zip "$OUT"/
           cp -v dist/*module*.zip.sha256 "$OUT"/ 2>/dev/null || true
 
+          # 可选产物（有就发，没有不算发布失败）：
+          #   · proot 运行时 bundle（~1 MiB）—— **非 root 模式没有它就根本起不来**，
+          #     而 App 至今没随包带它、也没有下载路径（doctor 里那句"App 应随包携带"一直是空的）。
+          #     放这里至少让用户/App 有一个稳定 URL 可取。
+          #   · 离线种子（~59 MiB）—— 只有构建过才有；proot 模式的 provision 需要它。
+          for pat in 'dist/proot-bundle-*.tar.gz' 'dist/proot-bundle-*.tar.gz.sha256' \
+                     'dist/sunsetlinux-seed-*.tar.zst' 'dist/sunsetlinux-seed-*.tar.zst.sha256'; do
+            # shellcheck disable=SC2086
+            if ls $pat >/dev/null 2>&1; then cp -v $pat "$OUT"/; fi
+          done
+
           python3 - <<'PY'
           import json, hashlib, os, glob, datetime, subprocess
           out="dist/_publish"
@@ -213,6 +224,15 @@ jobs:
           if modzip:
               dl.append(f'<a class="btn" href="{html.escape(modzip["name"])}">下载 KernelSU 模块'
                         f'<small>{human(modzip["size"])} · 用 KernelSU 管理器安装，然后重启一次</small></a>')
+          # 可选产物（没有就不显示）
+          prootb = next((f for f in files if f["name"].startswith("proot-bundle")), None)
+          seed = next((f for f in files if f["name"].startswith("sunsetlinux-seed")), None)
+          if prootb:
+              dl.append(f'<a class="btn" href="{html.escape(prootb["name"])}">下载 proot 运行时（非 root 模式用）'
+                        f'<small>{human(prootb["size"])} · 解包到环境根的 proot/；没它 proot 模式起不来</small></a>')
+          if seed:
+              dl.append(f'<a class="btn" href="{html.escape(seed["name"])}">下载离线种子'
+                        f'<small>{human(seed["size"])} · 解到 /data/sunsetlinux/seeds（别放子目录）</small></a>')
           dl.append('<a class="btn ghost" href="index.json">index.json（给脚本/机器读）</a>')
 
           steps = ("<ol><li>装上面的 APK（App）。</li>"
