@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SunsetLinux · 下载（beta）</title><style>
+:root{color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;background:#0A0A0A;color:#F5F5F5;
+  font:-apple-system,BlinkMacSystemFont,"Noto Sans CJK SC","PingFang SC",sans-serif;
+  line-height:1.6;-webkit-text-size-adjust:100%}
+main{max-width:720px;margin:0 auto;padding:28px 20px 64px}
+h1{font-size:26px;margin:0 0 4px;letter-spacing:.5px}
+h2{font-size:15px;margin:28px 0 10px;color:#A3A3A3;font-weight:600}
+.sub{color:#A3A3A3;font-size:13px;margin:0 0 22px}
+.sub code{color:#F5F5F5}
+a{color:#F5F5F5}
+.btn{display:block;padding:15px 18px;margin:10px 0;border:1px solid #3D3D3D;border-radius:16px;
+  background:#141414;text-decoration:none;font-size:16px}
+.btn.primary{background:#F5F5F5;color:#000;border-color:#F5F5F5;font-weight:600}
+.btn small{display:block;font-weight:400;font-size:12px;opacity:.7;margin-top:3px}
+.btn.ghost{background:transparent;font-size:14px;padding:11px 18px}
+ol{padding-left:22px;margin:0}
+li{margin:6px 0}
+table{width:100%;border-collapse:collapse;font-size:12px;font-family:ui-monospace,Menlo,monospace}
+th,td{text-align:left;padding:7px 6px;border-bottom:1px solid #2A2A2A;word-break:break-all}
+th{color:#6E6E6E;font-weight:500}
+.note{color:#6E6E6E;font-size:12px;margin-top:18px}
+.tag{display:inline-block;border:1px solid #3D3D3D;border-radius:999px;padding:2px 10px;font-size:12px;color:#A3A3A3}
+</style></head><body><main>
+<h1>SunsetLinux</h1>
+<p class="sub"><span class="tag">预发布（beta）</span> 模块 <code>1.0.3</code> · commit <code>890d54a</code> · 构建于 2026-09-15T20:25:45Z · run #36</p>
+<h2>下载</h2>
+<a class="btn primary" href="sunsetlinux-launcher-debug.apk">下载 App（APK）<small>12.1 MiB · 覆盖安装即可，数据不丢</small></a>
+<a class="btn" href="sunsetlinux-module-1.0.3.zip">下载 KernelSU 模块<small>165.1 KiB · 用 KernelSU 管理器安装，然后重启一次</small></a>
+<a class="btn ghost" href="index.json">index.json（给脚本/机器读）</a>
+<h2>安装顺序</h2>
+<ol><li>装上面的 APK（App）。</li><li>在 KernelSU 管理器里装模块 zip，然后<b>重启一次</b>（让模块把脚本铺到 /data/sunsetlinux）。</li><li>打开 App → 部署向导；或 root 终端里跑 <code>sh /data/adb/modules/sunsetlinux/bin/oneshot-setup.sh --run</code>。</li><li>终端里 <code>linuxctl doctor</code> 可一键自检。</li></ol>
+<h2>文件与校验</h2>
+<table><tr><th>文件</th><th>大小</th><th>sha256</th></tr><tr><td>sunsetlinux-launcher-debug.apk</td><td>12.1 MiB</td><td>65276e334e5e719dd868679f66cf971d469dea64cc69f2f6db024ff50d24dbfb</td></tr><tr><td>sunsetlinux-module-1.0.3.zip</td><td>165.1 KiB</td><td>3f38adea09ad1e34c3071b92febbc697023660d4268dadfeab7b684508f079f6</td></tr><tr><td>sunsetlinux-module-1.0.3.zip.sha256</td><td>142 B</td><td>f4d18f39f410bb570583a8fa4284514eaca57b9a5ef52b63e17d79c93172110d</td></tr></table>
+<p class="note">另一个通道：<a href="../stable/">stable</a></p>
+<p class="note">层镜像（base / runtime / dsh）不在这个页面 —— 它们走频道分发：App 的「内置官方频道」，或终端里 <code>linuxctl update</code>。</p>
+<p class="note"><a href="https://github.com/SunsetRNE/SunsetLinux">仓库</a> · 本页由 CI 生成（每次发布重写），别手工改 gh-pages。</p>
+</main></body></html>

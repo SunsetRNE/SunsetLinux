@@ -1,9 +1,9 @@
 {
   "schema": 1,
   "channel": "beta",
-  "built_at": "2026-09-15T20:18:50Z",
-  "commit": "8a88dddccb19c80b0b9ed5451c6909d9701d6d3c",
-  "run_number": 34,
+  "built_at": "2026-09-15T20:25:45Z",
+  "commit": "890d54a7079176dbaad74c12f8382f1151afb33e",
+  "run_number": 36,
   "module_version": "1.0.3",
   "files": [
     {
@@ -14,12 +14,12 @@
     {
       "name": "sunsetlinux-module-1.0.3.zip",
       "size": 169060,
-      "sha256": "d8fe018102e852a9b29256de461a8395e1f98eb492f10ae5ab69d51b510997b1"
+      "sha256": "3f38adea09ad1e34c3071b92febbc697023660d4268dadfeab7b684508f079f6"
     },
     {
       "name": "sunsetlinux-module-1.0.3.zip.sha256",
       "size": 142,
-      "sha256": "76b0a80767b3c3ab7fc453edf0dde1c70d4df70aa17e125494f7330a4bb4f73f"
+      "sha256": "f4d18f39f410bb570583a8fa4284514eaca57b9a5ef52b63e17d79c93172110d"
     }
   ]
 }
