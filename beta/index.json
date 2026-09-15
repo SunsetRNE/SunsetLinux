@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "channel": "beta",
+  "built_at": "2026-09-15T18:23:24Z",
+  "commit": "5924336e7613f382d2effe1ea3c5aeafdc4cec21",
+  "run_number": 20,
+  "module_version": "1.0.0",
+  "files": [
+    {
+      "name": "sunsetlinux-launcher-debug.apk",
+      "size": 12651852,
+      "sha256": "15c104c3990d5c797905b5ec709255d12ab618386adcaf78594e5e42f7d4d356"
+    },
+    {
+      "name": "sunsetlinux-module-1.0.0.zip",
+      "size": 160659,
+      "sha256": "6d860db486a7316fa0bee8f0a84d43e37c496a2a7564b991551ba040f18ff42d"
+    },
+    {
+      "name": "sunsetlinux-module-1.0.0.zip.sha256",
+      "size": 142,
+      "sha256": "8eb0561035c9f4b8540bdfda8bddd493a335eb5e823f19ca4997330158b05d5a"
+    }
+  ]
+}
