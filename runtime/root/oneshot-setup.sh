@@ -44,10 +44,27 @@ c_info() { printf '    %s\n' "$*"; }
 head_()  { printf '\n== %s ==\n' "$*"; }
 
 BAD=0      # 阻断项（不修就没法继续）
-WARN=0     # 非阻断项bad()  { BAD=$((BAD + 1)); c_bad "$*"; }
+WARN=0     # 非阻断项（提醒）
+bad()  { BAD=$((BAD + 1)); c_bad "$*"; }
 warn() { WARN=$((WARN + 1)); c_warn "$*"; }
 
 have() { command -v "$1" >/dev/null 2>&1; }
+
+# 找一个能跑的 bash：device-provision.sh 内部要求 bash（Android 自带只有 mksh）。
+# 顺序：显式指定 → PATH 里 → Android 自带位置 → Termux（用户常常就站在 Termux 里）。
+find_bash() {
+  for c in "${SUNSETLINUX_BASH:-}" \
+           "$(command -v bash 2>/dev/null || true)" \
+           /system/bin/bash /system/xbin/bash /vendor/bin/bash \
+           /data/data/com.termux/files/usr/bin/bash \
+           /data/local/tmp/bash; do
+    [ -n "$c" ] || continue
+    [ -x "$c" ] || continue
+    printf '%s' "$c"
+    return 0
+  done
+  return 1
+}
 
 usage() {
   sed -n '2,30p' "$0" 2>/dev/null | sed 's/^# \{0,1\}//'
@@ -178,6 +195,18 @@ have mkfs.erofs && c_ok "mkfs.erofs（层镜像格式）" || bad "缺 mkfs.erofs
 have fsck.erofs && c_ok "fsck.erofs（打包后校验）" || warn "缺 fsck.erofs（不阻断，但少一道校验）"
 have mke2fs && c_ok "mke2fs（建 upper.img）" || bad "缺 mke2fs —— 建不出可写层"
 have sha256sum && c_ok "sha256sum（种子/层校验）" || warn "缺 sha256sum（不阻断，但少一道完整性核对）"
+
+# device-provision.sh 内部**要求 bash**（Android 自带只有 mksh）——这条以前是隐形门槛：
+# 实测设备上 `su -c 'sh .../oneshot-setup.sh --run'` 会在这一步直接退出（退出码 1）。
+BASH_BIN="$(find_bash || true)"
+if [ -n "$BASH_BIN" ]; then
+  c_ok "bash：$BASH_BIN（部署脚本要求 bash）"
+else
+  bad "找不到 bash —— device-provision.sh 在 Android 自带的 mksh 下会直接退出。三条路：
+       ① 在 Termux 里 pkg install bash，然后重跑本脚本（它会自动找到并用它）；
+       ② 手动跑：/data/data/com.termux/files/usr/bin/bash /data/adb/modules/sunsetlinux/bin/device-provision.sh --seeds /data/sunsetlinux/seeds
+       ③ 别在手机上建层：等层发到频道后从 App/终端装（linuxctl update <层> <裸.erofs>）"
+fi
 if have curl || have wget; then
   c_ok "有 $(have curl && printf curl || printf wget)（下种子用）"
 else
@@ -343,7 +372,16 @@ fi
 
 printf '\n开始 provisioning（真 chroot 里跑 apt + npm，可能要十几分钟到半小时）…\n'
 printf '  日志：%s/run/linux.log\n\n' "$LINUX_HOME"
-sh "$PROV" --seeds "$SEEDS_DIR"
+# ⚠️ device-provision.sh **必须用 bash 跑**（它自己会在没有 BASH_VERSION 时直接退出）。
+# 实测：用设备自带的 mksh（`sh script.sh`）跑会立刻 "需要 bash" 退出码 1 —— 所以这里显式挑 bash，
+# 并把 bash 所在目录放进 PATH（脚本内部还会用 tar/mkfs.erofs 等，Termux 那套更全）。
+BASH_BIN="$(find_bash || true)"
+if [ -z "$BASH_BIN" ]; then
+  c_bad "找不到 bash，device-provision.sh 跑不起来 —— 见上面「工具链」那节的①②③"
+  exit 1
+fi
+printf '用 %s 执行部署脚本\n\n' "$BASH_BIN"
+PATH="$(dirname "$BASH_BIN"):$PATH" "$BASH_BIN" "$PROV" --seeds "$SEEDS_DIR"
 RC=$?
 if [ "$RC" != 0 ]; then
   c_bad "device-provision.sh 退出码 $RC —— 看日志：$LINUX_HOME/run/linux.log"

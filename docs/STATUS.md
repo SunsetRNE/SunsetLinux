@@ -227,6 +227,34 @@ apksigner verify --print-certs <旧 CI 包>             → 84be9523…  ← 与
    实测第一台设备模块是 `1.0.0` 而官方已 `1.0.2`，脚本会直接提示去装新模块 zip。
    紧跟这个改动，模块再推进一格：**`v1.0.3/10003`**。
 
+### 3.10 ★ 真机第一次 `--run`：暴露一个我的 bug + 一个真正的拦路虎
+
+**① 我的 bug（`bad()` 从未被定义）**：一次"删空行"的编辑把
+`bad()  { BAD=$((BAD + 1)); c_bad "$*"; }` 并进了上一行注释 —— `mksh -n` 照样通过，
+真机上只多一行 `bad: inaccessible or not found`，**而且阻断计数永远是 0**：
+明明一层镜像都没有，体检却报"没有阻断项"然后继续往下跑 provisioning。
+教训：**"能解析"与"函数真的存在"是两回事**（这正是本项目反复出现的那一类问题）。
+
+已修，并新增 `tools/oneshot-selftest.mjs`（**29 条断言**，进了 CI 的 shell job）：
+在临时目录里用 **mksh 与 bash 各跑一遍只读体检**，断言八个体检段落都在、
+**没有任何 "not found" 类输出**、并且**缺模块/缺层时必须真的报出阻断项**。
+
+**② 真正的拦路虎：`device-provision.sh` 要求 bash**。它第 137-140 行显式检查 `BASH_VERSION`，
+没有就打印「需要 bash」并 `exit 1` —— 而 Android 自带只有 mksh，所以"在手机上建层"这条路
+在 stock 环境里**走不通**（除非借 Termux 的 bash）。
+
+实测该文件 1315 行里只有 **2 处数组赋值 + 2 处 `[[ ]]`**，没有 `=~`、没有进程替换 ——
+它离"mksh 可跑"其实很近（规模与 proot 那次要动的四类构造相当）。
+
+当前对策：`oneshot-setup.sh` 自己找 bash（`$SUNSETLINUX_BASH` → PATH → `/system/bin/bash`
+→ Termux 的 `/data/data/com.termux/files/usr/bin/bash` → `/data/local/tmp/bash`），
+找到就用它执行部署脚本、并把它的目录放进 PATH（脚本内部还要用 tar/mkfs.erofs 等）；
+找不到则明确给出三条出路（Termux 装 bash / 手动用 Termux bash 跑 / 等层发到频道再装）。
+模块随之推进到 **`v1.0.4/10004`**。
+
+> **待办（独立一件工作）**：把 `device-provision.sh` 也改成 mksh 可跑，彻底拆掉 bash 依赖 ——
+> 那样模块在 stock Android 上就自足了：不需要 Termux，也不需要另一台 arm64 机器。
+
 ### 3.7 ★ 模块 WebUI 图标化 + 内置官方频道 + 模块 1.0.1（2026-09-16 第二批）
 
 | 改动 | 做法 | 回归 |

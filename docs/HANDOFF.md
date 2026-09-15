@@ -29,7 +29,7 @@
 4. `layers-release.yml` 层托管 —— `layers` 分支推送触发；**不构建**，只把 staging 分支里的
    分发产物传到 Release 资产（"Release 当纯存储"），并打印 `publish-channel` 用的 base-url。
 
-**已发布的产物**（gh-pages `stable/`）：APK、`sunsetlinux-module-1.0.3.zip`、`index.json`。
+**已发布的产物**（gh-pages `stable/`）：APK、`sunsetlinux-module-1.0.4.zip`、`index.json`。
 
 **⚠️ 下载页在哪（别去点仓库的 Releases，那里永远是空的）**：本项目**刻意不用 tag**，
 产物不发 GitHub Releases，而是 Pages 上的静态目录：

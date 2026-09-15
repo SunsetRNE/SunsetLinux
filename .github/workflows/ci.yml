@@ -79,6 +79,12 @@ jobs:
       - name: 脚本断言 — proot 纯函数（mksh，模拟设备侧）
         run: mksh runtime/proot/selftest-funcs.sh
 
+      # 懒人脚本的**冒烟回归**：只跑只读"体检"模式。守的是"能解析 ≠ 能跑"那一类问题 ——
+      # 实测踩过：一次编辑把 `bad()` 定义并进了注释，`mksh -n` 照样通过，真机上只表现成
+      # 一行 `bad: inaccessible or not found`，而且**阻断计数永远是 0**（该拦的不拦）。
+      - name: 脚本断言 — oneshot-setup.sh 冒烟（mksh + bash）
+        run: node tools/oneshot-selftest.mjs
+
       # 设备上只有 /system/bin/sh（mksh），没有 bash：这一关专门防"本地 bash 跑得通、
       # 真机一行都跑不了"的语法漂移（历史上真的发生过，见 tools/shell-compat-check.mjs 注释）
       - name: 断言 — 设备侧脚本能被 mksh 解析（含 shebang 与欠债名单）
