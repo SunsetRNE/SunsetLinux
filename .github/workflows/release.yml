@@ -78,6 +78,10 @@ jobs:
           set -euo pipefail
           SRC="apk-artifact/app-debug.apk"
           [ -f "$SRC" ] || { echo "::error::没找到门禁上传的 APK 制品：$SRC（制品名/路径改了？同步 ci.yml 的 upload-artifact）"; exit 1; }
+          # ★ 必须自己建 dist/：这一步现在跑在 mkmodule 之前，而 dist/ 是 mkmodule 建的。
+          #   漏了这行就会 `cp: cannot create regular file 'dist/...': No such file or directory`
+          #   （实测；元凶是"复用制品"改造把这一步提到了 mkmodule 前面）。
+          mkdir -p dist
           cp -v "$SRC" dist/sunsetlinux-launcher-debug.apk
           ( cd dist && sha256sum sunsetlinux-launcher-debug.apk > sunsetlinux-launcher-debug.apk.sha256 )
 
@@ -97,6 +101,13 @@ jobs:
           set -euo pipefail
           OUT="dist/_publish"
           rm -rf "$OUT"; mkdir -p "$OUT"
+          # 先明确检查要发布的东西在不在：直接 cp 通配符失败时报的是
+          # `cp: cannot stat 'dist/*.apk'`，很难看出缺的是哪一环（实测踩过两次：
+          # 一次是 APK 没收进 dist、一次是 dist 目录都还没建）。
+          for pat in 'dist/*.apk' 'dist/*module*.zip'; do
+            # shellcheck disable=SC2086
+            ls $pat >/dev/null 2>&1 || { echo "::error::没有匹配 $pat 的产物，发布中止"; exit 1; }
+          done
           cp -v dist/*.apk "$OUT"/
           cp -v dist/*module*.zip "$OUT"/
           cp -v dist/*module*.zip.sha256 "$OUT"/ 2>/dev/null || true
