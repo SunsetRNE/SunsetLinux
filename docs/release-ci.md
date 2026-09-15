@@ -58,7 +58,7 @@ https://<用户名>.github.io/<仓库名>/stable/channel.json
 
 | 检查 | 命令 | 断言数 |
 |---|---|---|
-| Android 单测（必须两条一起跑） | `./gradlew :app:assembleDebug :app:testDebugUnitTest` | 46 |
+| Android 单测（必须两条一起跑） | `./gradlew :app:assembleDebug :app:testDebugUnitTest` | 47 |
 | root 运行时回归（bash） | `bash runtime/root/selftest.sh` | 19 |
 | root 运行时回归（**mksh**，模拟设备侧） | `mksh runtime/root/selftest.sh` | 19 |
 | proot 运行时回归 | `bash runtime/proot/selftest.sh` | 18 |

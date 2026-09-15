@@ -467,7 +467,7 @@ module/
 | 地址 | 本机地址必做；**局域网标为灰态"需开启（后续）"**，不伪造能力 |
 | 状态栏 | `enableEdgeToEdge`，顶栏与状态栏同色，图标随明暗 |
 | **inset 契约** | 边到边后**每个页面都要自己消费 inset**：普通页面 `safeDrawingPadding()`；带输入框的页面再加 `imePadding()`（否则键盘盖住输入框），并声明 `windowSoftInputMode="adjustResize"`；外壳里由 `AppShell` 统一消费一次。有 `UiInsetsContractTest` 守着 |
-| 返回导航 | 非首页 tab 按返回**回首页**（`BackHandler`）；侧边栏打开时由抽屉自己的回调优先 |
+| 返回导航 | 一律 `PredictiveBackHandler`（**跟手**：进度映射成水平位移，抬手才提交）；非首页 tab → 回首页，DSH Web → 网页历史；侧边栏打开时由抽屉自己的回调优先 |
 | 冷启动首帧 | 未完成引导时只画 `BootPlaceholder`（轻量占位屏），**不组合整套外壳** —— 避免"纯黑屏等待" |
 | 崩溃 | 全局 `UncaughtExceptionHandler` 记录**异常消息 + cause 链 + 40 帧**，可从侧边栏导出 |
 

@@ -13,7 +13,7 @@ import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
-import androidx.activity.compose.BackHandler
+import androidx.activity.compose.PredictiveBackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.imePadding
@@ -67,6 +67,13 @@ import io.github.sunsetrne.sunsetlinux.ui.theme.TextMuted
 import io.github.sunsetrne.sunsetlinux.ui.theme.TextSecondary
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.layout.offset
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.IntOffset
+import kotlinx.coroutines.CancellationException
+import kotlin.math.roundToInt
 
 private enum class WebLoadState { LOADING, READY, ERROR }
 
@@ -171,10 +178,34 @@ fun DshWebPane(
         }
     }
 
-    // 系统返回：先回网页历史，再交给宿主（独立 Activity=finish；tab=切回启动页）
-    BackHandler {
-        val wv = holder.webView
-        if (wv?.canGoBack() == true) wv.goBack() else onBack()
+    // ── 系统返回：**跟手**的预测性返回 ──────────────────────────────────
+    //
+    // 为什么不用 `BackHandler`（用户实测："返回不跟手，对系统返回无任何消费"）：
+    //   `BackHandler` 只在**抬手**那一刻回调一次，拿不到手势进度 —— 拖动过程中界面
+    //   毫无反馈，看起来就是"系统返回没被消费"。而 `PredictiveBackHandler` 会把
+    //   拖动进度以 Flow 的形式持续给到我们，于是可以做到"网页跟着手指往右走"。
+    //
+    // 提交（手势完成）= 回网页历史；没有历史可回 = 交给宿主（独立 Activity 就 finish，
+    // 在 tab 里则切回启动页）。取消 = 动画弹回原位。
+    //
+    // 旧版本（API < 34）由 activity-compose 内部回退到 `OnBackPressedCallback`，
+    // 所以这里不需要再叠一个 `BackHandler`。
+    val backOffset = remember { Animatable(0f) }
+    val backSlideMax = with(LocalDensity.current) { 110.dp.toPx() }
+    PredictiveBackHandler { progress ->
+        try {
+            progress.collect { event ->
+                backOffset.snapTo(event.progress.coerceIn(0f, 1f) * backSlideMax)
+            }
+            // 走到这里 = 手势完成
+            backOffset.snapTo(0f)
+            val wv = holder.webView
+            if (wv?.canGoBack() == true) wv.goBack() else onBack()
+        } catch (cancelled: CancellationException) {
+            // 手势取消：先把位移平滑收回，再把取消原样抛出（PredictiveBackHandler 依赖它）
+            backOffset.animateTo(0f, tween(durationMillis = 180))
+            throw cancelled
+        }
     }
 
     Column(
@@ -279,7 +310,12 @@ fun DshWebPane(
             }
         }
 
-        Box(Modifier.weight(1f)) {
+        Box(
+            Modifier
+                .weight(1f)
+                // 预测性返回的手势进度 → 整块网页右移，松手前就能看到"要返回了"
+                .offset { IntOffset(backOffset.value.roundToInt(), 0) },
+        ) {
             val url = tokenUrl
             when {
                 url != null -> AndroidView(

@@ -1,6 +1,6 @@
 package io.github.sunsetrne.sunsetlinux.ui
 
-import androidx.activity.compose.BackHandler
+import androidx.activity.compose.PredictiveBackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -78,6 +78,13 @@ import io.github.sunsetrne.sunsetlinux.ui.theme.TextSecondary
 import io.github.sunsetrne.sunsetlinux.ui.theme.TextMuted
 import io.github.sunsetrne.sunsetlinux.ui.theme.TextSecondary
 import kotlinx.coroutines.launch
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.tween
+import androidx.compose.ui.platform.LocalDensity
+import kotlinx.coroutines.CancellationException
+import androidx.compose.foundation.layout.offset
+import androidx.compose.ui.unit.IntOffset
+import kotlin.math.roundToInt
 
 /**
  * 底部胶囊导航的高频 tab。
@@ -121,10 +128,29 @@ fun AppShell(
     var showAbout by remember { mutableStateOf(false) }
     var confirmReset by remember { mutableStateOf(false) }
 
-    // 系统返回键/返回手势：不在首页时先回首页，而不是直接退出 App。
-    // 放在 ModalNavigationDrawer **之前**注册：侧边栏打开时它自己会注册一个
-    // 返回回调（在抽屉展开期间生效），后注册的优先，所以抽屉仍能正常关闭。
-    BackHandler(enabled = tab != ShellTab.START) { tab = ShellTab.START }
+    // ── 系统返回：不在首页时回首页（**跟手**的预测性返回）──────────────────
+    //
+    // 用 `PredictiveBackHandler` 而不是 `BackHandler`：后者只在抬手时回调一次，
+    // 拖动过程中界面没有任何反馈 —— 用户实测的"返回不跟手、对系统返回无任何消费"
+    // 就是这个观感。这里把进度流式映射成整块内容的水平位移。
+    //
+    // 注册位置在 `ModalNavigationDrawer` **之前**：抽屉展开时它自己会注册一个
+    // 预测性返回回调（`enabled = drawerState.targetValue == Open`，见 material3 源码），
+    // 后注册的优先，所以抽屉打开时仍然由抽屉来关。
+    val backOffset = remember { Animatable(0f) }
+    val backSlideMax = with(LocalDensity.current) { 96.dp.toPx() }
+    PredictiveBackHandler(enabled = tab != ShellTab.START) { progress ->
+        try {
+            progress.collect { event ->
+                backOffset.snapTo(event.progress.coerceIn(0f, 1f) * backSlideMax)
+            }
+            backOffset.snapTo(0f)
+            tab = ShellTab.START
+        } catch (cancelled: CancellationException) {
+            backOffset.animateTo(0f, tween(durationMillis = 180))
+            throw cancelled
+        }
+    }
 
     ModalNavigationDrawer(
         drawerState = drawerState,
@@ -158,7 +184,9 @@ fun AppShell(
         Box(
             Modifier
                 .fillMaxSize()
-                .imePadding(),
+                .imePadding()
+                // 返回手势的进度 → 整块内容右移（跟手）
+                .offset { IntOffset(backOffset.value.roundToInt(), 0) },
         ) {
         Column(
             Modifier

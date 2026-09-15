@@ -98,16 +98,15 @@ E: linuxctl.sh[1578]: dsh_status_json: inaccessible or not found   ← 状态 JS
 |---|---|---|---|
 | 首装"很大的黑屏页面，过一会才有模式引导" | ①主题 `windowBackground` 是纯黑；②`LauncherActivity` 在**没走完引导时也组合整套外壳**（顶栏+3 面板+日志轮询），引导页再盖上去 —— 首帧要等这套重活；③`ViewModel` 构造器里同步跑 zstd 能力探测（写临时文件 + 解 zstd 帧，磁盘 IO） | 门禁下沉到 `setContent` 内部：未完成引导时**只画轻量占位屏**（`ui/BootPlaceholder.kt`，有标题/进度/出路），不组合外壳；`onResume` 重新读 `onboarded` 以便引导完成后立刻切换；zstd 探测移到 IO 协程 | `UiInsetsContractTest` ×2 |
 | 键盘盖住输入框（插件包名 / 频道 URL / 本地源 / DSH Web 输入） | 边到边（`enableEdgeToEdge`）后窗口不再为键盘让位，而全 App **没有任何 `imePadding`**；且 Activity 未声明 `adjustResize`，部分版本连 IME inset 都不派发 | `AppShell` 统一消费一次 + DSH WebView 自行消费；6 个 Activity 加 `imePadding`；manifest 全部 activity 加 `windowSoftInputMode="adjustResize"` | `UiInsetsContractTest` ×2 |
-| 系统返回键在非首页直接退出 App | `AppShell` 切了 tab 却没登记返回回调（只有 DSH Web 面板有） | 新增 `BackHandler(tab != START)`：先回首页；侧边栏打开时仍由抽屉自己的回调优先（后注册优先） | — |
+| **系统返回不跟手、像没被消费** | ①全 App 只用传统 `BackHandler` —— 它**只在抬手时回调一次**，拿不到手势进度，拖动过程毫无反馈；②`AppShell` 切了 tab 却没登记任何返回回调（只有 DSH Web 面板有），非首页按返回直接退出 App | 两处都改成 `PredictiveBackHandler`：把进度流式映射成水平位移（网页/整块内容**跟着手指走**），抬手才提交（网页历史后退 / 回首页）；取消则动画弹回。侧边栏打开时仍由抽屉自己的回调优先（material3 源码里 `enabled = drawerState.targetValue == Open`，仅在打开时启用） | `UiInsetsContractTest` ×1 |
 
 顺带清掉的一处隐患：悬浮胶囊底栏的留白 `96.dp` 原先在 4 个地方各写一遍，
 现统一为 `ui/components/Common.kt` 的 `CapsuleReserve`（漏改一处就会让最后一个面板被胶囊压住）。
 
-> ⚠️ **需要你在真机确认的一点**：你说的「对系统虚拟导航的消费处理」我按"导航栏 inset 有没有被正确消费"
-> 查了一遍 —— 结论是**各屏都消费了**（`safeDrawingPadding` / `navigationBarsPadding`，且有测试守着），
-> 没找到确定缺陷。如果你看到的其实是下面某一种，请告诉我具体现象，我按那条修：
-> ①底部胶囊被系统导航栏压住/贴太近；②底部区域点按没反应（与手势区冲突）；
-> ③内容被导航栏盖住；④三键导航下对话框按钮被盖住。
+> **关于「系统虚拟导航」的追问与结论**：你补充的是"返回不跟手、对系统返回无任何消费"。
+> 据此把返回链路整条查了一遍：navigation bar 的 inset 各屏都消费了（有测试守着）；真正的缺陷是
+> **预测性返回从来没被用起来**（见上表最后一行）。已改用 `PredictiveBackHandler` 做跟手位移。
+> 真机验证要点见 `docs/smoke-test.md` §7.1 的"返回手势"一行。
 
 ---
 

@@ -152,6 +152,40 @@ class UiInsetsContractTest {
         assertTrue("BootPlaceholder 没消费系统栏 inset", insetConsumers.any { placeholder.contains(it) })
     }
 
+    // ─────────────────────────── ⑤ 系统返回必须"跟手"
+
+    @Test
+    fun `返回手势必须用 PredictiveBackHandler（跟手）而不是只在抬手时回调`() {
+        // `BackHandler` 只在抬手时回调一次，拖动过程毫无反馈 —— 用户实测的
+        // "返回不跟手、对系统返回无任何消费"。凡是自己做返回跳转的地方都要用
+        // PredictiveBackHandler 拿进度。
+        val mustBePredictive = listOf(
+            "ui/DshWebPane.kt" to "网页历史返回",
+            "ui/AppShell.kt" to "非首页 tab 回首页",
+        )
+        val offenders = mutableListOf<String>()
+        for ((rel, why) in mustBePredictive) {
+            val f = File(srcDir, rel)
+            assertTrue("找不到 $rel", f.isFile)
+            val text = f.readText()
+            if (!text.contains("PredictiveBackHandler")) offenders += "$rel（$why）"
+        }
+        assertTrue(
+            "以下位置还在用只在抬手时回调的返回处理，手势不会跟手：$offenders",
+            offenders.isEmpty(),
+        )
+        // 同时确认没有退回传统 BackHandler（注释里提到不算）
+        // ⚠️ 注意 `PredictiveBackHandler {` 里就含有 `BackHandler {` 这段子串，
+        //    所以必须用负向后顾，否则这个断言会把自己的写法判成违例（写的时候真踩了）。
+        val legacyBackHandler = Regex("""(?<!Predictive)BackHandler\s*\{""")
+        for ((rel, _) in mustBePredictive) {
+            val code = File(srcDir, rel).readText().lineSequence()
+                .filterNot { it.trim().startsWith("//") || it.trim().startsWith("*") }
+                .joinToString("\n")
+            assertTrue("$rel 里仍在使用传统 BackHandler（不会跟手）", !legacyBackHandler.containsMatchIn(code))
+        }
+    }
+
     @Test
     fun `zstd 能力探测不许在构造器或组合期同步执行`() {
         // 探测 = 写临时文件 + 解一段真实 zstd 帧，是磁盘 IO；放进冷启动首帧会拖长黑屏
