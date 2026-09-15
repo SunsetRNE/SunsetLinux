@@ -15,6 +15,10 @@
 而真机验证需要你执行（见 §五：我这条设备通道被策略禁止安装与挂载）。
 新一批需求（单色界面 / npm 频道 / 插件 UI / dist-tag 选择 / 模块更新）**代码已落地，产物待重打**。
 
+**2026-09-15 补记**：**proot 模式的宿主侧脚本已 mksh 化**（§4.4）—— 原先"proot 模式在真机上
+跑不起来"是唯一一处**已确定的不可用功能**，现在两个脚本都能被 mksh 解析、并在 mksh 下通过
+纯函数回归；顺带修掉一个语法闸门抓不到的运行时缺陷（bash `/dev/tcp` 在 mksh 里不存在）。
+
 ---
 
 ## 二、交付物（`dist/`，哈希见 `dist/MANIFEST.txt`）
@@ -94,6 +98,12 @@ E: linuxctl.sh[1578]: dsh_status_json: inaccessible or not found   ← 状态 JS
 `mksh runtime/root/linuxctl.sh status` 与 `bash` 版输出**逐字节一致**，并通过 §3.1 冻结契约校验。
 新增闸门 `tools/shell-compat-check.mjs` 已进 CI：设备侧脚本过不了 mksh 就**直接失败**。
 
+> ⚠️ **这个闸门只管"能不能解析"，管不了"运行时能不能用"** —— 2026-09-15 修 proot 时
+> 就撞上第二类问题：`/dev/tcp` 是 bash 专有特性，mksh **语法上照收**（它只是重定向到一个
+> 不存在的路径），于是 `mksh -n` 全绿、真机却永远连不上端口。教训是：
+> **换 shell 时要按"用到的特性"逐个查，不能只看语法闸门**；能抽出纯函数做双解释器回归的，
+> 就抽出来测（`runtime/proot/selftest-funcs.sh` 就是为此加的）。详见 §4.4。
+
 ### 3.5 ★ App 冷启动与系统栏交互（用户实测的三个问题，已修）
 
 | 用户看到的现象 | 根因（源码级） | 修法 | 回归 |
@@ -147,25 +157,47 @@ E: linuxctl.sh[1578]: dsh_status_json: inaccessible or not found   ← 状态 JS
 - **单色界面的代价**：错误态失去红色后显眼度下降，改用「✕/! 图标 + 白色粗描边 + 加粗文案」补偿。
 - **局域网访问未做**：`dsh web` 只监听 `127.0.0.1`，界面里是灰态占位，没有伪造能力。
 
-### 4.4 ❌ **proot 模式的宿主侧脚本仍是 bash —— 真机不可用**
+### 4.4 ✅ **proot 模式的宿主侧脚本已 mksh 化（2026-09-15 修完）**
 
-`runtime/proot/linuxctl.sh` 与 `start.sh` 重度依赖 bash：`[[ =~ ]]` 正则、数组、
-C 式 `for`、进程替换 `2> >(tee …)`。而：
+原来是**已确定的缺陷**（不是"待验证"）：`runtime/proot/linuxctl.sh` 与 `start.sh` 重度依赖
+bash（`[[ =~ ]]` 正则、C 式 `for`、进程替换），而设备上只有 `/system/bin/sh` = mksh；
+Android 10+ 又禁止 `execve` App 私有目录里的文件，App 只能用 `/system/bin/sh <脚本>` 跑它
+→ 直接撞语法错，**proot 模式在真机上跑不起来**（root 模式不受影响）。
 
-- 设备上**没有 bash**（`/system/bin/bash` 不存在，只有 `/system/bin/sh` = mksh）；
-- Android 10+ **禁止 `execve` App 私有目录里的文件**（W^X），所以 App 只能
-  用 `/system/bin/sh <脚本>` 去跑它 → 直接撞上 mksh 语法错。
+现在两个文件都能被 mksh 解析并在 mksh 下跑回归。**实际改动比原估的小一个数量级**：
+不是"约 1800 行机械改造"，`mksh -n` 只报第一处，把已知构造列全之后要动的只有几类：
 
-结论：**proot 模式目前跑不起来**，这不是"待验证"，是已确定的缺陷（root 模式不受影响，
-它已经改成 mksh 可解析并通过 mksh 下的自测）。两条修法，二选一：
-
-| 方案 | 做法 | 代价 |
+| 类别 | 处数 | 改法 |
 |---|---|---|
-| **A（推荐）** | 把 `runtime/proot/{linuxctl,start}.sh` 也改成 POSIX（照 `runtime/root/*` 的做法：数组→字符串、`=~`→`case`/`grep -qE`、进程替换→临时文件） | 约 1800 行，机械但量大 |
-| B | 随包带一个**静态 bash**，以 native lib 形式落 `nativeLibraryDir` 再调用 | 引入二进制产物 + 需要可信来源与校验 |
+| `[[ x =~ 正则 ]]` | 12 | → `case` 字符类 + `is_uint`/`is_int`/`valid_name`/`octet_ok` 小函数（`printf '%04X'` 也够用） |
+| C 式 `for (( … ))` | 1 | → `i=0; while [ … ]; do …; i=$((i+2)); done` |
+| 进程替换 | 5 | `< <(cmd)` → 变量 + here-doc（**不能**用管道：循环会掉进子 shell，`found` 带不出来）；`2> >(tee …)` → stderr 直接追加进日志 + 结束后 `replay_log_delta` 回放增量 |
+| `local x=()` | 8 | → 先 `local x` 再 `x=()`（mksh 里 `local x=(…)` 是语法错误） |
+| `${BASH_SOURCE[0]}` | 3 | → `${BASH_SOURCE[0]:-$0}`（mksh 下未定义，`set -u` 时直接报错） |
+| shebang `#!/usr/bin/env bash` | 2 | → `#!/system/bin/sh` |
 
-`tools/shell-compat-check.mjs` 已经把这两个文件登记为「欠债」并在 CI 里**显式列出**：
-修好一个就必须从名单里删一个，名单不会腐烂。
+★ **额外抓到一个 `mksh -n` 抓不到的运行时缺陷**：bash 的 `/dev/tcp` 在 mksh 里**不存在**
+（实测同一端口 bash 连得上、mksh 恒失败）。它被用来做端口探测/健康兜底 ——
+真机表现会是"服务其实起来了，`start` 却一直等到超时判未就绪"，而语法闸门全绿。
+已改成三层回退：`/proc/net/tcp[6]`（纯 awk，零依赖）→ `nc -z` → `ss -ltn`；
+`runtime/root/start.sh` 的 `port_busy` 是同一个毛病，一并修了。
+
+**验收证据（都可复跑）**：
+
+```bash
+node tools/shell-compat-check.mjs --verbose      # 通过，欠债名单已清零
+bash runtime/proot/selftest-funcs.sh             # 64 通过 / 0 失败
+mksh runtime/proot/selftest-funcs.sh             # 64 通过 / 0 失败（与 bash 同结果）
+mksh runtime/proot/selftest.sh                   # 18 通过 / 0 失败（以前只有 bash 能跑）
+mksh runtime/proot/linuxctl.sh status            # 与 bash 版输出逐字节一致，契约检查双通过
+```
+
+`runtime/proot/selftest-funcs.sh` 是新增的回归：它**从真实脚本里抽取函数**来测
+（与 `runtime/root/selftest.sh` 同一手法，不测复制品），钉住的正是上面这些改写的语义 ——
+整数/IPv4/快照名判定、端口探测（自己起一个监听端口来测，不靠环境里恰好有服务）、
+日志增量回放、DNS 多路回退（多行输出不能丢最后一行）、status 附加键。
+
+**仍未验证**：真机上真正跑一次 proot 模式的 `provision` / `start`（需要设备，见 §五）。
 
 ---
 
@@ -196,13 +228,15 @@ su -c '/data/sunsetlinux/bin/linuxctl doctor'
 
 1. **你在真机跑 `doctor`** → 我据此修真机问题（最可能是 toybox mount 的降级分支）。
    现在 root 侧脚本已经是 mksh 可解析的，这一步**第一次真的有可能跑出结果**（以前会直接语法错）。
-2. **修 proot 模式**（§4.4）：把 `runtime/proot/linuxctl.sh`、`start.sh` 改成 POSIX。
-   在修好之前，proot 模式在真机上是不可用状态，别把它当作可用的降级路径。
-3. **重打三层层镜像**：现有 `dist/*.erofs` 里还留着改名前的死文件 `/opt/dshroid/*.sh`
+   顺带值得一起跑：`su -c '/data/sunsetlinux/bin/linuxctl provision --seed …'` 之后
+   `linuxctl start`，把 proot 模式也过一遍（§4.4 已 mksh 化，但这台真机上是第一次真跑）。
+2. **重打三层层镜像**：现有 `dist/*.erofs` 里还留着改名前的死文件 `/opt/dshroid/*.sh`
    （不影响功能：`start.sh` 启动时会把模块里的新版同步到 `/opt/sunsetlinux`）。
    重建必须在**有 CAP_SYS_ADMIN 的宿主 / CI** 上跑 `rootfs/build-layers.sh`（本工作容器
-   没有该能力，`chroot` 报 `Function not implemented`，只能跑到 mmdebstrap 报错为止）。
-4. App 侧「彻底卸载」入口（先备份 → 确认 → `purge --yes` → 展示 `footprint`）：
+   没有该能力：实测 `CapEff=0`、`mount` 是假的（`/proc/mounts` 不变），只能跑到 mmdebstrap 报错为止）。
+3. App 侧「彻底卸载」入口（先备份 → 确认 → `purge --yes` → 展示 `footprint`）：
    **机制已就绪**（`linuxctl purge [--yes|--arm|--disarm]` + `footprint`），只差 UI。
-5. 真机通过后再考虑：局域网访问、脚本自更新、更多频道的实测。
+4. 真机通过后再考虑：局域网访问、脚本自更新、更多频道的实测。
+
+> ✔ 已完成（原第 2 项）：**proot 模式的宿主侧脚本 mksh 化**，见 §4.4。
 

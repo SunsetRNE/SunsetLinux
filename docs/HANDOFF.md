@@ -58,8 +58,14 @@
 
 ## 三、已知欠债（别当成可用）
 
-- **proot 模式的宿主侧脚本仍是 bash**（数组、`=~`、进程替换）→ 真机不可用；
-  `tools/shell-compat-check.mjs` 已显式登记为"欠债"，修好一个就要从名单删一个。
+- **proot 宿主侧脚本已 mksh 化（2026-09-15 修完）**：`runtime/proot/{linuxctl,start}.sh`
+  现在能被 mksh 解析，并跑同一套纯函数回归 `runtime/proot/selftest-funcs.sh`
+  （bash / mksh 各 64/64 通过）；`tools/shell-compat-check.mjs` 的欠债名单**已清零**。
+  顺带修掉一个 `mksh -n` 抓不到的**运行时**缺陷：`/dev/tcp` 是 bash 专有特性，
+  mksh 下恒失败（真机表现＝"服务起来了却一直判未就绪"），已换成三层回退的端口探测
+  （`/proc/net/tcp` → `nc -z` → `ss -ltn`）；root 侧 `runtime/root/start.sh` 的
+  `port_busy` 同一个毛病也一并修了。
+  **仍未验证**：真机跑一次 proot 模式的 `provision`/`start`（需要设备）。
 - **App「彻底卸载」入口**只有命令行：`linuxctl purge [--yes|--arm|--disarm]`（UI 未做）。
 - **真机端到端未验证**：`su -c '/data/sunsetlinux/bin/linuxctl doctor'`。
   我这条设备通道被策略禁止装应用与做挂载（`[POLICY_BLOCKED]`），必须你在 root 终端跑。

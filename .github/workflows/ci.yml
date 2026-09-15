@@ -63,6 +63,18 @@ jobs:
       - name: 脚本断言 — proot 运行时
         run: bash runtime/proot/selftest.sh
 
+      - name: 脚本断言 — proot 运行时（mksh，模拟设备侧）
+        run: mksh runtime/proot/selftest.sh
+
+      # proot 的 host 侧脚本（start.sh / linuxctl.sh）必须能被 mksh 解析；但"能解析"
+      # 证明不了"改完之后语义还对"（例：`[[ =~ ]]`→case 改错、`/dev/tcp` 在 mksh 下失效）。
+      # 这一关从真实脚本里抽取纯函数做回归，bash 与 mksh 各跑一遍（两边结果必须一致）。
+      - name: 脚本断言 — proot 纯函数（bash）
+        run: bash runtime/proot/selftest-funcs.sh
+
+      - name: 脚本断言 — proot 纯函数（mksh，模拟设备侧）
+        run: mksh runtime/proot/selftest-funcs.sh
+
       # 设备上只有 /system/bin/sh（mksh），没有 bash：这一关专门防"本地 bash 跑得通、
       # 真机一行都跑不了"的语法漂移（历史上真的发生过，见 tools/shell-compat-check.mjs 注释）
       - name: 断言 — 设备侧脚本能被 mksh 解析（含 shebang 与欠债名单）

@@ -1,6 +1,11 @@
-#!/usr/bin/env bash
+#!/system/bin/sh
 # =============================================================================
 # SunsetLinux — linuxctl（proot / 非 root 降级运行时）          v1.0.0
+#
+# 解释器：**设备侧的 /system/bin/sh（mksh）**。本文件必须能被 mksh 解析 ——
+#   设备上没有 bash（`/system/bin/bash` 不存在），App 也只能用 `/system/bin/sh <脚本>`
+#   执行它（Android 10+ 禁止 execve App 私有目录里的文件）。
+#   闸门：tools/shell-compat-check.mjs；改这个文件前先读它，别再引入 bash 专有语法。
 #
 # 契约（与 root 版完全一致，见 docs/architecture.md §3）：
 #   provision / start / stop / status / attach / exec / logs /
@@ -38,8 +43,8 @@ SCHEMA_VERSION=1
 MODE="proot"
 LINUXCTL_VERSION="1.0.0"
 
-PROG=$(basename -- "${BASH_SOURCE[0]}")
-SELF_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd -P)
+PROG=$(basename -- "${BASH_SOURCE[0]:-$0}")
+SELF_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")" >/dev/null 2>&1 && pwd -P)
 
 # 可调参数（环境变量覆盖，便于测试与不同设备）
 START_GRACE=${SUNSETLINUX_START_GRACE:-90}      # 超过这么多秒还不健康 → state=error
@@ -91,7 +96,23 @@ jstr() { # 把任意字符串编码成 JSON 字符串
   printf '"%s"' "$s"
 }
 jnull_or_str() { if [[ -n "${1-}" ]]; then jstr "$1"; else printf 'null'; fi }
-jint() { if [[ "${1-}" =~ ^-?[0-9]+$ ]]; then printf '%s' "$1"; else printf 'null'; fi }
+# 整数判定：mksh 没有 `=~`（`[[ x =~ re ]]` 是语法错误），用 case 的字符类做等价的
+# "整串都是数字" 判断。见 docs/STATUS.md §3.4 与 tools/shell-compat-check.mjs。
+# （刻意写成多行：runtime/proot/selftest-funcs.sh 用 `/^fn()/,/^}/` 从本文件抽取实现来测。）
+is_uint() {
+  case ${1-} in ''|*[!0-9]*) return 1 ;; esac
+  return 0
+}
+is_int() {
+  case ${1-} in
+    ''|-) return 1 ;;
+    -*)   is_uint "${1#-}" ;;
+    *)    is_uint "$1" ;;
+  esac
+}
+jint() {
+  if is_int "${1-}"; then printf '%s' "$1"; else printf 'null'; fi
+}
 jbool() {
   case "${1-}" in
     true|1|yes|on) printf 'true' ;;
@@ -222,8 +243,9 @@ proc_field22() { # /proc/<pid>/stat 第 22 项 = 进程启动时刻（clock tick
 
 pid_alive() {
   local p="${1-}"
-  [[ -n "$p" && "$p" =~ ^[0-9]+$ ]] || return 1
-  [[ -d "/proc/$p" ]] || return 1
+  [ -n "$p" ] || return 1
+  is_uint "$p" || return 1
+  [ -d "/proc/$p" ] || return 1
   kill -0 "$p" 2>/dev/null || return 1
   return 0
 }
@@ -348,11 +370,13 @@ http_ready() { # §3.1 / §3.3：对 base_url 做 GET /，**收到任何 HTTP �
     code=$(wget -q -T 2 -O /dev/null -S "$url" 2>&1 | sed -n 's|.*HTTP/[0-9.]* \([0-9]\{3\}\).*|\1|p' | head -1 || true)
   else
     # 最后兜底：能建立 TCP 连接就算「Web 服务活着」（拿不到状态码，只能退而求其次）
-    local host="${url#http://}" port=""
-    host=${host%%/*}
-    port=${host##*:}
-    host=${host%%:*}
-    if (exec 3<>"/dev/tcp/$host/$port") 2>/dev/null; then code=200; fi
+    # ⚠️ 原来这里用 bash 的 `/dev/tcp`。**mksh 没有 /dev/tcp**（实测：bash 连得上、
+    #    mksh 恒失败），而设备侧只有 mksh —— 于是这个兜底会永远判"不健康"。
+    #    改用 port_open_local（见文件末尾，三层回退，不依赖 /dev/tcp）。
+    local port=""
+    port=${url##*:}
+    port=${port%%/*}
+    if port_open_local "$port"; then code=200; fi
   fi
   case "$code" in
     2??|3??|4??) return 0 ;;
@@ -360,12 +384,20 @@ http_ready() { # §3.1 / §3.3：对 base_url 做 GET /，**收到任何 HTTP �
   esac
 }
 
+replay_log_delta() { # 把日志文件从字节偏移 $1 起的增量回放到 stderr（替代 `2> >(tee …)`）
+  local off="${1-0}" f="$LOG_FILE"
+  [[ -f "$f" ]] || return 0
+  is_uint "$off" || off=0
+  tail -c "+$((off + 1))" -- "$f" >&2 2>/dev/null || true
+  return 0
+}
+
 du_bytes() { # 目录/文件字节数；拿不到为空
   local p="${1-}" v=""
   exists "$p" || return 0
   command -v du >/dev/null 2>&1 || return 0
   v=$(du -sb -- "$p" 2>/dev/null | awk 'NR==1{print $1}' || true)
-  [[ "$v" =~ ^[0-9]+$ ]] && printf '%s' "$v"
+  is_uint "$v" && printf '%s' "$v"
   return 0
 }
 
@@ -521,7 +553,8 @@ build_status() {
 }
 
 emit_status() { # 参数：成对的 <已编码key> <已编码val>，附加在 §3.1 字段之后
-  local extra=("$@") out="" i=0
+  local extra out="" i=0
+  extra=("$@")          # mksh 里 `local extra=("$@")` 是语法错误：数组要先声明再赋值
   out=$(printf '{"schema":%d,"mode":"proot","state":%s,"pid":%s,"uptime_sec":%s,' \
     "$SCHEMA_VERSION" "$ST_STATE" "$ST_PID" "$ST_UPTIME")
   out+=$(printf '"dsh":{"url":%s,"base_url":%s,"port":%s,"version":%s,"healthy":%s},' \
@@ -534,8 +567,10 @@ emit_status() { # 参数：成对的 <已编码key> <已编码val>，附加在 �
     "$ST_DSH_VER" "$ST_DSH_SIZE" "$ST_DSH_MOUNTED")
   out+=$(printf '"storage":{"upper_used":%s,"upper_total":%s},' "$ST_UPPER_USED" "$ST_UPPER_TOTAL")
   out+=$(printf '"last_error":%s' "$ST_LAST_ERROR")
-  for (( i = 0; i < ${#extra[@]}; i += 2 )); do
+  i=0
+  while [ $i -lt ${#extra[@]} ]; do
     out+=",$(jstr "${extra[i]}"):${extra[i + 1]}"
+    i=$((i + 2))
   done
   out+='}'
   printf '%s\n' "$out"
@@ -702,7 +737,8 @@ install_script() { # install_script <src> <dst>；同 inode / 同内容则跳过
 find_seed() { # find_seed [显式路径]；打印选中的 tarball 路径，找不到打印空
   local cand="" d="" f="" explicit="${1-}"
   # 没有 zstd 时把 .tar.zst 排到最后：优先挑能直接解开的种子
-  local exts=()
+  local exts
+  exts=()
   if [[ -n "$(zstd_bin)" ]] && command -v "$(zstd_bin)" >/dev/null 2>&1; then
     exts=(tar.zst tar.gz tgz tar.xz tar.bz2 tar)
   else
@@ -1186,22 +1222,27 @@ cmd_start() {
   rm -f -- "$RUN_DIR/dsh.url" 2>/dev/null || true
   set_marker starting
 
-  local extra=()
+  local extra
+  extra=()
   [[ "$fake_root" == "1" ]] && extra+=(--fake-root)
   [[ "$fake_root" == "0" ]] && extra+=(--no-fake-root)
 
   local log_off=0
   [[ -f "$LOG_FILE" ]] && log_off=$(stat -c %s "$LOG_FILE" 2>/dev/null || printf '0')
-  [[ "$log_off" =~ ^[0-9]+$ ]] || log_off=0
+  is_uint "$log_off" || log_off=0
 
   local start_json="" rc=0
   # start.sh 的 stdout 是它自己的 JSON 结果（不是 linuxctl 的 stdout），这里捕获后写日志；
   # 人类可读的进度信息从 start.sh 的 stderr 透传到我们的 stderr，并同时落到 linux.log。
-  if start_json=$("$sh_path" --no-json "${extra[@]+"${extra[@]}"}" 2> >(tee -a "$LOG_FILE" >&2)); then
+  # ⚠️ 原来是 `2> >(tee -a "$LOG_FILE" >&2)`（进程替换 = bash 专有，mksh 直接语法错）。
+  #    改成「stderr 直接追加进日志 → 结束后回放本次增量到 stderr」：日志页（App 轮询
+  #    linux.log）依然是实时的，只有直接读本进程 stderr 的消费者会晚到命令结束时才看到。
+  if start_json=$("$sh_path" --no-json "${extra[@]+"${extra[@]}"}" 2>>"$LOG_FILE"); then
     rc=0
   else
     rc=$?
   fi
+  replay_log_delta "$log_off"
   [[ -n "$start_json" ]] && printf '[start.sh] %s\n' "$start_json" >>"$LOG_FILE" 2>/dev/null || true
 
   if (( rc != 0 )); then
@@ -1287,7 +1328,7 @@ cmd_logs() {
       *) warn "logs: 忽略未知参数 $1"; shift ;;
     esac
   done
-  [[ "$n" =~ ^[0-9]+$ ]] || n=200
+  is_uint "$n" || n=200
   require_linux_home
   if (( as_json )); then
     local content="" lines_json="[]"
@@ -1325,8 +1366,18 @@ snapshot_file_for() { # 找到某名字的快照文件（.tar.zst 优先）
   return 0
 }
 
-valid_name() {
-  [[ "${1-}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]]
+valid_name() { # 快照名：1-64 字符，首字符为字母/数字，其余 [A-Za-z0-9._-]
+  # 原来是 `[[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]]`；mksh 没有 `=~`，
+  # 用 case 的两个字符类 + 长度上限表达同一约束（首字符单独判）。
+  local n="${1-}"
+  case $n in
+    ''|[!A-Za-z0-9]*) return 1 ;;
+  esac
+  case $n in
+    *[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+  [ ${#n} -le 64 ] || return 1
+  return 0
 }
 
 cmd_snapshot() {
@@ -1634,7 +1685,8 @@ cmd_doctor() {
   done
   require_linux_home
 
-  local checks=() has_error=0
+  local checks has_error=0
+  checks=()
   add_check() { # add_check <id> <ok:true|false> <level> <detail>
     checks+=("$(json_obj id "$(jstr "$1")" ok "$(jbool "$2")" level "$(jstr "$3")" detail "$(jstr "$4")")")
     if [[ "$3" == "error" && "$2" == "false" ]]; then has_error=1; fi
@@ -1737,7 +1789,8 @@ cmd_doctor() {
   fi
 
   # 6. rootfs 完整性
-  local missing=() f
+  local missing f
+  missing=()
   for f in bin/sh bin/bash usr/bin/env etc/os-release opt/sunsetlinux/entry.sh \
            usr/local/bin/node usr/local/lib/node_modules/@deepseek-ai/dsh/package.json; do
     [[ -e "$ROOTFS/$f" ]] || missing+=("$f")
@@ -1788,7 +1841,8 @@ cmd_doctor() {
   fi
 
   # 10. IO 工具链
-  local tools_missing=() t
+  local tools_missing t
+  tools_missing=()
   for t in tar bash; do command -v "$t" >/dev/null 2>&1 || tools_missing+=("$t"); done
   if [[ -z "$(zstd_bin)" ]] || ! command -v "$(zstd_bin)" >/dev/null 2>&1; then
     command -v gzip >/dev/null 2>&1 || tools_missing+=("zstd 或 gzip")
@@ -1828,10 +1882,44 @@ cmd_doctor() {
   return $has_error
 }
 
+# -----------------------------------------------------------------------------
+# 端口探测
+#   ⚠️ **不能用 bash 的 `/dev/tcp`**：mksh 没有这个特性（`exec 3<>/dev/tcp/…` 在 mksh 下
+#   恒失败），而设备侧只有 /system/bin/sh = mksh。这类缺陷 `mksh -n` 抓不到（它不是语法错），
+#   只会表现为"真机上服务明明起来了却一直判不健康"。
+#   三层回退，每层都只用设备上可能有的东西（顺序按"无依赖 → 有依赖"）：
+#     1) /proc/net/tcp[6] 里找该端口的 LISTEN（st=0A）—— 纯 awk，零外部依赖
+#     2) nc -z（toybox/busybox netcat）
+#     3) ss -ltn（toybox/iproute2）
+#   任一缺失就自动落到下一层；全都没有时返回"未就绪"（与旧行为一致，不误报健康）。
+# -----------------------------------------------------------------------------
+tcp_listen_local() { # /proc/net/tcp[6] 里有没有该端口的 LISTEN
+  local hex=""
+  hex=$(printf '%04X' "${1-}" 2>/dev/null || true)
+  [ -n "$hex" ] || return 1
+  awk -v want=":${hex}" '
+    NR > 1 && $4 == "0A" && substr($2, length($2) - length(want) + 1) == want { f = 1; exit }
+    END { exit(f ? 0 : 1) }
+  ' /proc/net/tcp /proc/net/tcp6 2>/dev/null
+}
+
 port_open_local() { # TCP 连接测试（占用/就绪通用）
   local port="${1-}"
-  [[ "$port" =~ ^[0-9]+$ ]] || return 1
-  (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null
+  is_uint "$port" || return 1
+  # 去掉前导 0：`printf '%04X' 03080` 会按**八进制**解释 → 算出错误的端口号
+  while :; do case $port in 0?*) port=${port#0} ;; *) break ;; esac; done
+  [ "$port" -ge 1 ] && [ "$port" -le 65535 ] || return 1
+  tcp_listen_local "$port" && return 0
+  if command -v nc >/dev/null 2>&1; then
+    nc -z -w 2 127.0.0.1 "$port" >/dev/null 2>&1 && return 0
+  fi
+  if command -v ss >/dev/null 2>&1; then
+    ss -ltn 2>/dev/null | awk -v want=":${port}" '
+      NR > 1 && substr($4, length($4) - length(want) + 1) == want { f = 1; exit }
+      END { exit(f ? 0 : 1) }
+    ' && return 0
+  fi
+  return 1
 }
 
 # =============================================================================

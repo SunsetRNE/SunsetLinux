@@ -1,6 +1,11 @@
-#!/usr/bin/env bash
+#!/system/bin/sh
 # =============================================================================
 # SunsetLinux — proot 模式启动器（start.sh）                v1.0.0
+#
+# 解释器：**设备侧的 /system/bin/sh（mksh）**。本文件必须能被 mksh 解析 ——
+#   设备上没有 bash（`/system/bin/bash` 不存在），App 也只能用 `/system/bin/sh <脚本>`
+#   执行它（Android 10+ 禁止 execve App 私有目录里的文件）。
+#   闸门：tools/shell-compat-check.mjs；改这个文件前先读它，别再引入 bash 专有语法。
 #
 # 职责：把 rootfs「用 proot 装起来」，然后 exec rootfs 内的 /opt/sunsetlinux/entry.sh。
 #
@@ -32,7 +37,7 @@ set -euo pipefail
 
 SCHEMA_VERSION=1
 MODE="proot"
-SELF_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd -P)
+SELF_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")" >/dev/null 2>&1 && pwd -P)
 
 START_TIMEOUT=${SUNSETLINUX_START_TIMEOUT:-120}
 HOSTNAME_GUEST=${SUNSETLINUX_HOSTNAME:-sunsetlinux}
@@ -72,7 +77,23 @@ jstr() {
   printf '"%s"' "$s"
 }
 jnull_or_str() { if [[ -n "${1-}" ]]; then jstr "$1"; else printf 'null'; fi }
-jint() { if [[ "${1-}" =~ ^-?[0-9]+$ ]]; then printf '%s' "$1"; else printf 'null'; fi }
+# 整数判定：mksh 没有 `=~`（`[[ x =~ re ]]` 是语法错误），用 case 的字符类做等价的
+# "整串都是数字" 判断。见 docs/STATUS.md §3.4 与 tools/shell-compat-check.mjs。
+# （刻意写成多行：runtime/proot/selftest-funcs.sh 用 `/^fn()/,/^}/` 从本文件抽取实现来测。）
+is_uint() {
+  case ${1-} in ''|*[!0-9]*) return 1 ;; esac
+  return 0
+}
+is_int() {
+  case ${1-} in
+    ''|-) return 1 ;;
+    -*)   is_uint "${1#-}" ;;
+    *)    is_uint "$1" ;;
+  esac
+}
+jint() {
+  if is_int "${1-}"; then printf '%s' "$1"; else printf 'null'; fi
+}
 jbool() { case "${1-}" in true|1|yes|on) printf 'true';; false|0|no|off) printf 'false';; *) printf 'null';; esac }
 json_obj() {
   local out='{' first=1
@@ -278,13 +299,29 @@ build_proot_args() {
 # -----------------------------------------------------------------------------
 # DNS：多路回退把 Android 当前 DNS 写进 rootfs/etc/resolv.conf
 # -----------------------------------------------------------------------------
+# 单个 IPv4 段：0-255（允许前导 0）。先剥掉前导 0 再用 `[ -le ]`，
+# 避免 `(( 08 <= 255 ))` 这类八进制歧义。mksh 没有 `=~`，故全用 case。
+octet_ok() {
+  local o="${1-}"
+  case $o in ''|*[!0-9]*) return 1 ;; esac
+  while :; do case $o in 0?*) o=${o#0} ;; *) break ;; esac; done
+  [ ${#o} -le 3 ] || return 1
+  [ "$o" -le 255 ] 2>/dev/null || return 1
+  return 0
+}
+
 valid_ipv4() {
-  local ip="${1-}"
-  [[ "$ip" =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]] || return 1
-  local a b c d
+  local ip="${1-}" a="" b="" c="" d=""
+  # 原来这里是 `[[ $ip =~ ^([0-9]{1,3})\.…$ ]]`（bash 专有）。mksh 没有 `=~`，
+  # 改成「字符类过滤 + 按点切分 + 逐段判定」，语义等价且不需要正则。
+  case "$ip" in
+    ''|*[!0-9.]*) return 1 ;;
+  esac
   IFS=. read -r a b c d <<<"$ip"
-  (( a <= 255 && b <= 255 && c <= 255 && d <= 255 )) || return 1
-  [[ "$ip" == 0.0.0.0 || "$ip" == 127.* ]] && return 1
+  [ -n "$a" ] && [ -n "$b" ] && [ -n "$c" ] && [ -n "$d" ] || return 1
+  case "$d" in *.*) return 1 ;; esac          # 5 段以上时最后一段里会留下点
+  octet_ok "$a" && octet_ok "$b" && octet_ok "$c" && octet_ok "$d" || return 1
+  case "$ip" in 0.0.0.0|127.*) return 1 ;; esac
   return 0
 }
 
@@ -298,9 +335,16 @@ detect_dns() { # 输出：来源<TAB>IP（每行一个）；找不到输出空
       if valid_ipv4 "$ip"; then printf 'getprop %s\t%s\n' "$k" "$ip"; found=1; fi
     done
     if (( ! found )); then
+      # 原来是 `done < <(getprop …)`（进程替换 = bash 专有，mksh 直接语法错）。
+      # 改成「先取到变量，再用 here-doc 喂给 while」：here-doc 不是管道，
+      # 循环仍在当前 shell 里跑，`found=1` 能带出来（用管道会丢在子 shell 里）。
+      # 注意 here-doc 的结束符必须顶格（不能缩进）。
+      dns_lines=$(getprop 2>/dev/null | sed -n 's/.*\[[a-zA-Z0-9_.]*dns[0-9]*\]:[[:space:]]*\[\([0-9.]\{7,\}\)\].*/\1/p' | sort -u || true)
       while IFS= read -r ip; do
         valid_ipv4 "$ip" && { printf 'getprop(接口 dns)\t%s\n' "$ip"; found=1; }
-      done < <(getprop 2>/dev/null | sed -n 's/.*\[[a-zA-Z0-9_.]*dns[0-9]*\]:[[:space:]]*\[\([0-9.]\{7,\}\)\].*/\1/p' | sort -u || true)
+      done <<EOF
+$dns_lines
+EOF
     fi
   fi
 
@@ -308,9 +352,12 @@ detect_dns() { # 输出：来源<TAB>IP（每行一个）；找不到输出空
   local f=""
   for f in /system/etc/resolv.conf /etc/resolv.conf; do
     [[ -r "$f" ]] || continue
+    ns_lines=$(sed -n 's/^[[:space:]]*nameserver[[:space:]]\+\([0-9.]\{7,\}\).*/\1/p' "$f" 2>/dev/null || true)
     while IFS= read -r ip; do
       if valid_ipv4 "$ip"; then printf '%s\t%s\n' "$f" "$ip"; found=1; fi
-    done < <(sed -n 's/^[[:space:]]*nameserver[[:space:]]\+\([0-9.]\{7,\}\).*/\1/p' "$f" 2>/dev/null || true)
+    done <<EOF
+$ns_lines
+EOF
     (( found )) && break
   done
 
@@ -333,12 +380,19 @@ detect_dns() { # 输出：来源<TAB>IP（每行一个）；找不到输出空
 }
 
 prepare_dns() {
-  local lines=() ip="" src="" first_src=""
+  # ⚠️ `local lines=()` 在 mksh 里是语法错误（`unexpected '('`）：数组变量要
+  #    先声明、再单独赋值。见 tools/shell-compat-check.mjs。
+  local lines dns_all
+  local ip="" src="" first_src=""
+  lines=()
+  dns_all=$(detect_dns)
   while IFS=$'\t' read -r src ip; do
     [[ -n "$ip" ]] || continue
     lines+=("$ip")
     [[ -z "$first_src" ]] && first_src=$src
-  done < <(detect_dns)
+  done <<EOF
+$dns_all
+EOF
 
   DNS_IPS=("${lines[@]+"${lines[@]}"}")
   DNS_SOURCE=${first_src:-未知}
@@ -401,7 +455,7 @@ rotate_log() {
   local max=$((8 * 1024 * 1024)) size=""
   [[ -f "$LOG_FILE" ]] || return 0
   size=$(stat -c %s "$LOG_FILE" 2>/dev/null || printf '0')
-  if [[ "$size" =~ ^[0-9]+$ ]] && (( size > max )); then
+  if is_uint "$size" && (( size > max )); then
     mv -f -- "$LOG_FILE" "$LOG_FILE.1" 2>/dev/null || true
     log "日志超过 8 MiB，已轮转为 linux.log.1"
   fi
@@ -414,10 +468,35 @@ already_running() {
   [[ -n "$p" ]] && kill -0 "$p" 2>/dev/null
 }
 
+# 端口探测：**不能用 bash 的 /dev/tcp**（mksh 没有该特性，真机上恒为"连不上"——
+# 表现为"服务起来了但 start 一直等到超时"）。三层回退，见 linuxctl.sh 里的同一段注释。
+tcp_listen_local() { # /proc/net/tcp[6] 里有没有该端口的 LISTEN
+  local hex=""
+  hex=$(printf '%04X' "${1-}" 2>/dev/null || true)
+  [ -n "$hex" ] || return 1
+  awk -v want=":${hex}" '
+    NR > 1 && $4 == "0A" && substr($2, length($2) - length(want) + 1) == want { f = 1; exit }
+    END { exit(f ? 0 : 1) }
+  ' /proc/net/tcp /proc/net/tcp6 2>/dev/null
+}
+
 port_open_local() {
   local port="${1-}"
-  [[ "$port" =~ ^[0-9]+$ ]] || return 1
-  (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null
+  is_uint "$port" || return 1
+  # 去掉前导 0：`printf '%04X' 03080` 会按**八进制**解释 → 算出错误的端口号
+  while :; do case $port in 0?*) port=${port#0} ;; *) break ;; esac; done
+  [ "$port" -ge 1 ] && [ "$port" -le 65535 ] || return 1
+  tcp_listen_local "$port" && return 0
+  if command -v nc >/dev/null 2>&1; then
+    nc -z -w 2 127.0.0.1 "$port" >/dev/null 2>&1 && return 0
+  fi
+  if command -v ss >/dev/null 2>&1; then
+    ss -ltn 2>/dev/null | awk -v want=":${port}" '
+      NR > 1 && substr($4, length($4) - length(want) + 1) == want { f = 1; exit }
+      END { exit(f ? 0 : 1) }
+    ' && return 0
+  fi
+  return 1
 }
 
 launch_background() {
@@ -427,7 +506,8 @@ launch_background() {
   date +%s >"$RUN_DIR/started_at" 2>/dev/null || true
   rotate_log
 
-  local launcher=()
+  local launcher
+  launcher=()
   if command -v setsid >/dev/null 2>&1; then
     launcher=(setsid)
   else
@@ -545,7 +625,13 @@ main() {
   # 伪造 root 的决策顺序：命令行 > 环境变量 > config.json（默认 false）
   FAKE_ROOT=""
   if [[ -n "$FAKE_ROOT_FLAG" ]]; then FAKE_ROOT=$FAKE_ROOT_FLAG
-  elif [[ -n "${SUNSETLINUX_PROOT_FAKE_ROOT:-}" ]]; then FAKE_ROOT=$([[ "${SUNSETLINUX_PROOT_FAKE_ROOT}" =~ ^(1|true|yes|on)$ ]] && printf 1 || printf 0)
+  elif [[ -n "${SUNSETLINUX_PROOT_FAKE_ROOT:-}" ]]; then
+    # 原来是 `$([[ "$x" =~ ^(1|true|yes|on)$ ]] && printf 1 || printf 0)`——
+    # mksh 没有 `=~`；`case` 的 glob 在这里完全等价。
+    case "${SUNSETLINUX_PROOT_FAKE_ROOT}" in
+      1|true|yes|on) FAKE_ROOT=1 ;;
+      *)             FAKE_ROOT=0 ;;
+    esac
   else
     FAKE_ROOT=$(json_get_bool "$ETC_DIR/config.json" fake_root)
   fi
@@ -585,7 +671,8 @@ main() {
 
   if (( MODE_INNER )); then
     # 前台进入环境执行命令：stdout/退出码都属于被执行的命令本身
-    local cmd=()
+    local cmd
+    cmd=()
     if (( ${#INNER_CMD[@]} )); then cmd=("${INNER_CMD[@]}"); else cmd=(/bin/bash -l); fi
     log "进入环境执行：${cmd[*]}"
     exec "${PROOT_ARGS[@]}" "${cmd[@]}"

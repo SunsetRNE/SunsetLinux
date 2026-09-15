@@ -66,14 +66,16 @@ const ENV_SIDE = {
 /**
  * 已知仍然只能跑 bash 的脚本 → 原因。
  * ⚠️ 这不是"允许清单"，是**欠债清单**：修好一个就删一条，否则脚本会失败。
+ *
+ * 2026-09-15：**欠债已清零**。`runtime/proot/{linuxctl,start}.sh` 改成 mksh 可解析：
+ *   `[[ =~ ]]` → `case` 字符类（整数/名称/IPv4 判定）、C 式 `for (( ))` → `while`、
+ *   进程替换（`< <(cmd)` → here-doc；`2> >(tee …)` → 日志增量回放）、
+ *   `local x=()` → 先声明再赋值、`${BASH_SOURCE[0]}` → `${BASH_SOURCE[0]:-$0}`、
+ *   shebang → `#!/system/bin/sh`。上面几条都是 mksh 的**语法错误**（不是运行时差异），
+ *   所以修好后 `mksh -n` 与真机执行都能过。
+ *   仍未做的：真机跑一次 proot 模式的 `provision`/`start`（需要设备）。
  */
-const KNOWN_BASH_ONLY = {
-  'runtime/proot/linuxctl.sh':
-    '重度 bash：`[[ =~ ]]` 正则、数组、C 式 for、进程替换 2> >(tee …)。' +
-    'proot 模式下 App 用 /system/bin/sh 执行它 → 真机不可用。见 docs/STATUS.md「proot 模式」。',
-  'runtime/proot/start.sh':
-    '重度 bash：数组（PROOT_ARGS/BIND_SKIPPED）、`[[]]`、`(( ))`、进程替换。同上。',
-};
+const KNOWN_BASH_ONLY = {};
 
 const problems = [];
 const notations = [];

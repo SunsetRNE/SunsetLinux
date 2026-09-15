@@ -1004,10 +1004,38 @@ main() {
     exit 1
 }
 
-# 端口占用的最小判定：用 bash /dev/tcp（不需要 ss/netstat，Android 上也可能没有）
+# 端口占用的判定。
+#   ⚠️ 原来是 `exec 3<>/dev/tcp/…`——那是 **bash 专有**特性，而本脚本在设备上由
+#   /system/bin/sh（mksh）执行，mksh **没有 /dev/tcp**：实测同一个端口 bash 连得上、
+#   mksh 恒失败。后果是端口明明被占也会判"空闲"，`mksh -n` 抓不到（不是语法错）。
+#   三层回退（与 runtime/proot/{start,linuxctl}.sh 保持同一套逻辑与顺序）：
+#     1) /proc/net/tcp[6] 找 LISTEN（st=0A）——纯 awk，Android 上一定有
+#     2) nc -z   3) ss -ltn
+tcp_listen_local() { # /proc/net/tcp[6] 里有没有该端口的 LISTEN
+    local hex=""
+    hex=$(printf '%04X' "${1-}" 2>/dev/null || true)
+    [ -n "$hex" ] || return 1
+    awk -v want=":${hex}" '
+        NR > 1 && $4 == "0A" && substr($2, length($2) - length(want) + 1) == want { f = 1; exit }
+        END { exit(f ? 0 : 1) }
+    ' /proc/net/tcp /proc/net/tcp6 2>/dev/null
+}
+
 port_busy() {
-    local p="$1"
-    (exec 3<>"/dev/tcp/127.0.0.1/$p") 2>/dev/null && { exec 3>&- 2>/dev/null; return 0; }
+    local p="${1-}"
+    case $p in ''|*[!0-9]*) return 1 ;; esac
+    # 去掉前导 0：`printf '%04X' 03080` 会按**八进制**解释 → 算出错误的端口号
+    while :; do case $p in 0?*) p=${p#0} ;; *) break ;; esac; done
+    tcp_listen_local "$p" && return 0
+    if command -v nc >/dev/null 2>&1; then
+        nc -z -w 2 127.0.0.1 "$p" >/dev/null 2>&1 && return 0
+    fi
+    if command -v ss >/dev/null 2>&1; then
+        ss -ltn 2>/dev/null | awk -v want=":${p}" '
+            NR > 1 && substr($4, length($4) - length(want) + 1) == want { f = 1; exit }
+            END { exit(f ? 0 : 1) }
+        ' && return 0
+    fi
     return 1
 }
 
