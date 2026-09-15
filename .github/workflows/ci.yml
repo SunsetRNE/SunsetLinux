@@ -90,6 +90,10 @@ jobs:
           #   只装确实需要的：platform-tools + 我们的 compileSdk(35) 平台。
           #   build-tools 交给 AGP 按需下载（licenses 已由本动作接受）。
           packages: 'platform-tools platforms;android-35'
+          # 接受许可证但**不要把它们打印出来**：默认会把 6 段许可证全文刷进日志
+          # （实测一次几千行），把真正有用的构建输出淹掉了。
+          accept-android-sdk-licenses: true
+          log-accepted-android-sdk-licenses: false
 
       - name: 关掉 Gradle 守护进程（CI 上没必要常驻）
         run: echo "org.gradle.daemon=false" >> app/gradle.properties

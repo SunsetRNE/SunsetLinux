@@ -9,7 +9,7 @@
 #   症状极具误导性："层明明是好的却报格式不可识别"。
 #
 # 用法：  bash runtime/root/selftest.sh
-# 环境：  SUNSETLINUX_FIXTURES 可覆盖夹具目录（默认 <repo>/build/fixtures）
+# 环境：  SUNSETLINUX_FIXTURES 可覆盖夹具目录（默认 <repo>/testdata/fixtures）
 # 退出码：0 全过；1 有失败
 # =============================================================================
 set -uo pipefail
@@ -17,7 +17,8 @@ set -uo pipefail
 SELF_PATH="${BASH_SOURCE[0]:-$0}"   # mksh 下 BASH_SOURCE 未定义 → 退回 $0
 SELF_DIR="$(cd -- "$(dirname -- "$SELF_PATH")" && pwd -P)"
 REPO_DIR="$(cd "$SELF_DIR/../.." 2>/dev/null && pwd || printf '%s' "$SELF_DIR")"
-# 夹具查找顺序：显式指定 → 脚本同目录/fixtures（**模块安装后自带，真机可用**）→ 仓库 build/fixtures
+# 夹具查找顺序：显式指定 → 脚本同目录/fixtures（**模块安装后自带，真机可用**）
+#              → 仓库 testdata/fixtures（**CI 靠这条**；可跟踪、可重新生成）→ 本地 build/fixtures
 FIXTURES=""
 # 顺序：显式指定 → 脚本同目录（模块安装后自带 bin/fixtures/）→
 #       **仓库内可跟踪的 testdata/fixtures**（CI 靠这条；build/ 是 gitignore 的）→ 本地 build/

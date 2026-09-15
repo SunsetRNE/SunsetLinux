@@ -138,7 +138,7 @@ cd dist && sha256sum -c <(awk 'NF>=3 && $2 ~ /^[0-9]+$/ {print $3"  "$1}' MANIFE
    （**挂载与安装步骤必须由你执行**，原因见该文档开头）
 
 > 开发/排错时可以直接跑回归测试：
-> `bash runtime/root/selftest.sh`（19 项断言；装到设备后在 `$LINUX_HOME/bin/` 下也能跑）
+> `bash runtime/root/selftest.sh`（20 项断言；装到设备后在 `$LINUX_HOME/bin/` 下也能跑）
 
 ## 许可与上游
 

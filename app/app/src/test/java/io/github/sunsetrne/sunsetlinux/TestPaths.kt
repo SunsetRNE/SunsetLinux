@@ -28,7 +28,10 @@ object TestPaths {
             require(f.isDirectory) { "-Dsunsetlinux.repo.dir 指向的不是目录：$override" }
             f
         } else {
-            val start = File(System.getProperty("user.dir")).absoluteFile
+            // System.getProperty 返回 String?（Java 签名）——显式给个兜底，
+            // 免得 Kotlin 报 "inferred type is String?, but String was expected"
+            val cwd = System.getProperty("user.dir") ?: "."
+            val start = File(cwd).absoluteFile
             var dir: File? = start
             var found: File? = null
             while (dir != null) {

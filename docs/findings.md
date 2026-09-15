@@ -79,7 +79,7 @@ CONFIG_EROFS_FS_ZIP=y
 - 已修（三处都改为分别探测偏移 0 与偏移 1024）：`runtime/root/start.sh`、
   `runtime/root/doctor.sh`、`runtime/root/linuxctl.sh`。
 - 已加**回归测试**：`bash runtime/root/selftest.sh`（11 项断言，含夹具偏移校验、
-  三个函数的单元测试、`update` 端到端接受/拒绝），夹具在 `build/fixtures/*.bin`（各 2 KB）。
+  三个函数的单元测试、`update` 端到端接受/拒绝），夹具在 `testdata/fixtures/*.bin`（各 2 KB，`mkfixtures.sh` 可重新生成）。
 - 另一条**必须保持**的行为：压缩产物（`.erofs.zst`/`.gz`）应被 `linuxctl update` **拒绝**——
   解压是客户端（App）的职责，`linuxctl` 只接受可直接挂载的裸镜像。别把这条"修"掉。
 

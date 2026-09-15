@@ -517,7 +517,7 @@ sunsetlinux/
       start.sh stop.sh status.sh
       entry.sh supervise.sh
       doctor.sh            #   自检（含 §1b toybox 能力、§1c 挂载实现探测）
-      selftest.sh          #   回归测试（真机上也能跑；夹具在 build/fixtures）
+      selftest.sh          #   回归测试（真机上也能跑；夹具在 testdata/fixtures）
       update.sh            #   WebUI 走 gzip 的更新路径（下载→校验→解压→linuxctl update --version）
       layer-spec.sh 的副本由打包脚本从 rootfs/ 取
     proot/{linuxctl.sh,start.sh,entry.sh,selftest.sh}
@@ -535,7 +535,8 @@ sunsetlinux/
     proot-bundle/          # proot 二进制自带打包（GPLv2 合规）
     proot-runtime/         # proot 运行时脚本打包（sunsetlinux-proot-runtime/bin/*）
     contract-check.mjs     # status JSON 契约一致性断言（两套运行时都要过）
-  build/fixtures/          # 层格式探测的回归测试夹具（3×2KB 的 magic 头）
+  testdata/fixtures/       # 层格式探测的回归测试夹具（3×2KB 的 magic 头；
+                           #   mkfixtures.sh 可重新生成，CI 靠这份跑那 20 项断言）
   dist/                    # 产物
 ```
 

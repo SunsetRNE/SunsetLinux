@@ -184,7 +184,26 @@ tools/channel/sunsetlinux-channel keygen --out-dir ~/.sunsetlinux-keys
 
 ---
 
-## 六、用户侧怎么用
+## 六、CI 环境的坑（**都实际踩过**，每条都花了时间）
+
+首次把仓库推上去跑 CI 时发现的问题，逐条记在这里，省得以后重踩：
+
+| 现象 | 根因 | 解法 |
+|---|---|---|
+| `setup-android` 退出码 1 | 该动作默认装 `packages: tools platform-tools`，而 **`tools` 包已从 Google 的 SDK 仓库移除**（`sdkmanager` 报 `Failed to find package 'tools'`） | 显式给 `packages: 'platform-tools platforms;android-35'`，build-tools 交给 AGP 按需下载（licenses 已由该动作接受） |
+| root 自测"通过"但什么都没测 | 那 19 项断言依赖 3 个夹具，夹具原先只在 `build/fixtures/`，而 **`build/` 是 gitignore** → CI 找不到夹具，脚本打印 `SKIP` 后 `exit 0`（**假绿**） | 夹具移到仓库内可跟踪的 `testdata/fixtures/`，并配一个可重新生成的 `mkfixtures.sh`（带 `--check`） |
+| 夹具修好后 CI 反而红了 | 断言"合法 erofs 被接受"依赖**宿主内核支持 erofs**，而 **GitHub runner 的内核没有 erofs** → `linuxctl` **正确地**拒绝了 | 新增显式测试开关 `LINUXCTL_KERNEL_FS_OVERRIDE=<格式>`（仅影响用户态预检；真挂不上时 `start.sh` 仍会失败）；`selftest.sh` 在宿主内核缺该格式时**声明**并设上它，让"落盘命名/state.json/find_layer 版本优先/rollback"这些自己的逻辑仍被覆盖 |
+| 发布 run 的门禁被 cancelled | `ci.yml` 的 `concurrency: ci-<ref>` + `cancel-in-progress: true`：`main`/`beta` 的推送**同时**触发独立的 `ci.yml` 和 `release.yml`（后者 `workflow_call` 复用前者），两个实例落进同一组互相取消 | `ci.yml` 的 `push` 用 `branches-ignore: [main, beta]`（这两条分支交给 release 的门禁），并把 `cancel-in-progress` 改成 `false`（宁可排队，不可误杀发布门禁） |
+| 两个工作流同时写 gh-pages 会互相覆盖 | `release.yml` 与 `channel.yml` 各用各的 concurrency 组名 → 并发 force push；`keep_files: true` 只保护"运行开始时已存在的文件" | 两者**共用**并发组 `gh-pages` |
+| 单测摘要报"tests=0" | 前面某步先失败 → Android 构建被跳过 → 没有测试 XML，摘要步骤却仍在判定"必须有用例" | 摘要加 `if: always() && steps.android.conclusion == 'success'` |
+
+> ⚠️ **CI 验证不了的东西**：宿主内核能力（erofs 挂载）、真机 SELinux 域、toybox 的
+> `mount`/`unshare` 选项支持面、Android 侧无 bash 时的完整启动链路 —— 这些只有**真机**
+> 能回答（见 `docs/smoke-test.md`）。CI 负责的是"我们自己的逻辑"与"语法/契约不漂移"。
+
+---
+
+## 七、用户侧怎么用
 
 1. 在 App 里添加频道（URL + 公钥 + 指纹）；
 2. 想尝鲜 → 订阅 **`/beta/channel.json`**；想稳 → 订阅 **`/stable/channel.json`**；
@@ -195,7 +214,7 @@ tools/channel/sunsetlinux-channel keygen --out-dir ~/.sunsetlinux-keys
 
 ---
 
-## 七、与"署名/身份"的关系
+## 八、与"署名/身份"的关系
 
 - git 提交身份：`SunsetRNE <z100o190zgxc@163.com>`（已配置全局与仓库级）；
 - 频道签名密钥：**与 git 身份无关**，是独立的 Ed25519 密钥对，私钥只存 Secret 与你的离线备份；
@@ -203,7 +222,7 @@ tools/channel/sunsetlinux-channel keygen --out-dir ~/.sunsetlinux-keys
 
 ---
 
-## 八、落地状态
+## 九、落地状态
 
 | 项 | 状态 |
 |---|---|
