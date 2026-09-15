@@ -95,6 +95,39 @@ mkdir -p /data/sunsetlinux/{layers,seeds,cache,etc,bin,run,snapshots,work,rootfs
 /data/sunsetlinux/bin/linuxctl update dsh     /data/sunsetlinux/cache/dsh-<ver>.erofs
 ```
 
+> ⚠️ `update` 只吃**解压后的裸 `.erofs`**（喂 `.zst`/`.gz` 会被明确拒绝，见 `docs/STATUS.md` §3.2）。
+
+### 方式 D：懒人体检 / 一键部署（`oneshot-setup.sh`，**在哪都能跑**）
+
+不想记上面那些步骤时用这个。它随模块一起装到设备上：
+
+```bash
+# 只体检（**只读，不改任何东西**，可以随便跑）：
+sh /data/adb/modules/sunsetlinux/bin/oneshot-setup.sh
+
+# 体检没问题就真部署（需要 root；会自动下缺的种子 → 真 chroot 建三层 → start → status）：
+su -c 'sh /data/adb/modules/sunsetlinux/bin/oneshot-setup.sh --run'
+```
+
+它检查：身份与 shell（是否 root / 有没有 `su`）、模块是否装了、`linuxctl` 与
+`device-provision.sh` 在不在、环境根与**三层只读镜像**齐不齐（"缺少层文件"就是这里报的）、
+工具链（`chroot`/`mount`/`mkfs.erofs`/`mke2fs`…）、`/data` 剩余空间、网络、以及
+**种子**（ubuntu-base + Node 官方包；缺了直接告诉你 URL，或在 `--run` 时替你下）。
+每一项都给出"怎么修"，最后给一条可以直接复制的下一步命令。
+
+**在 MT 管理器里跑也没问题**（`/storage/emulated/0/Download/` 里就能跑）：
+
+| 事项 | 说明 |
+|---|---|
+| MT 的「系统」模式 | 用的是 `/system/bin/sh` = **mksh**，本脚本按 mksh 写并进了 `tools/shell-compat-check.mjs` 闸门 |
+| MT 的「扩展包」模式 | 给的是 bash/ash，同样能跑（脚本只用 POSIX + `case`，不用数组/`[[ =~ ]]`/进程替换） |
+| 为什么不是 `./oneshot-setup.sh` | `/sdcard` 是 FAT/exFAT，**没有可执行位** → 用 `sh 脚本` 跑 |
+| 保存脚本时 | 存成 **LF** 换行；用会写 CRLF 的编辑器保存过，mksh 会报 `\r` 相关语法错 |
+| 真的写东西时 | 一律落在 `/data`（`/data/sunsetlinux`），不会往 `/sdcard` 写 |
+
+> `--run` 会在真 chroot 里跑 apt + npm（十几分钟到半小时），日志在
+> `/data/sunsetlinux/run/linux.log`；中断了可以直接重跑（provisioning 是幂等的）。
+
 ---
 
 ## 3. 安装 KernelSU 模块（让环境开机自启、且不依赖 App）

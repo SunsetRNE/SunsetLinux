@@ -185,6 +185,33 @@ apksigner verify --print-certs <旧 CI 包>             → 84be9523…  ← 与
 （密钥文件在、两个 buildType 绑同一配置、无环境变量时必须回落到仓库内那把、
 `.gitignore` 必须放行、版本号必须推进过）。
 
+### 3.9 ★ 懒人体检 / 一键部署脚本 `oneshot-setup.sh`（2026-09-16 第四批）
+
+用户问："有没有懒人化的检测执行脚本？在任意目录执行即可？比如 Download 目录下？
+兼容 MT 使用系统或者扩展包执行环境？" —— 于是加了 `runtime/root/oneshot-setup.sh`：
+
+- **在哪都能跑**：不依赖 cwd，也不依赖仓库（只跟设备上的模块打交道）；
+  `runtime/root/*.sh` 会被 `mkmodule.sh` 自动铺进模块 `bin/`，开机再由 `post-fs-data.sh`
+  同步到 `/data/sunsetlinux/bin/` —— 所以设备上直接 `sh /data/adb/modules/sunsetlinux/bin/oneshot-setup.sh`。
+- **默认只读**：不带参数只做体检（身份/`su`、模块、`linuxctl` 与 `device-provision.sh`、
+  环境根与**三层镜像**、工具链、`/data` 空间、网络、种子），每项都给"怎么修"，
+  最后给一条可复制的下一步命令。要动手必须显式 `--run`。
+- **`--run`**：缺种子就自动下（ubuntu-base + Node 官方包）→ 跑 `device-provision.sh` →
+  `linuxctl start` → `linuxctl status`；不是 root 就自动 `su -c` 重跑自己。
+- **MT 双模式**：只用 POSIX + `case`（不用数组 / `[[ =~ ]]` / 进程替换 / `local x=()`），
+  mksh（MT「系统」）与 bash/ash（MT「扩展包」）都过；`/sdcard` 没有可执行位 →
+  用 `sh 脚本` 跑；文档提醒存成 LF。闸门 `shell-compat-check` 已覆盖本文件。
+
+**验收**：`mksh -n` / `bash -n` / 闸门通过；用**假设备布局**（`/data/adb/modules/...` +
+`/data/sunsetlinux/...`）跑了四种场景（三层齐备 / 一层都没有 / 只缺 runtime /
+种子只在子目录）与 `--run`（桩 provisioning + 桩 linuxctl）的控制流，输出与分支都对。
+**未验证**：真机上的实际部署（本容器没有真 chroot；真机连层都还没有）。
+顺带修掉一个真 bug：`device-provision.sh` 里的 `UBUNTU_BASE_URL` 含**未展开**的
+`${UBUNTU_BASE_TARBALL}`，脚本"读它自己认定的 URL"会把字面量带进下载地址 → 已加 `$` 守卫。
+
+模块版本随之推进：`v1.0.1/10001` → **`v1.0.2/10002`**（模块内容变了就得换版本号，
+否则同版本不同内容，用户根本升不到）。
+
 ### 3.7 ★ 模块 WebUI 图标化 + 内置官方频道 + 模块 1.0.1（2026-09-16 第二批）
 
 | 改动 | 做法 | 回归 |

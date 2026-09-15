@@ -29,7 +29,7 @@
 4. `layers-release.yml` 层托管 —— `layers` 分支推送触发；**不构建**，只把 staging 分支里的
    分发产物传到 Release 资产（"Release 当纯存储"），并打印 `publish-channel` 用的 base-url。
 
-**已发布的产物**（gh-pages `stable/`）：APK、`sunsetlinux-module-1.0.1.zip`、`index.json`。
+**已发布的产物**（gh-pages `stable/`）：APK、`sunsetlinux-module-1.0.2.zip`、`index.json`。
 门禁那轮实测：脚本断言 20/20（bash 与 mksh 各一遍）、proot 18/18、**proot 纯函数 65/65**、
 WebUI 64/64、版本一致性 16/16、契约通过、Android 构建 `BUILD SUCCESSFUL`、**单测 62/0**。
 
