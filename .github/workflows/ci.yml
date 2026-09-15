@@ -95,11 +95,14 @@ jobs:
         run: echo "org.gradle.daemon=false" >> app/gradle.properties
 
       - name: Android 构建 + 单测（★ 两条一起跑）
+        id: android
         working-directory: app
         run: ./gradlew --no-daemon :app:assembleDebug :app:testDebugUnitTest
 
       - name: 单测结果摘要
-        if: always()
+        # 只在构建**真的跑过**时才当"必须有用例"来判定：前面某步先失败时构建会被跳过，
+        # 此时 tests=0 是真的（没跑），再报一次错只是噪音（实测就被这条误导过）。
+        if: always() && steps.android.conclusion == 'success'
         run: |
           python3 - <<'PY'
           import glob, xml.etree.ElementTree as ET

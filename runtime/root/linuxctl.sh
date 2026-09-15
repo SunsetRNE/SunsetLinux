@@ -951,10 +951,22 @@ cmd_update() {
     #     · 不可读（受限上下文 / 容器 / 沙箱）→ **放行并告警**（信息不可得≠不支持）
     #   这一条是被真实场景逼出来的：某次运行里 /proc/filesystems 变成 Permission denied，
     #   旧写法把"读不到"当成"内核不支持 erofs"，于是**合法的 erofs 层被拒收**。
+    #
+    # ★ 第四态：**显式测试开关** `LINUXCTL_KERNEL_FS_OVERRIDE=<格式…>`
+    #   在"内核确实没有该格式"的环境里（例如 GitHub runner 的内核没有 erofs）跑集成测试用。
+    #   为什么需要它：`selftest.sh` 有一组断言要验证"合法 erofs 被接受 → 按 layer-spec 命名
+    #   落盘 → state.json 写版本 → find_layer 版本优先 → rollback"，这些是**我们自己的逻辑**，
+    #   跟宿主内核有没有 erofs 无关。没有这个开关，CI 上就只能跳过它们（等于测不到）。
+    #   它只影响这道**用户态预检**：真挂不上时 start.sh 仍会失败，不存在"骗过挂载"。
     local fssup="" fslist="" fs_readable=1 found=0 fsline fslast
+    case " ${LINUXCTL_KERNEL_FS_OVERRIDE:-} " in
+        *" $fmt "*)
+            warnl "LINUXCTL_KERNEL_FS_OVERRIDE 指定跳过内核格式检查（仅测试用）；真机请勿设置"
+            fssup="$fmt" ;;
+    esac
     fslist="$(cat /proc/filesystems 2>/dev/null)" || fs_readable=0
     if [ -s "$fslist" ]; then fs_readable=1; fi
-    if [ "$fs_readable" = "1" ] && [ -n "$fslist" ]; then
+    if [ -z "$fssup" ] && [ "$fs_readable" = "1" ] && [ -n "$fslist" ]; then
         # ★ 整词匹配：/proc/filesystems 的行是 "<TAB>erofs" / "nodev<TAB>sysfs"，
         #   类型名是**行内最后一个词**。早先用 "*\n$fmt\n*" 匹配会因行首 TAB **永远失败**，
         #   把合法的 erofs 判成"内核不支持"（实测：那一行是 `^Ierofs$`）。

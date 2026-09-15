@@ -38,7 +38,7 @@
 
 | 测试 | 断言数 | 结果 |
 |---|---|---|
-| `runtime/root/selftest.sh` | 19 | ✅ |
+| `runtime/root/selftest.sh` | 20 | ✅ |
 | `runtime/proot/selftest.sh` | 18 | ✅ |
 | `module/webroot/selftest.mjs`（WebUI 纯函数） | 41 | ✅ |
 | `tools/cmp-consistency.mjs`（三方版本比较） | 16 | ✅ |
@@ -88,7 +88,7 @@ E: linuxctl.sh[1578]: dsh_status_json: inaccessible or not found   ← 状态 JS
 | `BASH_SOURCE` 定不到自身路径 | `stop/start/status/selftest.sh` | 改 `${BASH_SOURCE[0]:-$0}`（mksh 下退回 `$0`） |
 | shebang 写着 `#!/usr/bin/env bash`，但设备上要**直接执行**它 | 设备侧全部脚本 | 统一 `#!/system/bin/sh`；只有环境内（chroot/proot 后）的 `entry.sh`/`supervise.sh` 保留 bash |
 
-**验收证据**：`mksh runtime/root/selftest.sh` → **19/19 通过**；
+**验收证据**：`mksh runtime/root/selftest.sh` → **20/20 通过**；
 `mksh runtime/root/linuxctl.sh status` 与 `bash` 版输出**逐字节一致**，并通过 §3.1 冻结契约校验。
 新增闸门 `tools/shell-compat-check.mjs` 已进 CI：设备侧脚本过不了 mksh 就**直接失败**。
 

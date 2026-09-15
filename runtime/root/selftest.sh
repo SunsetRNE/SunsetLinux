@@ -93,6 +93,18 @@ done
 
 head_ "端到端：linuxctl update 的格式判定"
 LH="$TMP/linux"; mkdir -p "$LH"/{layers,etc,run,bin,cache,upper,work,rootfs,layers-mnt}
+
+# ★ 宿主内核**没有 erofs** 时（例如 GitHub runner），linuxctl 会**正确地**拒绝合法 erofs
+#   —— 那是环境性质，不是缺陷。但本组断言考的是"格式判定 + 按 layer-spec 命名落盘 +
+#   state.json + find_layer 版本优先 + rollback"这些**我们自己的逻辑**，与宿主内核无关。
+#   所以这里显式声明跳过那道内核预检（仅测试用；真机不要设这个变量）。
+if grep -qw erofs /proc/filesystems 2>/dev/null; then
+    ok "宿主内核支持 erofs，按真实行为测"
+else
+    export LINUXCTL_KERNEL_FS_OVERRIDE=erofs
+    printf '  \033[33m注意\033[0m 宿主内核没有 erofs → 已设 LINUXCTL_KERNEL_FS_OVERRIDE=erofs\n'
+    printf '       本组断言测的是我们自己的逻辑（格式判定/落盘/状态），内核能力留给真机验\n'
+fi
 # 合法 erofs 必须被**接受**（这里用 2KB 头当最小样本：update 只做 magic 判定）
 if out="$(LINUX_HOME="$LH" bash "$SELF_DIR/linuxctl.sh" update dsh "$FIXTURES/erofs-head.bin" 2>&1)"; then
     case "$out" in
