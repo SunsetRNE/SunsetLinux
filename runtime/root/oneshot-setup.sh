@@ -44,8 +44,7 @@ c_info() { printf '    %s\n' "$*"; }
 head_()  { printf '\n== %s ==\n' "$*"; }
 
 BAD=0      # 阻断项（不修就没法继续）
-WARN=0     # 非阻断项
-bad()  { BAD=$((BAD + 1)); c_bad "$*"; }
+WARN=0     # 非阻断项bad()  { BAD=$((BAD + 1)); c_bad "$*"; }
 warn() { WARN=$((WARN + 1)); c_warn "$*"; }
 
 have() { command -v "$1" >/dev/null 2>&1; }
@@ -169,12 +168,16 @@ fi
 # 4) 工具链
 # -----------------------------------------------------------------------------
 head_ "工具链"
-for t in chroot mount umount awk sed grep find xargs tar gzip; do
+# 清单来自 device-provision.sh 自己的依赖（它缺什么会 die）：chroot/mount 必需，
+# mkfs.erofs（没它才回退 mksquashfs）、mke2fs 建 upper.img、truncate 建稀疏文件、
+# tar/gzip 解包与压缩。少一项就别急着 --run。
+for t in chroot mount umount awk sed grep find xargs tar gzip truncate; do
   have "$t" && c_ok "$t" || bad "缺 $t（Toybox 里一般都有；ROM 太精简就这样）"
 done
 have mkfs.erofs && c_ok "mkfs.erofs（层镜像格式）" || bad "缺 mkfs.erofs —— 没有它建不出 EROFS 层（erofs-utils / 设备内核支持）"
 have fsck.erofs && c_ok "fsck.erofs（打包后校验）" || warn "缺 fsck.erofs（不阻断，但少一道校验）"
 have mke2fs && c_ok "mke2fs（建 upper.img）" || bad "缺 mke2fs —— 建不出可写层"
+have sha256sum && c_ok "sha256sum（种子/层校验）" || warn "缺 sha256sum（不阻断，但少一道完整性核对）"
 if have curl || have wget; then
   c_ok "有 $(have curl && printf curl || printf wget)（下种子用）"
 else
@@ -256,6 +259,29 @@ if [ -z "$UB_SEED" ] || [ -z "$ND_SEED" ]; then
   c_info "  $UBUNTU_URL"
   c_info "  $NODE_URL"
   c_info "或者直接 --run，让本脚本替你下（各约 30/25 MB）"
+fi
+
+# -----------------------------------------------------------------------------
+# 6.5) 模块版本 vs 官方发布（尽力而为：没网 / 没 curl 就跳过，不算失败）
+#   为什么值得查：模块里带着 linuxctl / device-provision.sh / 本脚本自身，
+#   版本落后就意味着"你现在跑的部署逻辑是旧的"（实测第一台设备就是 1.0.0 落后于 1.0.2）。
+# -----------------------------------------------------------------------------
+head_ "版本"
+INST_VER="${MV:-}"
+INST_VER="${INST_VER#v}"
+LATEST=""
+if [ -n "$INST_VER" ] && have curl; then
+  IDX="$(curl -s --max-time 10 https://sunsetrne.github.io/SunsetLinux/stable/index.json 2>/dev/null || true)"
+  LATEST="$(printf '%s' "$IDX" | sed -n 's/.*"module_version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1)"
+fi
+if [ -z "$INST_VER" ]; then
+  c_info "设备上没有模块版本信息（模块没装或 module.prop 读不到）—— 跳过比较"
+elif [ -z "$LATEST" ]; then
+  c_info "拿不到官方发布版本（没网 / 没 curl）—— 跳过比较"
+elif [ "$LATEST" = "$INST_VER" ]; then
+  c_ok "模块版本与官方发布一致（$INST_VER）"
+else
+  warn "模块版本不一致：设备上 $INST_VER、官方发布 $LATEST —— 建议先在 KernelSU 管理器里装 sunsetlinux-module-$LATEST.zip（新模块同时带来最新的部署脚本）"
 fi
 
 # -----------------------------------------------------------------------------

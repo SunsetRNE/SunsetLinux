@@ -212,6 +212,21 @@ apksigner verify --print-certs <旧 CI 包>             → 84be9523…  ← 与
 模块版本随之推进：`v1.0.1/10001` → **`v1.0.2/10002`**（模块内容变了就得换版本号，
 否则同版本不同内容，用户根本升不到）。
 
+**真机首次运行（同一天，用户贴回输出）**：在 `/storage/emulated/0/Download/` 用 MT 管理器的
+**mksh（系统模式）**跑通，`uid=0` 直接是 root；**工具链全绿** —— `chroot`/`mount`/`umount`/
+`awk`/`sed`/`grep`/`find`/`xargs`/`tar`/`gzip`/`mkfs.erofs`/`fsck.erofs`/`mke2fs`/`curl` 都在，
+`zstd` 确实没有（与"分发要有 .gz 回退"一致）；`/data` 剩 619 GiB、网络可达。
+阻断项只有两个，都是预期的：**三层镜像一个都没有**、**种子没放**。这同时回答了
+`docs/STATUS.md` §4.2 里"设备上有没有这些工具"一半的未知项（另一半是 mount 选项/SELinux，
+要等真跑 provision 才知道）。
+
+据此又补了两处（真机输出直接暴露的）：
+1. 工具链清单漏了 **`truncate`**（`device-provision.sh` 建稀疏 upper.img 要用它，缺了会 die），
+   一并把 `sha256sum`（种子/层校验，可选）也纳入体检；
+2. 新增**模块版本 vs 官方发布**的比较（拉 `/stable/index.json` 的 `module_version`）——
+   实测第一台设备模块是 `1.0.0` 而官方已 `1.0.2`，脚本会直接提示去装新模块 zip。
+   紧跟这个改动，模块再推进一格：**`v1.0.3/10003`**。
+
 ### 3.7 ★ 模块 WebUI 图标化 + 内置官方频道 + 模块 1.0.1（2026-09-16 第二批）
 
 | 改动 | 做法 | 回归 |
