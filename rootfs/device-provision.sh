@@ -130,6 +130,8 @@ LOG_FILE="$LH/cache/provision.log"
 # 阶段基线清单（"before"）：内层每个阶段开始时生成，build_layer 用它切增量。
 # 允许从环境继承 —— 外层生成的引导脚本会把同一个路径导进来。
 MANIFEST_BEFORE="${MANIFEST_BEFORE:-$CACHE_DIR/.manifest-before}"
+# 部署锁：同一时刻只允许一次构建（模块开机自动部署、App 向导、用户手敲三条路都可能撞上）
+LOCK_FILE="$RUN_DIR/provision.lock"
 
 NODE_VERSION="${NODE_VERSION:-v24.21.0}"
 DSH_NPM_TAG="${DSH_NPM_TAG:-latest}"
@@ -1204,10 +1206,11 @@ write_etc() {
   "mode": "root",
   "host": "127.0.0.1",
   "autostart": true,
+  "auto_provision": true,
   "layer_format": "$LAYER_EXT",
   "freeze_exempt": true,
   "log_max_bytes": 4194304,
-  "note": "autostart=true：KernelSU 模块 service.sh 在 late_start 调 linuxctl start，与 App 无关"
+  "note": "autostart=true：KernelSU 模块 service.sh 在 late_start 调 linuxctl start，与 App 无关；auto_provision=true：开机发现还没建层时自动部署一次（不会循环重试）"
 }
 EOF
         log "已写 $ETC_DIR/config.json（已存在则不覆盖）"
@@ -1336,6 +1339,33 @@ summary() {
 }
 
 # ===========================================================================
+# 16b. 部署锁（一个时刻只允许一次构建）
+#   为什么需要：现在有三条路会发起部署 ——
+#     · 模块 service.sh 开机自动部署（零点击）
+#     · App 的「首次部署向导」
+#     · 用户自己在 root 终端手敲
+#   它们撞在一起会同时往同一个 BUILD_DIR / layers/ 里写，产物必坏。
+#   锁是**软锁**：只在 PID 还活着时拦；进程死了（断电/被杀）留下的陈旧锁会被自动接管。
+# ===========================================================================
+acquire_lock() {
+    # 内层（--inner-run）是外层的子进程，属于同一次部署，不重复加锁
+    [ "$INNER_RUN" = "1" ] && return 0
+    if [ -f "$LOCK_FILE" ]; then
+        local old=""
+        old="$(tr -dc '0-9' < "$LOCK_FILE" 2>/dev/null || true)"
+        if [ -n "$old" ] && [ -d "/proc/$old" ]; then
+            die "另一次部署正在运行（PID $old，锁：$LOCK_FILE）。等它结束再跑；
+      如果确认它已经死了：rm -f $LOCK_FILE"
+        fi
+        log "接管陈旧的部署锁（PID ${old:-?} 已不存在）"
+    fi
+    mkdir -p "$RUN_DIR" 2>/dev/null || true
+    printf '%s\n' "$$" > "$LOCK_FILE" 2>/dev/null || true
+    trap 'rm -f "$LOCK_FILE" 2>/dev/null || true' EXIT INT TERM
+    log "已取得部署锁（PID $$）"
+}
+
+# ===========================================================================
 # 17. 三层阶段编排（只在内层 --inner-run 里跑）
 #   ★ 三条层与宿主侧 build-layers.sh 的 make_layer_stage **完全同口径**：
 #       base    = 与"空层"比 → **完整 rootfs**
@@ -1397,6 +1427,8 @@ main() {
     # ★ 参数解析放在这里（而不是脚本顶层）：main 必须保住原始 "$@"，
     #   内层引导脚本要把它们**原样重放**（见下面生成引导脚本那段）。
     parse_args "$@"
+
+    acquire_lock
 
     mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || true
     : >> "$LOG_FILE" 2>/dev/null || true

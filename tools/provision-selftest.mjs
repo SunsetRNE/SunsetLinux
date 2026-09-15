@@ -176,6 +176,57 @@ console.log('\n== 参数重放：含空格与单引号的路径（转义必须�
 
 
 // ---------------------------------------------------------------------------
+// ★ **零点击部署**的决策回归（module/service.sh 的 autoprovision_decision）
+//   用户反馈："还得点开 App 再点『执行部署』，有点麻烦" → 改成开机自动部署一次。
+//   自动跑一个半小时的构建，触发条件必须**准**：
+//     · 已经建过层 → 不跑（否则每次开机都重建）
+//     · 已经尝试过一次 → 不跑（失败/断电后绝不循环重来）
+//     · 种子不全 / 空间不足 / 用户在 config 里关了 → 不跑，并把原因写进日志
+//   这些分支全靠这个纯函数决定，所以直接把它抽出来对着矩阵跑。
+console.log('\n== 零点击部署：autoprovision_decision 矩阵 ==');
+{
+  const svcPath = join(REPO, 'module/service.sh');
+  const svc = readFileSync(svcPath, 'utf8');
+  const fn = extractFunc(svc, 'autoprovision_decision');
+  const MARKER = '/data/sunsetlinux/run/.auto-provision-attempted';
+  const SEEDS = '/data/sunsetlinux/seeds';
+  const driver = `set -u
+MARKER=${JSON.stringify(MARKER)}
+SEEDS=${JSON.stringify(SEEDS)}
+AUTOPROV_MIN_KB=2097152
+${fn}
+printf 'yes|%s\\n' "$(autoprovision_decision 0 1 0 1 5000000)"
+printf 'tried|%s\\n' "$(autoprovision_decision 0 1 1 1 5000000)"
+printf 'off|%s\\n' "$(autoprovision_decision 0 1 0 0 5000000)"
+printf 'have|%s\\n' "$(autoprovision_decision 1 1 0 1 5000000)"
+printf 'noseed|%s\\n' "$(autoprovision_decision 0 0 0 1 5000000)"
+printf 'lowdisk|%s\\n' "$(autoprovision_decision 0 1 0 1 1000)"
+printf 'nodisk|%s\\n' "$(autoprovision_decision 0 1 0 1 '')"
+`;
+  for (const shell of ['mksh', 'bash']) {
+    const r = spawnSync(shell, ['-c', driver], { encoding: 'utf8' });
+    const out = `${r.stdout ?? ''}${r.stderr ?? ''}`;
+    const get = (k) => (out.split('\n').find((l) => l.startsWith(k + '|')) ?? '').split('|')[1] ?? '';
+    ok(r.status === 0, `${shell}：决策函数可运行（退出码 ${r.status}）`);
+    ok(get('yes') === 'yes', `${shell}：没层 + 种子齐 + 没试过 + 开关开 → 自动部署`);
+    ok(/^no:/.test(get('tried')), `${shell}：已尝试过 → 跳过（绝不循环重来）：${get('tried')}`);
+    ok(/^no:/.test(get('off')), `${shell}：config 关了 → 跳过`);
+    ok(/^no:/.test(get('have')), `${shell}：已有 base 层 → 跳过`);
+    ok(/^no:/.test(get('noseed')), `${shell}：种子不全 → 跳过`);
+    ok(/^no:/.test(get('lowdisk')), `${shell}：空间不足 → 跳过`);
+    ok(get('nodisk') === 'yes', `${shell}：拿不到剩余空间时不硬拦（交给构建报错）`);
+  }
+
+  // 顺序/机制上的硬要求（源码级）：先落标记再启动、setsid 脱离 boot、手动路径提示还在
+  const code = svc.split('\n').filter((l) => !/^\s*#/.test(l)).join('\n');
+  ok(/start_auto_provision/.test(code), 'service.sh 里有发起自动部署的入口');
+  ok(code.indexOf(': > "$MARKER"') > 0 && code.indexOf(': > "$MARKER"') < code.indexOf('setsid sh "$RUN/.auto-provision.sh"'),
+    '先落标记、再启动（断电/失败后不会每次开机重跑）');
+  ok(/setsid sh/.test(code), '用 setsid 脱离 boot 进程（不阻塞、也不被 boot 收摊带走）');
+  ok(/device-provision.sh --seeds/.test(code), '跳过时会把"手动怎么跑"写进日志');
+}
+
+// ---------------------------------------------------------------------------
 // ★ 三层**层口径**回归：base 必须是完整层，runtime/dsh 必须是相对上一阶段的增量。
 //   宿主侧 build-layers.sh 的 make_layer_stage 就是这个口径（prev 为空 → 整层打包）。
 //   真机推理出来的两个后果（都不是"应该没事"）：

@@ -2,16 +2,20 @@
 # =============================================================================
 # sunsetlinux · module/service.sh
 #
-# late_start 阶段调用 `linuxctl start` —— **开机自启，与 App 完全无关**。
-# 这正是"环境不被 App 杀死"的关键（architecture.md §1 生命周期 / §6.1）。
+# late_start 阶段做两件事：
+#   1. **还没建层就自己建**（零点击部署）—— 装机流程应该是
+#        「装模块 → 重启 → 自己建 → 自己起」，不需要先开 App 再点一下"执行部署"。
+#   2. 层齐了或者建完了 → `linuxctl start` 开机自启（与 App 完全无关，
+#      这就是"环境不被 App 杀死"的关键，architecture.md §1 / §6.1）。
 #
-# 设计要点：
-#   1. 本脚本必须**立刻返回**，不能阻塞 boot。start.sh 内部已经用
-#      setsid + unshare --fork 把守护进程脱离出去，所以这里直接调用即可；
-#      为保险再套一层 `&`。
-#   2. 尊重 etc/config.json 的 autostart 开关（App 设置页可关）。
-#   3. 失败不能让 boot 崩：只记日志，退出码始终 0。
-#   4. 不做循环重试：反复失败时留证据（run/last-error）比静默重试更有用。
+# 设计要点（每条都是"不许静默 / 不许循环"）：
+#   1. 本脚本必须**立刻返回**，绝不阻塞 boot：真正的活儿都用 setsid 脱离出去跑。
+#   2. 自动部署**先落标记再启动**（run/.auto-provision-attempted）：
+#      构建要十几分钟到半小时，中途断电/失败后不能每次开机重来一遍 —— 那才是灾难。
+#      失败不重试，证据留在 cache/provision.log 与 run/service.log，doctor 会报出来。
+#   3. 触发条件全部前置检查：种子在、磁盘够、config.json 没关（auto_provision=false）。
+#   4. 尊重 etc/config.json 的 autostart 开关（App 设置页可关）。
+#   5. 任何失败都不能让 boot 崩：退出码始终 0。
 # =============================================================================
 
 MODDIR="${0%/*}"
@@ -19,6 +23,10 @@ LINUX_HOME="${LINUX_HOME:-/data/sunsetlinux}"
 RUN="$LINUX_HOME/run"
 LOG="$RUN/linux.log"
 SERVICE_LOG="$RUN/service.log"
+PROV_LOG="$LINUX_HOME/cache/provision.log"
+SEEDS="$LINUX_HOME/seeds"
+MARKER="$RUN/.auto-provision-attempted"
+AUTOPROV_MIN_KB=2097152     # 2 GiB：构建期的树（base+node+包）加上三层镜像
 
 mkdir -p "$RUN" 2>/dev/null
 : >> "$SERVICE_LOG" 2>/dev/null
@@ -30,7 +38,79 @@ log() {
   echo "$line" >> "$LOG" 2>/dev/null
 }
 
-# 等 /data 完全就绪（late_start 一般已就绪，这里只是保险，最多等 30s）
+# =============================================================================
+# 自动部署的**决策**（纯函数，便于单测：tools/provision-selftest.mjs 会把它抽出来跑）
+#   autoprovision_decision <有base层 0/1> <种子齐 0/1> <已尝试过 0/1> <开关开 0/1> <剩余KB>
+#   输出 "yes" 或 "no:<一句话原因>"（原因进日志，用户能看到"为什么这次没自动建"）
+# =============================================================================
+autoprovision_decision() {
+  local have_base="$1" seeds_ok="$2" tried="$3" enabled="$4" free_kb="$5"
+
+  [ "$enabled" = "1" ] || { printf 'no:config.json 里 auto_provision=false'; return 0; }
+  [ "$have_base" != "1" ] || { printf 'no:已经有 base 层了，不需要部署'; return 0; }
+  [ "$tried" != "1" ] || {
+    printf 'no:自动部署已经尝试过一次（要再来一次：删掉 %s 后重启，或手动跑 device-provision.sh）' "$MARKER"
+    return 0
+  }
+  [ "$seeds_ok" = "1" ] || { printf 'no:种子不全（%s 里需要 ubuntu-base-*.tar.gz）' "$SEEDS"; return 0; }
+
+  case "$free_kb" in
+    ''|*[!0-9]*) ;;                       # 拿不到空间就先不拦，让构建自己报错（日志里有）
+    *) [ "$free_kb" -lt "$AUTOPROV_MIN_KB" ] && {
+         printf 'no:/data 剩余空间不足（%s KB < %s KB）' "$free_kb" "$AUTOPROV_MIN_KB"
+         return 0
+       } ;;
+  esac
+  printf 'yes'
+}
+
+# 播种目录里至少要有 ubuntu-base 的 tarball（node 包缺失时构建期会自己在 chroot 里下）
+seeds_ready() {
+  local f=""
+  for f in "$SEEDS"/ubuntu-base-*.tar.gz; do
+    [ -f "$f" ] && return 0
+  done
+  return 1
+}
+
+free_kb_of_data() {
+  df -k /data 2>/dev/null | awk 'NR==2{print $4}' | tr -dc '0-9'
+}
+
+# 真正的发起：落标记 → 写一个可回放的引导脚本 → setsid 脱离 boot 进程
+start_auto_provision() {
+  local prov="$MODDIR/bin/device-provision.sh" ctl="$1"
+  [ -f "$prov" ] || { log "自动部署：找不到 $prov（模块包不完整？跳过）"; return 0; }
+
+  : > "$MARKER" 2>/dev/null || true       # ★ 先落标记，再启动（见文件头第 2 条）
+  mkdir -p "$LINUX_HOME/cache" 2>/dev/null
+
+  cat > "$RUN/.auto-provision.sh" <<EOF
+#!/system/bin/sh
+# 由 service.sh 生成：自动部署的可回放引导脚本（失败时直接重放它即可）。
+# 日志：$PROV_LOG
+LINUX_HOME='$LINUX_HOME'
+export LINUX_HOME
+sh '$prov' --seeds '$SEEDS' >>'$PROV_LOG' 2>&1
+rc=\$?
+if [ "\$rc" = 0 ]; then
+  echo "[\$(date '+%Y-%m-%d %H:%M:%S')] [service.sh] 自动部署完成，接着启动环境" >>'$PROV_LOG'
+  sh '$ctl' start >>'$PROV_LOG' 2>&1
+fi
+exit \$rc
+EOF
+  chmod 0755 "$RUN/.auto-provision.sh" 2>/dev/null || true
+
+  log "自动部署：开始（十几分钟到半小时，日志 $PROV_LOG）"
+  if [ -x /system/bin/setsid ]; then
+    setsid sh "$RUN/.auto-provision.sh" >/dev/null 2>&1 &
+  else
+    ( sh "$RUN/.auto-provision.sh" >/dev/null 2>&1 ) &
+  fi
+  log "自动部署：已在后台发起（不阻塞 boot）"
+}
+
+# --- 等 /data 完全就绪（late_start 一般已就绪，这里只是保险，最多等 30s）------
 i=0
 while [ "$i" -lt 30 ]; do
   [ -d "$LINUX_HOME" ] && break
@@ -38,33 +118,17 @@ while [ "$i" -lt 30 ]; do
   i=$((i + 1))
 done
 if [ ! -d "$LINUX_HOME" ]; then
-  log "环境根目录 $LINUX_HOME 不存在，跳过（需先运行 device-provision.sh）"
+  log "环境根目录 $LINUX_HOME 不存在，跳过（需先装模块并重启一次）"
   exit 0
 fi
 
-# --- autostart 开关 ----------------------------------------------------------
-# 不依赖 jq：从 config.json 里抠 "autostart": true/false
+# --- config.json 开关（不依赖 jq：抠 "key": true/false）----------------------
 AUTOSTART=1
+AUTOPROV=1
 CFG="$LINUX_HOME/etc/config.json"
 if [ -f "$CFG" ]; then
-  if grep -q '"autostart"[[:space:]]*:[[:space:]]*false' "$CFG" 2>/dev/null; then
-    AUTOSTART=0
-  fi
-fi
-if [ "$AUTOSTART" = "0" ]; then
-  log "config.json 里 autostart=false，跳过开机自启"
-  exit 0
-fi
-
-# --- 层是否已部署 -----------------------------------------------------------
-HAVE_LAYER=0
-for f in "$LINUX_HOME/layers/base.erofs" "$LINUX_HOME/layers/base.squashfs"; do
-  [ -f "$f" ] && HAVE_LAYER=1 && break
-done
-if [ "$HAVE_LAYER" = "0" ]; then
-  log "尚未 provision（没有 base 层），跳过开机自启"
-  log "请在 root 终端执行：sh $MODDIR/bin/device-provision.sh"
-  exit 0
+  grep -q '"autostart"[[:space:]]*:[[:space:]]*false' "$CFG" 2>/dev/null && AUTOSTART=0
+  grep -q '"auto_provision"[[:space:]]*:[[:space:]]*false' "$CFG" 2>/dev/null && AUTOPROV=0
 fi
 
 # --- 选一个可用的 linuxctl ---------------------------------------------------
@@ -72,12 +136,52 @@ CTL=""
 for c in "$LINUX_HOME/bin/linuxctl" "$LINUX_HOME/bin/linuxctl.sh" "$MODDIR/bin/linuxctl.sh"; do
   [ -f "$c" ] && { CTL="$c"; break; }
 done
+
+# --- 层是否已部署 -----------------------------------------------------------
+HAVE_LAYER=0
+for f in "$LINUX_HOME/layers/base.erofs" "$LINUX_HOME/layers/base.squashfs"; do
+  [ -f "$f" ] && HAVE_LAYER=1 && break
+done
+# 层名带版本（base-24.04.3-l1.erofs）也是常态，一并认
+if [ "$HAVE_LAYER" = "0" ]; then
+  for f in "$LINUX_HOME"/layers/base-*.erofs "$LINUX_HOME"/layers/base-*.squashfs; do
+    [ -f "$f" ] && HAVE_LAYER=1 && break
+  done
+fi
+
+if [ "$HAVE_LAYER" = "0" ]; then
+  log "尚未部署（没有 base 层）"
+  SEEDS_OK=0; seeds_ready && SEEDS_OK=1
+  TRIED=0;    [ -f "$MARKER" ] && TRIED=1
+  DECISION="$(autoprovision_decision "$HAVE_LAYER" "$SEEDS_OK" "$TRIED" "$AUTOPROV" "$(free_kb_of_data)")"
+  case "$DECISION" in
+    yes)
+      if [ -z "$CTL" ]; then
+        log "自动部署：先把 linuxctl 铺好（$LINUX_HOME/bin/linuxctl 不存在，构建完会自己同步）"
+      fi
+      start_auto_provision "${CTL:-$MODDIR/bin/linuxctl.sh}"
+      exit 0
+      ;;
+    *)
+      log "自动部署：跳过（${DECISION#no:}）"
+      log "  手动跑：sh $MODDIR/bin/device-provision.sh --seeds $SEEDS"
+      exit 0
+      ;;
+  esac
+fi
+
+# --- 已部署：开机自启 --------------------------------------------------------
+if [ "$AUTOSTART" = "0" ]; then
+  log "config.json 里 autostart=false，跳过开机自启"
+  exit 0
+fi
+
 if [ -z "$CTL" ]; then
   log "找不到 linuxctl，跳过"
   exit 0
 fi
 
-# --- 已运行就不重复启动（幂等；start 本身也幂等，这里是省一次 fork）----------
+# 已运行就不重复启动（幂等；start 本身也幂等，这里是省一次 fork）
 if [ -f "$RUN/ready" ] && [ -f "$RUN/supervisor.pid" ]; then
   pid="$(cat "$RUN/supervisor.pid" 2>/dev/null | tr -dc '0-9')"
   if [ -n "$pid" ] && [ -d "/proc/$pid" ]; then
