@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# dshroid · runtime/root/supervise.sh
+# sunsetlinux · runtime/root/supervise.sh
 #
 # 环境内 supervisor（无 systemd，findings §2）。跑：
 #   /usr/local/bin/dsh web --no-open --host 127.0.0.1 --port <port>
@@ -25,7 +25,7 @@
 # =============================================================================
 set -uo pipefail
 
-LINUX_HOME="${LINUX_HOME:-/data/linux}"
+LINUX_HOME="${LINUX_HOME:-/data/sunsetlinux}"
 RUN_DIR="$LINUX_HOME/run"
 PORT=3080
 

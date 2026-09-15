@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================================
-# tools/seed/verify-seed.sh —— 校验 dshroid 离线种子包完整性
+# tools/seed/verify-seed.sh —— 校验 sunsetlinux 离线种子包完整性
 # ============================================================================
 # 做三件事：
 #   1) 若包旁有 .sha256，先验整包 sha256（能最早发现下载被截断/损坏）；
@@ -12,8 +12,8 @@
 # 本脚本不需要 root，也不写设备路径之外的东西（只在临时目录里解包）。
 #
 # 用法：
-#   tools/seed/verify-seed.sh dist/dshroid-seed-2026-09-15.tar.zst
-#   tools/seed/verify-seed.sh --dir /data/linux/seeds        # 校验已解开的目录
+#   tools/seed/verify-seed.sh dist/sunsetlinux-seed-2026-09-15.tar.zst
+#   tools/seed/verify-seed.sh --dir /data/sunsetlinux/seeds        # 校验已解开的目录
 # ============================================================================
 set -euo pipefail
 
@@ -98,7 +98,7 @@ if [ -n "$ARCHIVE" ]; then
 
   # --------------------------------------------- 2. 解包 ------------------
   printf '%s==>%s 解包到临时目录\n' "$C_I" "$C_R" >&2
-  TMP="$(mktemp -d "${TMPDIR:-/tmp}/dshroid-seed-verify.XXXXXX")"
+  TMP="$(mktemp -d "${TMPDIR:-/tmp}/sunsetlinux-seed-verify.XXXXXX")"
   UNZSTD=""
   if command -v zstd >/dev/null 2>&1; then
     UNZSTD="zstd -d -q -c"
@@ -112,7 +112,7 @@ if [ -n "$ARCHIVE" ]; then
     || die "解包失败：压缩包损坏或不是 tar.zst（含 tar 与 zstd 两层错误，已在上面列出）"
   quiet info "解包完成：$TMP"
 
-  # 找到种子根目录（顶层应只有一个 dshroid-seed-* 目录）
+  # 找到种子根目录（顶层应只有一个 sunsetlinux-seed-* 目录）
   SEED_ROOT=""
   for d in "$TMP"/*/; do
     [ -d "$d" ] || continue
@@ -121,7 +121,7 @@ if [ -n "$ARCHIVE" ]; then
   if [ -z "$SEED_ROOT" ]; then
     # 也接受"解包后平铺"的情况（用户可能 --strip-components 过）
     if [ -f "$TMP/MANIFEST" ]; then SEED_ROOT="$TMP"; else
-      die "解包后找不到 MANIFEST（顶层应形如 dshroid-seed-YYYY-MM-DD/MANIFEST）"
+      die "解包后找不到 MANIFEST（顶层应形如 sunsetlinux-seed-YYYY-MM-DD/MANIFEST）"
     fi
   fi
 else
@@ -132,7 +132,7 @@ else
 fi
 
 # --dir 模式没有解包目录，但下面还要写校验输出文件，这里补一个临时目录
-[ -n "$TMP" ] || TMP="$(mktemp -d "${TMPDIR:-/tmp}/dshroid-seed-verify.XXXXXX")"
+[ -n "$TMP" ] || TMP="$(mktemp -d "${TMPDIR:-/tmp}/sunsetlinux-seed-verify.XXXXXX")"
 
 # ------------------------------------------------- 3. MANIFEST 校验 ----
 printf '%s==>%s 按 MANIFEST 校验每个文件\n' "$C_I" "$C_R" >&2
@@ -195,7 +195,7 @@ if [ -n "$TMP" ] && [ "$KEEP" -eq 1 ]; then warn "临时目录保留在：$TMP";
 printf '\n' >&2
 if [ "$FAILURES" -eq 0 ]; then
   ok "种子包校验通过：内容完整、与 MANIFEST 一致。"
-  printf '  使用：mkdir -p /data/linux/seeds && tar --zstd -xf %s -C /data/linux/seeds --strip-components=1\n' \
+  printf '  使用：mkdir -p /data/sunsetlinux/seeds && tar --zstd -xf %s -C /data/sunsetlinux/seeds --strip-components=1\n' \
     "${ARCHIVE:-<包>}" >&2
   exit 0
 else

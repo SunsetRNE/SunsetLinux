@@ -10,13 +10,13 @@
  *
  * 两种形态（`type` 字段，缺省为 http，向后兼容）：
  *   { "type":"http", "url":"https://.../channel.json", "pubkey":"..." }
- *   { "type":"npm",  "package":"dshroid-channel-dev", "version":"latest", "pubkey":"..." }
+ *   { "type":"npm",  "package":"sunsetlinux-channel-dev", "version":"latest", "pubkey":"..." }
  * npm 只是传输/发现渠道，**信任根仍是公钥验签**（npm 包被投毒也签不出合法清单）。
  *
  * 用法示例：
  *   node channels-edit.mjs list
  *   node channels-edit.mjs add --id dev-x --name "某开发者内测" \
- *        --url https://example.org/dshroid/channel.json --pub dev-x.pub --priority 50
+ *        --url https://example.org/sunsetlinux/channel.json --pub dev-x.pub --priority 50
  *   node channels-edit.mjs check --id dev-x        # 联网拉清单并验签，体检该频道
  *   node channels-edit.mjs disable --id official
  *   node channels-edit.mjs remove --id dev-x
@@ -213,7 +213,7 @@ async function cmdCheckMixed(doc, positionals, values) {
         const pk = tryLoadPublicKey(c.pubkey, `频道 ${c.id} 的 pubkey`);
         if (!pk.ok) throw new Error(pk.error);
         pubObj = pk.key;
-        const workDir = values['npm-cache'] ? path.resolve(values['npm-cache']) : path.join(os.tmpdir(), 'dshroid-npm-check');
+        const workDir = values['npm-cache'] ? path.resolve(values['npm-cache']) : path.join(os.tmpdir(), 'sunsetlinux-npm-check');
         const res = await resolveNpmChannel({ ...c, pubkey: c.pubkey }, {
           workDir,
           registry: values.registry || undefined,
@@ -285,13 +285,13 @@ async function cmdCheckMixed(doc, positionals, values) {
 async function main() {
   const argv = process.argv.slice(2);
   if (wantsHelp(argv) || argv.length === 0) {
-    return printHelp('dshroid 频道管理（channels-edit）', HELP);
+    return printHelp('sunsetlinux 频道管理（channels-edit）', HELP);
   }
   // 第一个非选项参数是子命令。
   const subIdx = argv.findIndex((a) => !a.startsWith('-'));
   const sub = subIdx >= 0 ? argv[subIdx] : 'help';
   if (!SUBS.includes(sub)) die(`未知子命令：${sub}（可用：${SUBS.join(' / ')}）`);
-  if (sub === 'help') return printHelp('dshroid 频道管理（channels-edit）', HELP);
+  if (sub === 'help') return printHelp('sunsetlinux 频道管理（channels-edit）', HELP);
 
   const rest = argv.filter((_, i) => i !== subIdx);
   const { values, positionals } = parseArgs(rest, spec);

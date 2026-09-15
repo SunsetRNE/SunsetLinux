@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">DSHroid</string>
+    <string name="app_name">SunsetLinux</string>
 
     <!-- 通知渠道 -->
     <string name="notif_channel_name">运行状态</string>
@@ -12,7 +12,7 @@
     <string name="notif_action_open">打开 DSH</string>
 
     <!-- 首页 -->
-    <string name="home_title">DSHroid</string>
+    <string name="home_title">SunsetLinux</string>
     <string name="home_subtitle">Android 原生 DSH 运行环境</string>
     <string name="btn_start">启动环境</string>
     <string name="btn_stop">停止环境</string>

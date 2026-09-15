@@ -6,11 +6,11 @@ plugins {
 }
 
 android {
-    namespace = "io.dshroid"
+    namespace = "io.github.sunsetrne.sunsetlinux"
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "io.dshroid"
+        applicationId = "io.github.sunsetrne.sunsetlinux"
         minSdk = 26
         targetSdk = 35
         versionCode = 1
@@ -19,7 +19,7 @@ android {
 
     buildTypes {
         debug {
-            // 刻意不加 applicationIdSuffix：包名必须保持 io.dshroid，
+            // 刻意不加 applicationIdSuffix：包名必须保持 io.github.sunsetrne.sunsetlinux，
             // 否则 KernelSU 里已授予的 root 授权会失效（授权按包名 + 签名记录）。
             isMinifyEnabled = false
         }
@@ -87,6 +87,6 @@ dependencies {
 // ============================================================================
 tasks.withType<Test>().configureEach {
     val repoRoot = rootProject.projectDir.parentFile
-    systemProperty("dshroid.repo.dir", repoRoot.absolutePath)
-    systemProperty("dshroid.dist.dir", File(repoRoot, "dist").absolutePath)
+    systemProperty("sunsetlinux.repo.dir", repoRoot.absolutePath)
+    systemProperty("sunsetlinux.dist.dir", File(repoRoot, "dist").absolutePath)
 }

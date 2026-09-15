@@ -69,7 +69,10 @@ function layerSpec() {
 
 // ---- 校验 -------------------------------------------------------------------
 const problems = [];
+/** 允许的附加键（不算违例，打出来让人知道 schema 之外还有什么） */
 const notes = [];
+/** 非致命但值得看一眼的事（例如 status 以退出码 2 收场 —— 那是"未部署"的语义，不是 schema 违例） */
+const warnings = [];
 
 function typeOk(value, want) {
   switch (want) {
@@ -163,13 +166,23 @@ if (inputs.length === 0) {
 for (const input of inputs) {
   const label = input.kind === 'file' ? input.value : input.value;
   let raw;
+  const exitNotes = [];
   try {
     raw = input.kind === 'file'
       ? readFileSync(input.value, 'utf8')
       : execFileSync('bash', ['-c', input.value], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
   } catch (error) {
-    problems.push(`${label}: 执行/读取失败 — ${error.message.trim().split('\n')[0]}`);
-    continue;
+    // 命令**退出码非 0** 不一定是"检查失败"：`linuxctl status` 在"环境还没部署"时
+    // 会带着合法的 status JSON 以退出码 2 收场（那是它给 App 的语义，不是 schema 违例）。
+    // 本检查器只管 **§3.1 schema**，所以只要 stdout 里有一份能解析的 JSON 就继续校验；
+    // 退出码原样记进附注，避免把"真的执行不了"掩盖掉。
+    if (typeof error.stdout === 'string' && error.stdout.includes('{')) {
+      raw = error.stdout;
+      exitNotes.push(`退出码 ${error.status ?? '?'}（仍按 stdout 校验 schema）`);
+    } else {
+      problems.push(`${label}: 执行/读取失败 — ${error.message.trim().split('\n')[0]}`);
+      continue;
+    }
   }
   // stdout 可能混有其它内容：从第一个 { 到最后一个 } 取
   const start = raw.indexOf('{');
@@ -179,11 +192,13 @@ for (const input of inputs) {
   try { obj = JSON.parse(raw.slice(start, end + 1)); }
   catch (error) { problems.push(`${label}: JSON 解析失败 — ${error.message}`); continue; }
   checkObject(obj, label);
+  for (const n of exitNotes) warnings.push(`${label}: ${n}`);
 }
 
 if (problems.length === 0) {
   console.log(`✅ 契约检查通过（${inputs.length} 份输入，§3.1 全部键与不变量均满足）`);
   if (notes.length) console.log(`   附加键（允许）：${[...new Set(notes)].join(', ')}`);
+  if (warnings.length) for (const w of warnings) console.log(`   ⚠️ ${w}`);
   process.exit(0);
 }
 console.log(`❌ 契约检查失败：${problems.length} 处违例`);

@@ -36,7 +36,7 @@ item() { # item <文件> <说明>
 }
 
 {
-    echo "# DSHroid 交付产物总清单"
+    echo "# SunsetLinux 交付产物总清单"
     echo "# 生成时间: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo "# 生成脚本: tools/mkdist-manifest.sh（可复现；每次发版重跑即可）"
     echo "#"
@@ -44,11 +44,11 @@ item() { # item <文件> <说明>
     echo
     echo "## 1) App（装它）"
     printf '%-46s %12s  %-64s  %s\n' "文件" "字节" "sha256" "说明"
-    item "dshroid-launcher-debug.apk" "Android 启动器（debug 签名）"
+    item "sunsetlinux-launcher-debug.apk" "Android 启动器（debug 签名）"
     echo
     echo "## 2) KernelSU 模块（开机自启 + 模块 WebUI）"
     printf '%-46s %12s  %-64s  %s\n' "文件" "字节" "sha256" "说明"
-    item "dshroid-module-0.1.0.zip" "用 KernelSU 管理器安装；内含 bin/ + lib/ + webroot/"
+    item "sunsetlinux-module-0.1.0.zip" "用 KernelSU 管理器安装；内含 bin/ + lib/ + webroot/"
     echo
     echo "## 3) rootfs 三层（分发产物：zstd 给 App，gzip 给纯 CLI/WebUI）"
     printf '%-46s %12s  %-64s  %s\n' "文件" "字节" "sha256" "说明"
@@ -65,9 +65,9 @@ item() { # item <文件> <说明>
     echo
     echo "## 5) 离线种子 / 非 root 模式"
     printf '%-46s %12s  %-64s  %s\n' "文件" "字节" "sha256" "说明"
-    item "dshroid-seed-2026-09-15.tar.zst" "离线种子（ubuntu-base + Node 官方包）"
+    item "sunsetlinux-seed-2026-09-15.tar.zst" "离线种子（ubuntu-base + Node 官方包）"
     item "proot-bundle-arm64.tar.gz"       "非 root 模式用的 proot 二进制（GPLv2 合规）"
-    item "dshroid-proot-runtime.tar.gz"    "proot 运行时脚本包"
+    item "sunsetlinux-proot-runtime.tar.gz"    "proot 运行时脚本包"
     echo
     echo "## 6) 参考清单"
     printf '%-46s %12s  %-64s  %s\n' "文件" "字节" "sha256" "说明"

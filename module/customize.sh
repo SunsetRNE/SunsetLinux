@@ -1,27 +1,27 @@
 #!/system/bin/sh
 # =============================================================================
-# dshroid · module/customize.sh（KernelSU / Magisk 通用安装脚本）
+# sunsetlinux · module/customize.sh（KernelSU / Magisk 通用安装脚本）
 #
-# 安装时执行：把运行时脚本装到模块目录（= /data/adb/modules/dshroid/bin），
+# 安装时执行：把运行时脚本装到模块目录（= /data/adb/modules/sunsetlinux/bin），
 # 做基本校验并给用户明确提示。
 #
 # **本脚本刻意不做的事**：
 #   - 不自动 provision（首次部署涉及 mount/chroot，耗时且要联网，必须由用户在
 #     root 终端显式执行 device-provision.sh，或由 App 的 ProvisionActivity 触发）
 #   - 不修改 SELinux 策略（需要时见同目录 sepolicy.rule 的说明）
-#   - 不删除 /data/linux（那是用户数据，卸载也不删，见 uninstall.sh）
+#   - 不删除 /data/sunsetlinux（那是用户数据，卸载也不删，见 uninstall.sh）
 #
 # 环境变量（KernelSU/Magisk 安装器提供）：MODPATH、API
 # =============================================================================
 
 SKIPUNZIP=0
-MODDIR="${MODPATH:-/data/adb/modules/dshroid}"
-LINUX_HOME="${LINUX_HOME:-/data/linux}"
+MODDIR="${MODPATH:-/data/adb/modules/sunsetlinux}"
+LINUX_HOME="${LINUX_HOME:-/data/sunsetlinux}"
 
 ui_print() { echo "$1"; }
 
 ui_print "*******************************"
-ui_print "  DSHroid — 原生 DSH 运行环境"
+ui_print "  SunsetLinux — 原生 DSH 运行环境"
 ui_print "*******************************"
 
 # --- 1) 架构/内核校验：必须是 arm64 且内核支持 overlay + erofs ----------------
@@ -54,7 +54,7 @@ case "$FSLIST" in
   *) ui_print "! ext4 不可用 —— 可写层镜像无法挂载" ;;
 esac
 
-# --- 2) 安装 bin/ 到模块目录，并准备 /data/linux 目录骨架 ---------------------
+# --- 2) 安装 bin/ 到模块目录，并准备 /data/sunsetlinux 目录骨架 ---------------------
 ui_print "- 模块目录：$MODDIR"
 if [ -d "$MODDIR" ]; then
   ui_print "- bin/ 内容："
@@ -84,7 +84,7 @@ if [ ! -f "$LINUX_HOME/layers/dsh.erofs" ] && [ ! -f "$LINUX_HOME/layers/dsh.squ
   ui_print "   sh $MODDIR/bin/device-provision.sh"
   ui_print ""
   ui_print " 它会原生完成：Ubuntu base → Node+pnpm → DSH 三层镜像 + 可写层。"
-  ui_print " 也可以打开 DSHroid App 用「首次部署向导」触发同一脚本。"
+  ui_print " 也可以打开 SunsetLinux App 用「首次部署向导」触发同一脚本。"
   ui_print ""
   ui_print " 部署完成后："
   ui_print "   sh $LINUX_HOME/bin/linuxctl.sh status    # 看 JSON 状态"
@@ -129,7 +129,7 @@ fi
 
 # --- 5) 冻结/省电豁免提示（重要：findings §3.2） ------------------------------
 ui_print ""
-ui_print "- 建议把 DSHroid 加入「墓碑调度/冻结类」模块的豁免名单（若你装了这类模块），"
+ui_print "- 建议把 SunsetLinux 加入「墓碑调度/冻结类」模块的豁免名单（若你装了这类模块），"
 ui_print "  以及系统电池优化白名单，否则 App 侧状态卡与 WebView 会被冻住。"
 ui_print "  环境本体（node 进程）由本模块在 late_start 启动，不依附 App。"
 

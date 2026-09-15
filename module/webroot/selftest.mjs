@@ -29,8 +29,8 @@ const ok = (c, msg) => { if (c) { pass++; console.log('  \x1b[32mok\x1b[0m   ' +
 // 也不会注册 DOMContentLoaded 回调（boot 不会跑）。
 const sandbox = { window: {}, console, module: { exports: {} } };
 const P = new Function('window', 'document', 'console', 'module', 'globalThis',
-  m[1] + '\n;return globalThis.DSHROID_PURE;')(sandbox.window, undefined, console, sandbox.module, sandbox);
-if (!P) { console.error('FAIL 未能取到 DSHROID_PURE（纯函数区被改名了？）'); process.exit(1); }
+  m[1] + '\n;return globalThis.SUNSETLINUX_PURE;')(sandbox.window, undefined, console, sandbox.module, sandbox);
+if (!P) { console.error('FAIL 未能取到 SUNSETLINUX_PURE（纯函数区被改名了？）'); process.exit(1); }
 
 console.log('== 转义（日志/命令输出必须转义，否则 < 会破坏页面）==');
 ok(P.esc('<script>alert(1)</script>') === '&lt;script&gt;alert(1)&lt;/script&gt;', 'esc 转义尖括号');
@@ -156,7 +156,7 @@ console.log('\n== 模块版本与自我更新 ==');
   ok(mv.versionShort === '1.0.0' && mv.drift === false, 'moduleView：v1.0.0 与 1.0.0 视为一致（不误报漂移）');
   const mv2 = P.moduleView({ version: 'v2.0.0', bin_version: 'v1.0.0' });
   ok(mv2.drift === true, 'moduleView：模块 2.0.0 / 脚本 1.0.0 → 报漂移');
-  ok(P.moduleView({}).name === 'DSHroid', 'moduleView 空对象给默认名');
+  ok(P.moduleView({}).name === 'SunsetLinux', 'moduleView 空对象给默认名');
 
   const up = P.moduleUpdateView({ module_installed: 'v1.0.0',
     channels: [{ id: 'a', name: '官方', signature_valid: true }],

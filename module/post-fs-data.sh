@@ -1,14 +1,14 @@
 #!/system/bin/sh
 # =============================================================================
-# dshroid · module/post-fs-data.sh
+# sunsetlinux · module/post-fs-data.sh
 #
 # 早期启动阶段（post-fs-data）：**只准备目录与权限，不启动任何进程**。
 # 为什么不在这一阶段启动：此时 /data 刚挂好，zygote/网络/DNS 都还没就绪，
 # 起 node 会拿不到可用的 DNS 与 netd 状态；启动放 service.sh（late_start）。
 #
 # 本脚本做四件事：
-#   1. 建好 /data/linux 及子目录（幂等）
-#   2. 把模块自带的 bin/ 同步到 /data/linux/bin（模块升级后立即生效，
+#   1. 建好 /data/sunsetlinux 及子目录（幂等）
+#   2. 把模块自带的 bin/ 同步到 /data/sunsetlinux/bin（模块升级后立即生效，
 #      且 App 侧 linuxctl 路径固定为 $LINUX_HOME/bin/linuxctl.sh）
 #   3. 修正权限（0700/0755；run/ 里的凭证文件由 supervise.sh 自己设 0600）
 #   4. 清理上次关机可能残留的"运行态"标记（避免 App 读到过期状态）
@@ -17,15 +17,15 @@
 # =============================================================================
 
 MODDIR="${0%/*}"
-LINUX_HOME="${LINUX_HOME:-/data/linux}"
+LINUX_HOME="${LINUX_HOME:-/data/sunsetlinux}"
 LOG="$LINUX_HOME/run/module.log"
 
 mkdir -p "$LINUX_HOME/run" 2>/dev/null
 
 log() {
   # 模块脚本日志同时进 dmesg（早期阶段 logcat 可能还没起来）与文件
-  echo "[dshroid][post-fs-data] $*" >> "$LOG" 2>/dev/null
-  echo "[dshroid][post-fs-data] $*" > /dev/kmsg 2>/dev/null
+  echo "[sunsetlinux][post-fs-data] $*" >> "$LOG" 2>/dev/null
+  echo "[sunsetlinux][post-fs-data] $*" > /dev/kmsg 2>/dev/null
 }
 
 log "开始"
@@ -114,7 +114,7 @@ fi
 
 # --- 2b) webroot/ 说明（**刻意不同步**）--------------------------------------
 # KernelSU 的模块 WebUI 是管理器**直接从模块目录**读 webroot/index.html 的，
-# 不经过 /data/linux，所以这里不同步它（同步过去也没有任何东西会去读）。
+# 不经过 /data/sunsetlinux，所以这里不同步它（同步过去也没有任何东西会去读）。
 # 若哪天要改 WebUI，改 module/webroot/index.html 后重新刷模块即可。
 if [ -f "$MODDIR/webroot/index.html" ]; then
   log "WebUI 就位：$MODDIR/webroot/index.html（管理器直接读模块目录，无需同步）"

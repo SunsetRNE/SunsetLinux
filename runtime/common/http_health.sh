@@ -1,6 +1,6 @@
-#!/usr/bin/env bash
+#!/system/bin/sh
 # =============================================================================
-# dshroid · runtime/common/http_health.sh
+# sunsetlinux · runtime/common/http_health.sh
 #
 # DSH Web 健康探针。约定（architecture.md §3.1 / §3.3）：
 #   - 探测目标是 **base_url**（不带 ?token= 的裸地址）。
@@ -19,8 +19,8 @@
 # =============================================================================
 
 # 允许被重复 source
-[ -n "${DSHROID_HTTP_HEALTH_SH:-}" ] && return 0 2>/dev/null || true
-DSHROID_HTTP_HEALTH_SH=1
+[ -n "${SUNSETLINUX_HTTP_HEALTH_SH:-}" ] && return 0 2>/dev/null || true
+SUNSETLINUX_HTTP_HEALTH_SH=1
 
 # HTTP 超时（秒）。architecture.md §3.1 规定 healthy = GET <url>/ 在 2 s 内返回。
 DSH_HTTP_TIMEOUT="${DSH_HTTP_TIMEOUT:-2}"
@@ -101,8 +101,18 @@ dsh_http_healthy() {
     [ "$code" != "000" ] && [ -n "$code" ]
 }
 
-# 直接执行时做一次自检：$1=url（默认 127.0.0.1:3080）
-if [ "${BASH_SOURCE[0]:-$0}" = "$0" ]; then
+# 直接执行时做一次自检：$1=url（默认 127.0.0.1:3080）；被 source 时**必须**什么都不做。
+#
+# ⚠️ 这里比 status_json.sh 更要命：本文件结尾有 `exit 0/1`。用经典的
+#    `[ "${BASH_SOURCE[0]:-$0}" = "$0" ]` 判定，在 mksh 下 BASH_SOURCE 未定义
+#    → 判定恒真 → linuxctl source 本文件时会**当场跑自检并 exit**，
+#    表现为"linuxctl 什么都不做就返回 1"。改用 source 方的显式标记。
+_hh_sourced=0
+[ "${SUNSETLINUX_SOURCED:-0}" = "1" ] && _hh_sourced=1
+if [ "${BASH_SOURCE+set}" = "set" ] && [ "${BASH_SOURCE[0]}" != "$0" ]; then
+    _hh_sourced=1
+fi
+if [ "$_hh_sourced" = "0" ]; then
     _url="${1:-http://127.0.0.1:3080}"
     _probe="$(dsh_http_probe "$_url")"
     if dsh_http_healthy "$_url"; then
@@ -112,3 +122,4 @@ if [ "${BASH_SOURCE[0]:-$0}" = "$0" ]; then
     printf 'unhealthy url=%s code=%s elapsed=%ss\n' "$_url" "${_probe%% *}" "${_probe##* }"
     exit 1
 fi
+unset _hh_sourced

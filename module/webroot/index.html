@@ -3,9 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>DSHroid 控制台</title>
+<title>SunsetLinux 控制台</title>
 <!--
-  dshroid 模块 WebUI（KernelSU 模块 WebUI / Magisk 需 MMRL 等第三方宿主）
+  sunsetlinux 模块 WebUI（KernelSU 模块 WebUI / Magisk 需 MMRL 等第三方宿主）
 
   设计约束（见 docs/ksu-webui-api.md）：
   1. **单文件、零外部依赖**：WebUI 宿主不保证有网络，禁止 CDN / npm 资源。
@@ -126,7 +126,7 @@
 </head>
 <body>
 <header>
-  <h1>DSHroid 控制台</h1>
+  <h1>SunsetLinux 控制台</h1>
   <div class="sub" id="hdSub">正在读取状态…</div>
 </header>
 <div class="banner" id="previewBanner">
@@ -181,7 +181,7 @@
       <h2>还没有部署环境</h2>
       <div class="hint">
         layers/ 里没有可用的层，环境无法启动。下一步（任选其一）：<br>
-        1) 打开 <b>DSHroid App</b> → 首次部署向导（推荐，会自动下载并校验）；<br>
+        1) 打开 <b>SunsetLinux App</b> → 首次部署向导（推荐，会自动下载并校验）；<br>
         2) 在 root 终端执行 <code>su -c '$LH/bin/device-provision.sh'</code> 原生构建；<br>
         3) 在本页「更新」标签里，添加频道后从频道安装层。
       </div>
@@ -321,7 +321,7 @@
 /* =========================================================================
  * 0. 常量
  * ========================================================================= */
-var LH = "/data/linux";
+var LH = "/data/sunsetlinux";
 var CTL = LH + "/bin/linuxctl";
 var CONF = LH + "/etc/config.json";
 var RUN_LOG = LH + "/run/linux.log";
@@ -333,7 +333,7 @@ var RUN_LOG = LH + "/run/linux.log";
 function exec(command) {
   return new Promise(function (resolve, reject) {
     if (typeof ksu === "undefined") { resolve({ errno: -1, stdout: "", stderr: "dev-preview" }); return; }
-    var cb = "dshroid_cb_" + Date.now() + "_" + Math.floor(Math.random() * 1e6);
+    var cb = "sunsetlinux_cb_" + Date.now() + "_" + Math.floor(Math.random() * 1e6);
     window[cb] = function (errno, stdout, stderr) {
       delete window[cb];                       // 必须清理，否则全局函数泄漏
       resolve({ errno: errno, stdout: stdout, stderr: stderr });
@@ -447,7 +447,7 @@ PURE.moduleView = function (info) {
   var ver = info.version || null;
   return {
     id: info.id || null,
-    name: info.name || "DSHroid",
+    name: info.name || "SunsetLinux",
     version: ver,
     versionShort: PURE.normVer(ver),
     versionCode: info.versionCode || null,
@@ -590,7 +590,7 @@ PURE.updateSummary = function (res) {
     });
   });
   (res.errors || []).forEach(function (e) { out.errors.push(e); });
-  if (!out.channels.length) out.warnings.push("没有启用任何频道（先在 App 设置页添加，或用 dshroid-channel channels add）");
+  if (!out.channels.length) out.warnings.push("没有启用任何频道（先在 App 设置页添加，或用 sunsetlinux-channel channels add）");
   else if (!out.updates.length && !out.errors.length) out.warnings.push("已是最新（所有层与频道清单一致）");
   return out;
 };
@@ -619,7 +619,7 @@ PURE.resultOk = function (obj) {
 };
 
 /* 在 node 里可 require 这段做单测：导出到 globalThis */
-if (typeof globalThis !== "undefined") globalThis.DSHROID_PURE = PURE;
+if (typeof globalThis !== "undefined") globalThis.SUNSETLINUX_PURE = PURE;
 if (typeof module !== "undefined" && module.exports) module.exports = PURE;
 
 /* =========================================================================
@@ -764,14 +764,14 @@ var MOD = { info: null, check: null, pending: null };
 async function loadModuleInfo() {
   var res;
   if (isPreview()) {
-    res = { id: "dshroid", name: "DSHroid", version: "v1.0.0", versionCode: "10000",
+    res = { id: "sunsetlinux", name: "SunsetLinux", version: "v1.0.0", versionCode: "10000",
             bin_version: "v1.0.0", installed: true };
   } else {
     res = await ctlJson("update-module-info");
   }
   MOD.info = res;
   var mv = PURE.moduleView(res);
-  $("modVer").textContent = (mv.name || "DSHroid") + " " + (mv.version || "未知") +
+  $("modVer").textContent = (mv.name || "SunsetLinux") + " " + (mv.version || "未知") +
     (mv.versionCode ? "（code " + mv.versionCode + "）" : "");
   $("modBin").textContent = mv.binVersion || "未同步";
   $("modHint").innerHTML = mv.drift
@@ -788,7 +788,7 @@ async function checkModuleUpdate() {
     res = { ok: true, module_installed: "v1.0.0",
       channels: [ { id: "official", name: "官方", ok: true, signature_valid: true },
                   { id: "evil", name: "可疑频道", ok: false, signature_valid: false, error: "签名无效：清单与公钥不匹配" } ],
-      module: { version: "1.1.0", url: "https://example.org/dshroid-module-1.1.0.zip", sha256: "aa11",
+      module: { version: "1.1.0", url: "https://example.org/sunsetlinux-module-1.1.0.zip", sha256: "aa11",
                 size: 145000, changelog: "· 修复日志页偶发空白\n· 新增模块自我更新", channel_name: "官方" },
       module_latest: { version: "1.1.0" }, errors: [] };
   } else {

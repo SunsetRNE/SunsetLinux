@@ -14,8 +14,8 @@
  *     工具会按 `--max-packed-size`（默认 50 MB）拒绝超限的包，并提示改用方案 1。
  *
  * ## 用法
- *   node npm-pack.mjs --dir dist/layers-20260915 --name dshroid-channel-dev
- *   node npm-pack.mjs --dir dist/layers --name @me/dshroid-channel --version 1.0.0 --publish --tag next
+ *   node npm-pack.mjs --dir dist/layers-20260915 --name sunsetlinux-channel-dev
+ *   node npm-pack.mjs --dir dist/layers --name @me/sunsetlinux-channel --version 1.0.0 --publish --tag next
  */
 
 import fs from 'node:fs';
@@ -36,7 +36,7 @@ const HELP = `用法：node npm-pack.mjs [选项]
 
 必需：
   --dir <目录>            频道目录（要有 channel.json 与 channel.json.sig）
-  --name <npm 包名>       npm 包名（可带 scope，全小写，如 dshroid-channel-dev / @me/dshroid-channel-dev）
+  --name <npm 包名>       npm 包名（可带 scope，全小写，如 sunsetlinux-channel-dev / @me/sunsetlinux-channel-dev）
 
 常用：
   --version <ver>         npm 包版本（默认：取清单里 dsh 层的版本；都没有则 1.0.0）
@@ -104,7 +104,7 @@ function pickVersion(values, manifest) {
 
 async function main() {
   const argv = process.argv.slice(2);
-  if (wantsHelp(argv)) return printHelp('dshroid npm 频道打包（npm-pack）', HELP);
+  if (wantsHelp(argv)) return printHelp('sunsetlinux npm 频道打包（npm-pack）', HELP);
   const { values } = parseArgs(argv, spec);
 
   if (!values.dir) die('缺少 --dir <频道目录>');
@@ -126,7 +126,7 @@ async function main() {
   const maxPacked = parseSize(values['max-packed-size'], DEFAULT_MAX_PACKED_SIZE);
 
   // ---- 1. 准备 npm 包目录 -------------------------------------------------
-  const stage = fs.mkdtempSync(path.join(os.tmpdir(), 'dshroid-npm-pack.'));
+  const stage = fs.mkdtempSync(path.join(os.tmpdir(), 'sunsetlinux-npm-pack.'));
   const pkgDir = path.join(stage, 'package');
   fs.mkdirSync(pkgDir, { recursive: true });
   fs.copyFileSync(manifestPath, path.join(pkgDir, 'channel.json'));
@@ -169,17 +169,17 @@ async function main() {
     }
   }
 
-  // ---- 2. package.json（含"这是 dshroid 频道包"的标记）-------------------
+  // ---- 2. package.json（含"这是 sunsetlinux 频道包"的标记）-------------------
   const pkgJson = {
     name,
     version,
-    description: values.description || `dshroid 频道包：${manifest.name || name}`,
-    keywords: ['dshroid', 'dshroid-channel', 'dsh'],
+    description: values.description || `sunsetlinux 频道包：${manifest.name || name}`,
+    keywords: ['sunsetlinux', 'sunsetlinux-channel', 'dsh'],
     license: 'MIT',
     files: included,
-    dshroid: {
+    sunsetlinux: {
       channel: 1,
-      // 便于别人（与人）识别：包里是 dshroid 的 channel.json + 签名
+      // 便于别人（与人）识别：包里是 sunsetlinux 的 channel.json + 签名
       manifest: 'channel.json',
       signature: 'channel.json.sig',
       layers_inside_package: Boolean(values['with-layers']),
@@ -195,14 +195,14 @@ async function main() {
     path.join(pkgDir, 'README.md'),
     `# ${name}
 
-这是一个 **dshroid 频道包**（dshroid channel package）。它只包含频道的**清单与签名**：
+这是一个 **sunsetlinux 频道包**（sunsetlinux channel package）。它只包含频道的**清单与签名**：
 
 - \`channel.json\` —— 频道清单（各层版本 / sha256 / 下载地址）
 - \`channel.json.sig\` —— 用发布者私钥做的 Ed25519 签名
 
 ## 怎么订阅
 
-在 dshroid 的 \`channels.json\` 里加入（**公钥必须由发布者通过带外渠道给你，并从包里读不到**）：
+在 sunsetlinux 的 \`channels.json\` 里加入（**公钥必须由发布者通过带外渠道给你，并从包里读不到**）：
 
 \`\`\`json
 {
@@ -220,9 +220,9 @@ async function main() {
 或命令行：
 
 \`\`\`bash
-dshroid-channel channels add --id ${name.replace(/^@[^/]+\//, '')} --type npm \\
+sunsetlinux-channel channels add --id ${name.replace(/^@[^/]+\//, '')} --type npm \\
     --package ${name} --version ${values.tag || 'latest'} --pub '<公钥>'
-dshroid-channel channels check --id ${name.replace(/^[^/]+\//, '')}
+sunsetlinux-channel channels check --id ${name.replace(/^[^/]+\//, '')}
 \`\`\`
 
 ${fingerprint ? `**公钥指纹**（请与发布者核对）：\`${fingerprint}\`\n` : ''}
@@ -237,7 +237,7 @@ ${values['with-layers'] ? '> 层文件已打进本 npm 包内。' : '> 层文件
 ## 安全模型（重要）
 
 **npm 不是信任来源。** 包可能被替换、被投毒、镜像可能被改 —— 都无所谓：
-\`channel.json.sig\` 必须能用发布者公钥验过，否则 dshroid 会**直接拒绝**这个频道。
+\`channel.json.sig\` 必须能用发布者公钥验过，否则 sunsetlinux 会**直接拒绝**这个频道。
 换句话说，能通过校验的只有**持有私钥的人**发布的内容。
 
 注意：\`${fingerprint ? '上面这个' : '发布者的'}\`指纹只是**供人核对**的提示；

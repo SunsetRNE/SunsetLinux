@@ -1,0 +1,139 @@
+# 发布与 CI：分支式、回归门禁、不建 tag
+
+> 本文确定发布模型并说明为什么这样设计。
+> 一句话：**推送分支即发布**；`beta` 出预发布、`main` 出正式；每次发布前先跑**全量回归**，绿了才发。
+
+---
+
+## 一、为什么"不用 tag"要换个分发形态
+
+**GitHub Releases 在机制上必须挂在 tag 上** —— 所以"不建 tag + 要给人下载"这两件事，
+只能用别的载体。可选的有三种：
+
+| 载体 | 需要 tag？ | 用户下载体验 | 适合 |
+|---|---|---|---|
+| GitHub Releases | **需要**（哪怕是 `latest` 这种移动 tag） | 最好（有页面、有说明） | 有 tag 的流程 |
+| **`gh-pages` 分支（GitHub Pages）** | **不需要** | 好（固定 URL，浏览器直接下） | ★ 本方案 |
+| Workflow Artifacts | 不需要 | 差（要登录、90 天过期） | 仅内部调试 |
+
+**采用 `gh-pages` 分支**：CI 把产物推到该分支的固定目录，网页与频道都从同一处取。
+这同时解决了"频道 URL 从哪来"的问题 —— **频道就是 Pages 上的一个静态文件**。
+
+```
+gh-pages 分支
+  /beta/           ← beta 频道
+    channel.json
+    channel.json.sig
+    sunsetlinux-launcher-<版本>.apk
+    sunsetlinux-module-<版本>.zip
+    base-*.erofs.zst  runtime-*.erofs.zst  dsh-*.erofs.zst
+  /stable/         ← 正式频道（结构同上）
+  index.html       ← 可选：一句说明 + 两个频道链接
+```
+
+频道 URL 形如：
+```
+https://<用户名>.github.io/<仓库名>/beta/channel.json
+https://<用户名>.github.io/<仓库名>/stable/channel.json
+```
+
+---
+
+## 二、分支模型
+
+| 分支 | 定位 | 推送后发生什么 |
+|---|---|---|
+| `main` | 正式版源码 | 跑全量回归 → 通过则发布到 **`/stable/`** 频道 |
+| `beta` | 预发布源码 | 跑全量回归 → 通过则发布到 **`/beta/`** 频道 |
+| `feat/*`、`fix/*` | 开发 | 只跑**回归门禁**，不发布 |
+
+**合并方向**：`feat/*` → `beta` →（验收后）→ `main`。
+这样 `beta` 天然是"下一版候选"，`main` 是"已验收"。
+
+---
+
+## 三、回归门禁（发布前必过）
+
+无论哪个分支，CI 先跑**同一套全量检查**；**任一失败即中止发布**（不发半成品）。
+
+| 检查 | 命令 | 断言数 |
+|---|---|---|
+| Android 单测（必须两条一起跑） | `./gradlew :app:assembleDebug :app:testDebugUnitTest` | 46 |
+| root 运行时回归（bash） | `bash runtime/root/selftest.sh` | 19 |
+| root 运行时回归（**mksh**，模拟设备侧） | `mksh runtime/root/selftest.sh` | 19 |
+| proot 运行时回归 | `bash runtime/proot/selftest.sh` | 18 |
+| 模块 WebUI 纯函数 | `node module/webroot/selftest.mjs` | 60 |
+| 三方版本比较一致性 | `node tools/cmp-consistency.mjs` | 16 |
+| status JSON 契约 | `node tools/contract-check.mjs` | 冻结 schema |
+| **设备侧 shell 兼容性**（mksh 可解析 + shebang 正确） | `node tools/shell-compat-check.mjs` | 19 个脚本 |
+
+> ⚠️ **`assembleDebug` 不编译 test 源集**：只跑它会**静默跳过全部单测**。
+> 这在开发中真实发生过一次（单测引用已删除的符号，APK 照样出得来）。所以这两条永远一起跑。
+>
+> ⚠️ **设备侧脚本必须过 mksh**：Android 上没有 bash，`/system/bin/sh` 是 mksh。
+> 这一关失败意味着"本地 bash 全绿、真机一行都跑不了"（本轮就是这么发现 root 模式从来没跑起来过）。
+> 详见 `docs/architecture.md` §1.1 与 `docs/STATUS.md` §3.4。
+
+
+---
+
+## 四、层产物（base/runtime/dsh）：**不要每次推送都重建**
+
+三层两式合计约 150 MB，而且构建需要 **arm64 + 真 chroot + qemu/binfmt**（GitHub 的 runner 是 x86-64）。
+每次推送都重建会又慢又浪费。所以：
+
+| 产物 | 触发方式 | 说明 |
+|---|---|---|
+| APK / 模块 zip | **每次推送**（beta/main） | 小、快（`app/`、`module/`、`runtime/` 任一变化就该重发） |
+| 三层镜像 | **手动触发**，或**仅当 `rootfs/` 变化时** | 工作流里用 `docker/setup-qemu-action` 提供 arm64 模拟；也可在有 arm64 机器时本地构建后上传 |
+
+> 层的**日常增量**交给频道本身：用户升级只下 `dsh` 层（约 31 MB），不需要 CI 每次重发三份。
+
+---
+
+## 五、需要的 Secrets（**绝不提交到仓库**）
+
+| Secret | 用途 | 缺失时 |
+|---|---|---|
+| `CHANNEL_SIGNING_KEY` | Ed25519 私钥，签 `channel.json` | **发布工作流直接失败**，绝不"跳过签名" |
+| `ANDROID_KEYSTORE_BASE64` | 正式签名 keystore（base64） | 未配置时只出 **debug 包**，并在 Release 说明里标注 |
+| `ANDROID_KEYSTORE_PASSWORD` / `ANDROID_KEY_ALIAS` / `ANDROID_KEY_PASSWORD` | 签名口令 | 同上 |
+
+**为什么签名密钥必须是 Secret**：频道的安全模型是"npm/HTTP 只是传输，信任根是公钥验签"。
+私钥一旦泄漏，任何人都能签出"你的"频道，**整个更新体系失效**（这一点已实测：篡改与冒签都会被拒，
+但那是建立在私钥不外泄的前提上）。
+
+> 本地开发用的 `channel.key` **已经**在 `.gitignore` 里；仓库里还曾遗留过一份测试私钥，已清除。
+> 生成与保管方式见 `docs/updates.md`。
+
+---
+
+## 六、用户侧怎么用
+
+1. 在 App 里添加频道（URL + 公钥 + 指纹）；
+2. 想尝鲜 → 订阅 **`/beta/channel.json`**；想稳 → 订阅 **`/stable/channel.json`**；
+3. 更新时只下载**变化的那一层**（`dsh` 层约 31 MB，`runtime` 约 46 MB，`base` 约 19 MB）。
+
+**公钥必须由用户手输或从可信渠道获取，绝不要从频道包里读** —— 那等于让攻击者自带信任根。
+`gen-manifest` 只把公钥写进包内 README **供人核对**，不写进信任链。
+
+---
+
+## 七、与"署名/身份"的关系
+
+- git 提交身份：`SunsetRNE <z100o190zgxc@163.com>`（已配置全局与仓库级）；
+- 频道签名密钥：**与 git 身份无关**，是独立的 Ed25519 密钥对，私钥只存 Secret 与你的离线备份；
+- 公钥指纹（形如 `ed25519:xx:xx:…`）是给用户核对用的，应写进 README 与发布说明。
+
+---
+
+## 八、落地状态
+
+| 项 | 状态 |
+|---|---|
+| `main` / `beta` 分支 | ✅ 已建立 |
+| git 身份配置 | ✅ SunsetRNE |
+| 回归门禁可用的命令 | ✅ 全部就绪（见 §三） |
+| `.github/workflows/` | ⏳ 待添加（`ci.yml` 门禁 + `release.yml` 分支发布） |
+| GitHub Secrets | ⏳ **需要你在仓库设置里配**（我无法代配，也不该把私钥写进代码） |
+| 正式签名 keystore | ⏳ 需要你生成并备份（丢了就无法给同一 App 发新版） |

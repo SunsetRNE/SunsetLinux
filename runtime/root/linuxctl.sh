@@ -1,6 +1,6 @@
-#!/usr/bin/env bash
+#!/system/bin/sh
 # =============================================================================
-# dshroid · runtime/root/linuxctl.sh
+# sunsetlinux · runtime/root/linuxctl.sh
 #
 # root 模式的 linuxctl 实现（architecture.md §3 的全部子命令）。
 #
@@ -8,7 +8,7 @@
 #   1) **stdout 只有 JSON**（App 解析它）；所有人类可读文本走 stderr。
 #   2) 所有子命令**幂等**：重复 start / stop / provision 都不报错。
 #   3) status 严格输出 §3.1 的 schema —— 所有键都在，取不到写 null，不省略键。
-#   4) LINUX_HOME 可用环境变量覆盖，默认 /data/linux。
+#   4) LINUX_HOME 可用环境变量覆盖，默认 /data/sunsetlinux。
 #
 # 子命令与退出码（§3）：
 #   provision [--seed <dir>]   0 成功 / 2 已部署
@@ -35,7 +35,7 @@ SELF_DIR="$(cd -- "$(dirname -- "$SELF_PATH")" && pwd -P)"
 
 # 公共库查找顺序：同目录（安装后 bin/ 里会一起放）→ 仓库相对路径
 COMMON_DIR=""
-for cand in "$SELF_DIR/common" "$SELF_DIR/../common" "$SELF_DIR/../../runtime/common" "$SELF_DIR/../lib/dshroid"; do
+for cand in "$SELF_DIR/common" "$SELF_DIR/../common" "$SELF_DIR/../../runtime/common" "$SELF_DIR/../lib/sunsetlinux"; do
     if [ -f "$cand/status_json.sh" ]; then COMMON_DIR="$cand"; break; fi
 done
 if [ -z "$COMMON_DIR" ]; then
@@ -43,7 +43,8 @@ if [ -z "$COMMON_DIR" ]; then
     exit 1
 fi
 # shellcheck source=/dev/null
-. "$COMMON_DIR/status_json.sh"
+# 显式告知被 source（mksh 下无法自查 BASH_SOURCE，见 status_json.sh 尾部注释）
+SUNSETLINUX_SOURCED=1 . "$COMMON_DIR/status_json.sh"
 
 # layer-spec：分层规格的唯一共同事实源（层命名/版本格式/压缩口径）。
 # 找不到时**不致命**：本脚本里所有用到的地方都有内联兜底默认值，
@@ -66,10 +67,10 @@ else
     layer_transport_name() { printf '%s-%s.erofs.zst' "$1" "$2"; }
 fi
 # shellcheck source=/dev/null
-. "$COMMON_DIR/http_health.sh"
+SUNSETLINUX_SOURCED=1 . "$COMMON_DIR/http_health.sh"
 
 # --- 全局配置 ---------------------------------------------------------------
-LINUX_HOME="${LINUX_HOME:-/data/linux}"
+LINUX_HOME="${LINUX_HOME:-/data/sunsetlinux}"
 LH="$LINUX_HOME"
 MODE="${LINUXCTL_MODE:-root}"
 
@@ -84,6 +85,9 @@ SNAP_DIR="$LH/snapshots"
 SEEDS_DIR="$LH/seeds"
 CACHE_DIR="$LH/cache"
 
+# 「卸载即清除」标记：模块 uninstall.sh 的唯一判据（不用环境变量，见 docs/uninstall.md）
+PURGE_MARKER="$ETC_DIR/PURGE_ON_UNINSTALL"
+
 CONFIG_JSON="$ETC_DIR/config.json"
 STATE_JSON="$ETC_DIR/state.json"
 
@@ -96,7 +100,10 @@ MOUNTS_FILE="$RUN_DIR/mounts"
 LOGFILE="$RUN_DIR/linux.log"
 ERROR_FILE="$RUN_DIR/last-error"
 
-LAYER_NAMES=( base runtime dsh )
+# 层顺序：**POSIX 空格分隔字符串，不用数组**。
+# 本脚本在设备侧由 /system/bin/sh（Android mksh）执行，不能假设 bash 数组语义；
+# 遍历一律写成 `for name in $LAYER_NAMES`（有意不加引号：就是要按空白分词）。
+LAYER_NAMES="base runtime dsh"
 
 UMOUNT=/system/bin/umount
 MOUNT=/system/bin/mount
@@ -293,7 +300,7 @@ gather_status() {
 
     # ---- layers -----------------------------------------------------------
     local name f
-    for name in "${LAYER_NAMES[@]}"; do
+    for name in $LAYER_NAMES; do
         f=""
         [ -n "$(find_layer "$name" 2>/dev/null || true)" ] && f="$(find_layer "$name")"
         ls=""
@@ -387,7 +394,7 @@ cmd_provision() {
 
     # 层文件：已存在就不动；缺失则尝试从 seed 复制
     local missing="" name src
-    for name in "${LAYER_NAMES[@]}"; do
+    for name in $LAYER_NAMES; do
         if ! find_layer "$name" >/dev/null 2>&1; then
             missing="$missing $name"
         fi
@@ -406,7 +413,7 @@ cmd_provision() {
 
     # 复查
     local still=""
-    for name in "${LAYER_NAMES[@]}"; do
+    for name in $LAYER_NAMES; do
         find_layer "$name" >/dev/null 2>&1 || still="$still $name"
     done
 
@@ -450,7 +457,7 @@ make_upper_img() {
     for mk in /system/bin/mke2fs /system/bin/mkfs.ext4 "$ROOTFS_DIR/sbin/mke2fs" \
               "$ROOTFS_DIR/sbin/mkfs.ext4" /usr/sbin/mkfs.ext4 /sbin/mkfs.ext4; do
         [ -x "$mk" ] || continue
-        if "$mk" -F -q -t ext4 -m 0 -L dshroid-upper "$UPPER_IMG" >/dev/null 2>&1; then
+        if "$mk" -F -q -t ext4 -m 0 -L sunsetlinux-upper "$UPPER_IMG" >/dev/null 2>&1; then
             return 0
         fi
     done
@@ -459,7 +466,7 @@ make_upper_img() {
 }
 
 write_default_config() {
-    local port="${DSHROID_PORT:-3080}"
+    local port="${SUNSETLINUX_PORT:-3080}"
     cat > "$CONFIG_JSON" <<EOF
 {
   "schema": 1,
@@ -482,7 +489,7 @@ write_default_state() {
     first=1
     {
         printf '{\n  "schema": 1,\n  "layers": {\n'
-        for name in "${LAYER_NAMES[@]}"; do
+        for name in $LAYER_NAMES; do
             f="$(find_layer "$name" 2>/dev/null || true)"
             sz="null"; ver="null"
             if [ -n "$f" ]; then
@@ -518,7 +525,7 @@ cmd_start() {
 
     # 前置：层文件与 upper.img
     local name
-    for name in "${LAYER_NAMES[@]}"; do
+    for name in $LAYER_NAMES; do
         if ! find_layer "$name" >/dev/null 2>&1; then
             local msg="缺少层文件 $LAYERS_DIR/$name.{erofs,squashfs}"
             printf '%s\n' "$msg" > "$ERROR_FILE"
@@ -636,8 +643,9 @@ run_in_env() {
         log "ERROR: 环境未运行（没有可用的 mount namespace）"
         return 1
     fi
-    local -a cmd=()
-    if [ $# -gt 0 ]; then cmd=( "$@" ); else cmd=( /bin/bash ); fi
+    # 要执行的命令：改用**位置参数**承载，避免 bash 数组（设备侧是 Android mksh）。
+    # 无参数时默认进交互 shell（与旧行为一致）。
+    [ $# -gt 0 ] || set -- /bin/bash
 
     if [ -x "$NSENTER" ]; then
         # --mount/--uts 进入环境 ns；chroot 用宿主二进制（静态路径已在 ns 内可见）
@@ -647,14 +655,14 @@ run_in_env() {
                  HOME=/root DSH_HOME=/root/.dsh \
                  PATH=/opt/node/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
                  TERM="${TERM:-xterm-256color}" LANG="${LANG:-C.UTF-8}" \
-                 "${cmd[@]}"
+                 "$@"
         else
             "$NSENTER" --mount="/proc/$nspid/ns/mnt" --uts="/proc/$nspid/ns/uts" \
                  --wd="$ROOTFS_DIR" chroot "$ROOTFS_DIR" /usr/bin/env -i \
                  HOME=/root DSH_HOME=/root/.dsh \
                  PATH=/opt/node/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
                  TERM="${TERM:-xterm-256color}" LANG="${LANG:-C.UTF-8}" \
-                 "${cmd[@]}"
+                 "$@"
         fi
         return $?
     fi
@@ -664,11 +672,11 @@ run_in_env() {
     if [ "$interactive" = 1 ]; then
         exec chroot "$ROOTFS_DIR" /usr/bin/env -i HOME=/root DSH_HOME=/root/.dsh \
              PATH=/opt/node/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
-             "${cmd[@]}"
+             "$@"
     fi
     chroot "$ROOTFS_DIR" /usr/bin/env -i HOME=/root DSH_HOME=/root/.dsh \
          PATH=/opt/node/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
-         "${cmd[@]}"
+         "$@"
     return $?
 }
 
@@ -1170,23 +1178,29 @@ cmd_rollback() {
     esac
     cur="$(dsh_layer_version "$STATE_JSON" "$layer" 2>/dev/null || true)"
 
-    local -a versions=()
-    local f v
+    # 已安装版本清单：POSIX 字符串（换行分隔），不用数组 —— 见文件头 LAYER_NAMES 的说明
+    local versions="" f v
     for f in "$LAYERS_DIR/$layer"-*.erofs "$LAYERS_DIR/$layer"-*.squashfs; do
         [ -f "$f" ] || continue
         v="$(basename "$f")"
         v="${v#$layer-}"; v="${v%.*}"
-        versions+=( "$v" )
+        versions="${versions}${versions:+
+}$v"
     done
-    if [ "${#versions[@]}" -eq 0 ]; then
+    if [ -z "$versions" ]; then
         emit "{\"ok\":false,\"error\":\"没有可回滚的版本（$layer 只有一个层文件或没有带版本名的层）\"}"
         return 1
     fi
     if [ -z "$target" ]; then
         # 挑"比当前版本低"的最高版本；没有更低的就取次高
         local sorted
-        sorted="$(printf '%s\n' "${versions[@]}" | sort -V -r)"
-        local first=1
+        # sort -V 是 GNU 扩展；Android toybox 不一定有 → 没有就退回字典序并明确告警
+        if printf '%s\n' x | sort -V >/dev/null 2>&1; then
+            sorted="$(printf '%s\n' "$versions" | sort -V -r)"
+        else
+            warnl "本机 sort 不支持 -V（版本序），回滚候选按字典序排列，可能不是你期望的顺序"
+            sorted="$(printf '%s\n' "$versions" | sort -r)"
+        fi
         while IFS= read -r v; do
             [ -n "$v" ] || continue
             if [ "$v" != "$cur" ]; then target="$v"; break; fi
@@ -1258,7 +1272,7 @@ cmd_doctor() {
 # ---------------------------------------------------------------------------
 usage() {
     cat >&2 <<'EOF'
-linuxctl（dshroid root 模式）
+linuxctl（sunsetlinux root 模式）
 
 用法：linuxctl <命令> [参数]
 
@@ -1287,10 +1301,235 @@ linuxctl（dshroid root 模式）
   update-module-info         读模块 module.prop 的版本（无需 root 侧探测）
   update-module-check        检查**模块自身**是否有更新（同一套 Ed25519 验签）
   doctor                     自检
+  footprint                  **只读**残留报告：环境根各项大小 + 模块目录 + loop/挂载/进程/端口残留
+  purge [--yes]              彻底清除环境根（默认空跑；先 stop，有挂载残留则拒绝删除）
+  purge --arm | --disarm     开启/撤销「卸载即清除」标记（卸载模块时是否连用户数据一起删）
 
-环境变量：LINUX_HOME（默认 /data/linux）、UPPER_SIZE_MB（默认 8192）
+环境变量：LINUX_HOME（默认 /data/sunsetlinux）、UPPER_SIZE_MB（默认 8192）
 stdout 只输出 JSON；人类可读信息走 stderr。
 EOF
+}
+
+# ---------------------------------------------------------------------------
+# footprint —— **只读**残留报告：清理/卸载前用它看清"到底还剩什么"
+#
+# 为什么需要它：本项目的数据**刻意放在 App 私有目录之外**（卸载 App 不会删），
+# 所以"卸载后还剩什么"必须能**看得见**，而不是靠猜。
+# 它同时报告**运行态残留**（loop 设备 / 挂载点 / 进程 / 端口）—— 这类最难自己发现，
+# 也正是"手动 rm -rf 清不干净"的根因：环境还在跑时挂载点被占用，删不掉但错误容易被忽略。
+#
+# 只读，不改任何东西。JSON 走 stdout。
+# ---------------------------------------------------------------------------
+_fp_size() { # _fp_size <路径> → 字节；目录用 du（toybox 兼容 -k）
+    local p="$1" k
+    [ -e "$p" ] || { printf '0'; return; }
+    if [ -d "$p" ]; then
+        k="$(du -sk "$p" 2>/dev/null | awk '{print $1}')"
+        printf '%s' $(( ${k:-0} * 1024 ))
+    else
+        dsh_size_of "$p" 2>/dev/null || printf '0'
+    fi
+}
+
+_fp_human() { # _fp_human <字节数> → 人类可读（toybox 也有 awk，用它避免浮点运算）
+    local b="${1:-0}"
+    case "$b" in ''|*[!0-9]*) b=0 ;; esac
+    if [ "$b" -ge 1073741824 ]; then
+        awk -v b="$b" 'BEGIN{printf "%.2f GiB", b/1073741824}'
+    elif [ "$b" -ge 1048576 ]; then
+        awk -v b="$b" 'BEGIN{printf "%.1f MiB", b/1048576}'
+    elif [ "$b" -ge 1024 ]; then
+        awk -v b="$b" 'BEGIN{printf "%.1f KiB", b/1024}'
+    else
+        printf '%s B' "$b"
+    fi
+}
+
+_fp_loops() { # 指向我们镜像的 loop 设备（每行一个）    have losetup || return 0
+    losetup -a 2>/dev/null | grep -F "$LH" || true
+}
+
+_fp_mounts() { # 挂载点在我们环境根之下的（每行一个）
+    grep -F "$LH" /proc/mounts 2>/dev/null || true
+}
+
+_fp_pid_alive() { # _fp_pid_alive <pid 文件>
+    local f="$1" p
+    [ -f "$f" ] || return 1
+    p="$(tr -dc '0-9' < "$f" 2>/dev/null)"
+    [ -n "$p" ] || return 1
+    kill -0 "$p" 2>/dev/null
+}
+
+cmd_footprint() {
+    local home_exists=false layers_sz=0 upper_sz=0 snap_sz=0 seeds_sz=0 total_sz=0
+    local module_id="${LINUXCTL_MODULE_ID:-sunsetlinux}"
+    local adb_dir="${ADB_DIR:-/data/adb}"
+    local module_dir="$adb_dir/modules/$module_id"
+    local modupd_dir="$adb_dir/modules_update/$module_id"
+    local app_data="${LINUXCTL_APP_DATA:-/data/data/io.github.sunsetrne.sunsetlinux}"
+
+    [ -d "$LH" ] && home_exists=true
+    layers_sz="$(_fp_size "$LH/layers")"
+    upper_sz="$(_fp_size "$LH/upper.img")"
+    snap_sz="$(_fp_size "$LH/snapshots")"
+    seeds_sz="$(_fp_size "$LH/seeds")"
+    total_sz="$(_fp_size "$LH")"
+
+    local loops mounts
+    loops="$(_fp_loops)"
+    mounts="$(_fp_mounts)"
+    local n_loops=0 n_mounts=0
+    [ -n "$loops" ]  && n_loops="$(printf '%s\n' "$loops" | grep -c . || true)"
+    [ -n "$mounts" ] && n_mounts="$(printf '%s\n' "$mounts" | grep -c . || true)"
+
+    local supervisor_alive=false dsh_alive=false
+    _fp_pid_alive "$RUN_DIR/supervisor.pid" && supervisor_alive=true
+    _fp_pid_alive "$RUN_DIR/dsh.pid" && dsh_alive=true
+
+    # 「卸载即清除」标记：模块的 uninstall.sh 只认这个文件，**不认环境变量**
+    # （uninstall.sh 由 KernelSU 调用，用户没有机会给它传环境变量 —— 见 docs/uninstall.md）
+    local purge_armed=false
+    [ -f "$PURGE_MARKER" ] && purge_armed=true
+
+    # 端口占用：有 ss/netstat 才判，否则如实标 unknown（不猜）
+    local port="" port_state=unknown
+    [ -f "$RUN_DIR/dsh.port" ] && port="$(tr -dc '0-9' < "$RUN_DIR/dsh.port" 2>/dev/null)"
+    if [ -n "$port" ]; then
+        if have ss; then
+            if ss -ltn 2>/dev/null | grep -q ":$port "; then port_state=busy; else port_state=free; fi
+        elif have netstat; then
+            if netstat -ltn 2>/dev/null | grep -q ":$port "; then port_state=busy; else port_state=free; fi
+        fi
+    fi
+
+    # ---- 人类可读（stderr）----
+    {
+        printf '\n== 残留清单 ==\n'
+        printf '  环境根              %-38s %s   %s\n' "$LH" \
+            "$([ "$home_exists" = true ] && echo 存在 || echo 不存在)" "$(_fp_human "$total_sz")"
+        printf '    layers/           三层只读镜像%-24s %s\n' "" "$(_fp_human "$layers_sz")"
+        printf '    upper.img         可写层（你的数据）%-16s %s（稀疏，这里报实际占用）\n' "" "$(_fp_human "$upper_sz")"
+        printf '    snapshots/        快照%-32s %s\n' "" "$(_fp_human "$snap_sz")"
+        printf '    seeds/            离线种子%-28s %s\n' "" "$(_fp_human "$seeds_sz")"
+        printf '  模块目录            %-38s %s\n' "$module_dir" \
+            "$([ -d "$module_dir" ] && echo 存在 || echo 不存在)"
+        printf '  待生效的模块更新     %-38s %s\n' "$modupd_dir" \
+            "$([ -d "$modupd_dir" ] && echo '存在（装了模块但还没重启）' || echo 不存在)"
+        printf '  App 私有数据         %-38s %s（卸载 App 时由系统清理）\n' "$app_data" \
+            "$([ -d "$app_data" ] && echo 存在 || echo 不存在)"
+        printf '  -- 运行态 --\n'
+        printf '  loop 设备残留        %s\n' "$([ "$n_loops" = 0 ] && echo '无 ✅' || printf '%s 个 ⚠️\n' "$n_loops")"
+        [ "$n_loops" != 0 ] && printf '%s\n' "$loops" | sed 's/^/      /'
+        printf '  挂载点残留           %s\n' "$([ "$n_mounts" = 0 ] && echo '无 ✅' || printf '%s 个 ⚠️\n' "$n_mounts")"
+        [ "$n_mounts" != 0 ] && printf '%s\n' "$mounts" | sed 's/^/      /'
+        printf '  supervisor 进程      %s\n' "$([ "$supervisor_alive" = true ] && echo '仍在运行 ⚠️' || echo '无 ✅')"
+        printf '  dsh 进程             %s\n' "$([ "$dsh_alive" = true ] && echo '仍在运行 ⚠️' || echo '无 ✅')"
+        printf '  端口 %-15s %s\n' "${port:-（未记录）}" \
+            "$([ "$port_state" = busy ] && echo '被占用 ⚠️' || { [ "$port_state" = free ] && echo '空闲 ✅' || echo '未知（无 ss/netstat）'; })"
+        printf '  卸载即清除标记      %s\n' \
+            "$([ "$purge_armed" = true ] && echo '已开启 ⚠️ 卸载模块时会连用户数据一起删' || echo '未开启（卸载模块只删模块自身，用户数据保留）')"
+        printf '\n  提示：清除前请先 `linuxctl stop`，否则挂载点被占用会导致 rm 删不干净。\n'
+    } >&2
+
+    emit "{\"ok\":true,\"linux_home\":\"$(jesc "$LH")\",\"exists\":$home_exists,\"total_bytes\":$total_sz,\"layers_bytes\":$layers_sz,\"upper_bytes\":$upper_sz,\"snapshots_bytes\":$snap_sz,\"seeds_bytes\":$seeds_sz,\"module_dir\":\"$(jesc "$module_dir")\",\"module_exists\":$([ -d "$module_dir" ] && echo true || echo false),\"module_update_pending\":$([ -d "$modupd_dir" ] && echo true || echo false),\"purge_on_uninstall\":$purge_armed,\"loop_residue\":$n_loops,\"mount_residue\":$n_mounts,\"supervisor_alive\":$supervisor_alive,\"dsh_alive\":$dsh_alive,\"port\":$([ -n "$port" ] && printf '%s' "$port" || echo null),\"port_state\":\"$port_state\"}"
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# purge —— 彻底清除：**先停、再确认没有残留、最后才删**
+#
+# 顺序是硬要求：环境还在跑时挂载点被占用，rm 会删不干净且错误容易被忽略
+# （留下空目录 + 悬挂 loop + 仍在跑的进程），这正是"清不干净"的常见成因。
+# 所以：有任何挂载/loop 残留时**直接拒绝删除**，让用户先 stop，而不是删一半。
+#
+# 默认是**空跑**（只打印将删除什么），必须显式 --yes 才真删。
+# ---------------------------------------------------------------------------
+cmd_purge() {
+    local yes=0 action=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --yes|-y)   yes=1; shift ;;
+            --arm)      action="arm"; shift ;;
+            --disarm)   action="disarm"; shift ;;
+            *) log "未知参数：$1"; emit '{"ok":false,"error":"用法：linuxctl purge [--yes] | purge --arm | purge --disarm"}'; return 2 ;;
+        esac
+    done
+
+    # ---- 「卸载即清除」标记：写给模块的 uninstall.sh 看 ----
+    # 为什么用文件而不是环境变量：uninstall.sh 是 KernelSU 在卸载时自己调的，
+    # 用户的 shell 环境根本传不进去 —— 环境变量开关是**不可达代码**（详见 docs/uninstall.md）。
+    if [ "$action" = "arm" ]; then
+        if mkdir -p "$LH/etc" 2>/dev/null && \
+           printf '由 `linuxctl purge --arm` 于 %s 写入。\n卸载模块时 uninstall.sh 见到本文件会连同用户数据一起删除。\n删除本文件（或跑 `linuxctl purge --disarm`）即可撤销。\n' \
+               "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$PURGE_MARKER" 2>/dev/null; then
+            log "已开启「卸载即清除」：$PURGE_MARKER"
+            log "⚠️ 之后卸载模块会删除整个 $LH（不可恢复）。撤销：linuxctl purge --disarm"
+            emit "{\"ok\":true,\"purge_on_uninstall\":true,\"linux_home\":\"$(jesc "$LH")\",\"marker\":\"$(jesc "$PURGE_MARKER")\"}"
+            return 0
+        fi
+        emit '{"ok":false,"error":"无法写入标记文件（环境根不存在或无权限？）"}'
+        return 1
+    fi
+    if [ "$action" = "disarm" ]; then
+        if [ -f "$PURGE_MARKER" ]; then
+            rm -f "$PURGE_MARKER" 2>/dev/null || { emit '{"ok":false,"error":"标记文件删除失败"}'; return 1; }
+            log "已撤销「卸载即清除」：卸载模块将保留用户数据。"
+        else
+            log "本来就没开启「卸载即清除」，无需撤销。"
+        fi
+        emit "{\"ok\":true,\"purge_on_uninstall\":false,\"linux_home\":\"$(jesc "$LH")\"}"
+        return 0
+    fi
+
+    if [ ! -d "$LH" ]; then
+        log "环境根不存在，无需清除：$LH"
+        emit "{\"ok\":true,\"purged\":false,\"reason\":\"not_found\",\"linux_home\":\"$(jesc "$LH")\"}"
+        return 0
+    fi
+
+    local sz; sz="$(_fp_size "$LH")"
+    if [ "$yes" != "1" ]; then
+        log "空跑模式：将删除 $LH（$(_fp_human "$sz")）"
+        log "确认无误后重跑：linuxctl purge --yes"
+        emit "{\"ok\":true,\"purged\":false,\"dry_run\":true,\"linux_home\":\"$(jesc "$LH")\",\"size_bytes\":$sz}"
+        return 0
+    fi
+
+    # 1) 先停（幂等；已经停了也无所谓）
+    log "先停止环境…"
+    cmd_stop >/dev/null 2>&1 || true
+
+    # 2) 确认没有运行态残留；有就拒绝，避免"删一半"
+    local loops mounts
+    loops="$(_fp_loops)"; mounts="$(_fp_mounts)"
+    if [ -n "$loops" ] || [ -n "$mounts" ]; then
+        log "拒绝删除：仍有运行态残留（挂载点或 loop 设备），现在删会删不干净。"
+        [ -n "$mounts" ] && printf '%s\n' "$mounts" | sed 's/^/  挂载: /' >&2
+        [ -n "$loops" ]  && printf '%s\n' "$loops"  | sed 's/^/  loop: /' >&2
+        log "请先手动卸载（umount）对应挂载点并释放 loop，再重跑本命令。"
+        emit '{"ok":false,"error":"仍有挂载/loop 残留，已拒绝删除以避免删不干净"}'
+        return 1
+    fi
+
+    # 3) 删（只删环境根；模块目录由管理器负责）
+    log "删除 $LH（$(_fp_human "$sz")，不可恢复）…"
+    if ! rm -rf "$LH" 2>/dev/null; then
+        emit '{"ok":false,"error":"删除失败（可能仍有占用），请查看上文"}'
+        return 1
+    fi
+    if [ -d "$LH" ]; then
+        local left; left="$(_fp_size "$LH")"
+        log "删除后仍残留 $(_fp_human "$left")（可能有不可删的挂载点）"
+        emit "{\"ok\":false,\"error\":\"删除不完整\",\"remaining_bytes\":$left}"
+        return 1
+    fi
+
+    # 注意：这里**不要用反引号**做强调 —— 它在双引号里会被 shell 当成命令替换执行
+    # （实测过：日志变成 `linuxctl: command not found`，且真的会去执行那条命令）。
+    log "已清除。可用「linuxctl footprint」复核（应全部为不存在/无残留）。"
+    emit "{\"ok\":true,\"purged\":true,\"linux_home\":\"$(jesc "$LH")\",\"freed_bytes\":$sz}"
+    return 0
 }
 
 # ===========================================================================
@@ -1300,8 +1539,13 @@ main() {
     [ $# -gt 0 ] || { usage; exit 2; }
     local sub="$1"; shift
 
-    # 目录不存在时先建（status/logs 也要能读）
-    mkdir -p "$RUN_DIR" "$LAYERS_DIR" "$ETC_DIR" 2>/dev/null || true
+    # 目录按需创建 ── **只读子命令不建**。
+    # 踩过的坑：这里原来无条件 mkdir，于是 `footprint`（只读残留报告）在环境根不存在时
+    # **先把它建出来再报告"存在"**，得出完全错误的结论。只读工具不该有副作用。
+    case "$sub" in
+        footprint|status|logs|doctor|version|help|-h|--help) : ;;
+        *) mkdir -p "$RUN_DIR" "$LAYERS_DIR" "$ETC_DIR" 2>/dev/null || true ;;
+    esac
 
     case "$sub" in
         provision) cmd_provision "$@" ;;
@@ -1317,6 +1561,8 @@ main() {
         update)    cmd_update "$@" ;;
         rollback)  cmd_rollback "$@" ;;
         doctor)    cmd_doctor "$@" ;;
+        footprint) cmd_footprint "$@" ;;
+        purge)     cmd_purge "$@" ;;
         update-check)    cmd_update_proxy check "$@" ;;
         update-apply)    cmd_update_proxy apply "$@" ;;
         update-versions) cmd_update_proxy versions "$@" ;;

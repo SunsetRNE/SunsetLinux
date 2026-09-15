@@ -1,6 +1,6 @@
 #!/system/bin/sh
 # =============================================================================
-# dshroid · module/lib/detect-mount.sh
+# sunsetlinux · module/lib/detect-mount.sh
 #
 # 探测「当前 root 实现」与「KernelSU 的挂载实现（metamodule）」，并判定本模块
 # 是否需要挂载支持。
@@ -14,7 +14,7 @@
 #   ★ 刻意**不点名**任何第三方模块/作者：只按"声明了 metamodule=1"这一客观条件
 #     识别（见下），不写死任何具体 ID，也不在文案里推荐某个实现。
 #
-#   而 DSHroid 本身是**纯脚本模块**：module/ 下没有 system/、system_ext/、vendor/、
+#   而 SunsetLinux 本身是**纯脚本模块**：module/ 下没有 system/、system_ext/、vendor/、
 #   product/、odm/ 任何会被 overlay 的目录，所以**根本不依赖挂载实现**，
 #   也就不受 KernelSU 这次变动影响。这是我们的优势，应当明确讲给用户听
 #   （而不是让用户自己猜"这个模块要不要 metamodule"）。

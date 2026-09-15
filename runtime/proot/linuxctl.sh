@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# DSHroid — linuxctl（proot / 非 root 降级运行时）          v1.0.0
+# SunsetLinux — linuxctl（proot / 非 root 降级运行时）          v1.0.0
 #
 # 契约（与 root 版完全一致，见 docs/architecture.md §3）：
 #   provision / start / stop / status / attach / exec / logs /
@@ -42,15 +42,15 @@ PROG=$(basename -- "${BASH_SOURCE[0]}")
 SELF_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd -P)
 
 # 可调参数（环境变量覆盖，便于测试与不同设备）
-START_GRACE=${DSHROID_START_GRACE:-90}      # 超过这么多秒还不健康 → state=error
-START_TIMEOUT=${DSHROID_START_TIMEOUT:-120} # start 等待就绪的上限
-STOP_TIMEOUT=${DSHROID_STOP_TIMEOUT:-20}    # stop 等待进程退出的上限
-LOCK_TIMEOUT=${DSHROID_LOCK_TIMEOUT:-30}    # 抢锁等待上限
-DEFAULT_PORT=${DSHROID_DEFAULT_PORT:-3080}
+START_GRACE=${SUNSETLINUX_START_GRACE:-90}      # 超过这么多秒还不健康 → state=error
+START_TIMEOUT=${SUNSETLINUX_START_TIMEOUT:-120} # start 等待就绪的上限
+STOP_TIMEOUT=${SUNSETLINUX_STOP_TIMEOUT:-20}    # stop 等待进程退出的上限
+LOCK_TIMEOUT=${SUNSETLINUX_LOCK_TIMEOUT:-30}    # 抢锁等待上限
+DEFAULT_PORT=${SUNSETLINUX_DEFAULT_PORT:-3080}
 
 # 由 resolve_paths 填充；LINUX_HOME 为空时全部为空字符串（build_status 会当作「不可得」）
 # 注意：这里必须用 ${VAR:-} 形式，否则会把继承来的环境变量抹掉。
-APP_FILES="${DSHROID_APP_FILES:-}"
+APP_FILES="${SUNSETLINUX_APP_FILES:-}"
 LINUX_HOME="${LINUX_HOME:-}"
 ROOTFS=""
 ETC_DIR=""
@@ -150,7 +150,7 @@ LINUX_HOME_ERR=""
 
 resolve_paths() {
   local explicit="${LINUX_HOME:-}"
-  local appfiles="${DSHROID_APP_FILES:-}"
+  local appfiles="${SUNSETLINUX_APP_FILES:-}"
   local home="" src=""
 
   if [[ -n "$explicit" ]]; then
@@ -158,17 +158,17 @@ resolve_paths() {
     src="LINUX_HOME"
   elif [[ -n "$appfiles" ]]; then
     home="${appfiles%/}/linux"
-    src="DSHROID_APP_FILES"
+    src="SUNSETLINUX_APP_FILES"
   elif [[ -d "$SELF_DIR/../rootfs" ]]; then
     # 兜底：linuxctl 被放在 $LINUX_HOME/bin/ 下时，父目录就是环境根。
     home=$(cd -- "$SELF_DIR/.." >/dev/null 2>&1 && pwd -P)
     src="脚本位置推断"
   else
-    LINUX_HOME_ERR="未找到环境根：既没有设置 LINUX_HOME，也没有设置 DSHROID_APP_FILES。
+    LINUX_HOME_ERR="未找到环境根：既没有设置 LINUX_HOME，也没有设置 SUNSETLINUX_APP_FILES。
   请二选一（推荐第一个，App 一般会自动注入）：
-    export DSHROID_APP_FILES=/data/user/0/<包名>/files   # App 私有 files 目录
-    export LINUX_HOME=\$DSHROID_APP_FILES/linux           # 直接指定环境根
-  提示：proot 模式的默认环境根是 \$APP_FILES/linux（见 docs/architecture.md §2.2）。"
+    export SUNSETLINUX_APP_FILES=/data/user/0/<包名>/files   # App 私有 files 目录
+    export LINUX_HOME=\$SUNSETLINUX_APP_FILES/sunsetlinux           # 直接指定环境根
+  提示：proot 模式的默认环境根是 \$APP_FILES/sunsetlinux（见 docs/architecture.md §2.2）。"
     LINUX_HOME=""; APP_FILES="$appfiles"
     ROOTFS=""; ETC_DIR=""; RUN_DIR=""; SNAP_DIR=""; CACHE_DIR=""; BIN_DIR=""; LOG_FILE=""
     return 1
@@ -391,7 +391,7 @@ read_dsh_version() {
 }
 
 read_base_version() {
-  local v="" f; f=$(rt /etc/dshroid-base-version)
+  local v="" f; f=$(rt /etc/sunsetlinux-base-version)
   if exists "$f"; then
     head -1 "$f" 2>/dev/null | tr -d '\r\n' || true
     return 0
@@ -408,7 +408,7 @@ read_runtime_version() {
   # 优先 rootfs 里由 runtime 层写入的版本文件，其次缓存。
   # 刻意不执行 rootfs 里的 node --version：proot 模式下执行宿主二进制不可靠。
   local v="" f=""
-  f=$(rt /etc/dshroid-runtime-version)
+  f=$(rt /etc/sunsetlinux-runtime-version)
   if exists "$f"; then v=$(head -1 "$f" 2>/dev/null | tr -d '\r\n' || true); fi
   [[ -n "$v" ]] || v=$(json_get_str "$ETC_DIR/state.json" runtime_version)
   printf '%s' "$v"
@@ -642,7 +642,7 @@ ensure_layout() { # 目录树 + 脚本就位（幂等）；失败返回非 0
   for d in "$ROOTFS" "$ETC_DIR" "$RUN_DIR" "$SNAP_DIR" "$CACHE_DIR" "$BIN_DIR"; do mk "$d"; done
   # rootfs 内的入口脚本：每次调用都保证是最新版本（幂等，内容不同才写）
   if [[ -f "$SELF_DIR/entry.sh" && -d "$ROOTFS" ]]; then
-    install_script "$SELF_DIR/entry.sh" "$ROOTFS/opt/dshroid/entry.sh"
+    install_script "$SELF_DIR/entry.sh" "$ROOTFS/opt/sunsetlinux/entry.sh"
   fi
   # 宿主侧脚本副本（App 也可以直接调 $LINUX_HOME/bin/linuxctl）
   if [[ -f "$SELF_DIR/linuxctl.sh" ]]; then
@@ -718,7 +718,7 @@ find_seed() { # find_seed [显式路径]；打印选中的 tarball 路径，找�
     fi
     return 0
   fi
-  for d in "${DSHROID_SEED_DIR:-}" "$LINUX_HOME/seeds" "$LINUX_HOME/cache" "$LINUX_HOME"; do
+  for d in "${SUNSETLINUX_SEED_DIR:-}" "$LINUX_HOME/seeds" "$LINUX_HOME/cache" "$LINUX_HOME"; do
     [[ -n "$d" && -d "$d" ]] || continue
     # 优先带 ubuntu/base 字样的
     for e in "${exts[@]}"; do
@@ -726,7 +726,7 @@ find_seed() { # find_seed [显式路径]；打印选中的 tarball 路径，找�
       [[ -n "$f" ]] && { printf '%s' "$f"; return 0; }
     done
   done
-  for d in "${DSHROID_SEED_DIR:-}" "$LINUX_HOME/seeds" "$LINUX_HOME/cache"; do
+  for d in "${SUNSETLINUX_SEED_DIR:-}" "$LINUX_HOME/seeds" "$LINUX_HOME/cache"; do
     [[ -n "$d" && -d "$d" ]] || continue
     for e in "${exts[@]}"; do
       f=$(find "$d" -maxdepth 1 -type f -name "*.$e" 2>/dev/null | sort | head -1 || true)
@@ -740,7 +740,7 @@ zstd_bin() { # 找出可用的 zstd：显式指定 > 随包携带 > PATH
   # Android 系统没有 zstd，而 root 版产出的种子/层常常是 .tar.zst，
   # 所以允许把静态 zstd 放进 $LINUX_HOME/bin/zstd 一起分发。
   local c=""
-  for c in "${DSHROID_ZSTD:-}" "$BIN_DIR/zstd" "$LINUX_HOME/bin/zstd" "$LINUX_HOME/proot/bin/zstd"; do
+  for c in "${SUNSETLINUX_ZSTD:-}" "$BIN_DIR/zstd" "$LINUX_HOME/bin/zstd" "$LINUX_HOME/proot/bin/zstd"; do
     if [[ -n "$c" && -x "$c" ]]; then printf '%s' "$c"; return 0; fi
   done
   c=$(command -v zstd 2>/dev/null || true)
@@ -749,7 +749,7 @@ zstd_bin() { # 找出可用的 zstd：显式指定 > 随包携带 > PATH
 }
 
 zstd_hint() {
-  printf '把静态 zstd 二进制放到 %s（或设 DSHROID_ZSTD=/path/to/zstd），或改用 .tar.gz 的种子/层包' "$BIN_DIR/zstd"
+  printf '把静态 zstd 二进制放到 %s（或设 SUNSETLINUX_ZSTD=/path/to/zstd），或改用 .tar.gz 的种子/层包' "$BIN_DIR/zstd"
 }
 
 archive_test() { # 压缩包完整性校验
@@ -811,7 +811,7 @@ extract_seed_into_rootfs() { # extract_seed_into_rootfs <tarball>；失败会自
 measure_sizes() {
   require_linux_home
   exists "$ROOTFS" || return 0
-  if (( TRACED )) && [[ "${DSHROID_ALLOW_TRACED_MEASURE:-0}" != "1" ]]; then
+  if (( TRACED )) && [[ "${SUNSETLINUX_ALLOW_TRACED_MEASURE:-0}" != "1" ]]; then
     warn "检测到本进程被 ptrace 跟踪（跑在 proot 里）：拒绝现场测量容量（proot 的文件系统视图不可信），沿用 etc/state.json 缓存值。"
     return 0
   fi
@@ -924,7 +924,7 @@ ensure_env_file() { # etc/env（0600，只放模板；真正的密钥由用户/A
   mkdir -p -- "$ETC_DIR" 2>/dev/null || return 0
   umask 077
   cat >"$ef" <<'EOF'
-# DSHroid proot 运行时环境变量（权限必须 0600）
+# SunsetLinux proot 运行时环境变量（权限必须 0600）
 #
 # start.sh 会以「环境变量」的方式把这些值传给环境内的进程，
 # 绝不会出现在 proot 的命令行里 —— 因此 `ps` 看不到密钥（这是相对 DSHA 的硬改进）。
@@ -1099,13 +1099,13 @@ cmd_provision() {
       fail 1 "rootfs 还没有内容，且找不到出厂种子。
   请准备一个 Ubuntu base tarball（ubuntu-base-*.tar.gz 或自己打的 rootfs.tar.gz），然后：
     linuxctl provision --seed <包含该 tarball 的目录或文件>
-  也可以用 DSHROID_SEED_DIR=<目录> 指定搜索位置；默认还会找 \$LINUX_HOME/seeds 与 \$LINUX_HOME/cache。"
+  也可以用 SUNSETLINUX_SEED_DIR=<目录> 指定搜索位置；默认还会找 \$LINUX_HOME/seeds 与 \$LINUX_HOME/cache。"
     fi
     extract_seed_into_rootfs "$seed"
   else
     log "rootfs 已有内容，跳过种子解包（幂等）"
   fi
-  # 解包之后再放一遍入口脚本（种子会覆盖 /opt/dshroid）
+  # 解包之后再放一遍入口脚本（种子会覆盖 /opt/sunsetlinux）
   ensure_layout
 
   ensure_config
@@ -1649,7 +1649,7 @@ cmd_doctor() {
 
   # 2. proot 二进制
   local proot_bin="" proot_ver="" proot_src=""
-  for c in "${DSHROID_PROOT_BIN:-}" "$LINUX_HOME/proot/proot-launch.sh" "$LINUX_HOME/bin/proot-launch.sh" "$SELF_DIR/proot-launch.sh"; do
+  for c in "${SUNSETLINUX_PROOT_BIN:-}" "$LINUX_HOME/proot/proot-launch.sh" "$LINUX_HOME/bin/proot-launch.sh" "$SELF_DIR/proot-launch.sh"; do
     [[ -n "$c" && -x "$c" ]] && { proot_bin=$c; break; }
   done
   if [[ -z "$proot_bin" ]]; then
@@ -1680,9 +1680,9 @@ cmd_doctor() {
   fi
 
   # 4. sdcard 可写性（真实写测试）
-  local sd="${DSHROID_SDCARD:-/storage/emulated/0}" probe=""
+  local sd="${SUNSETLINUX_SDCARD:-/storage/emulated/0}" probe=""
   if [[ -d "$sd" ]]; then
-    probe="$sd/.dshroid-write-test.$$"
+    probe="$sd/.sunsetlinux-write-test.$$"
     if ( : >"$probe" ) 2>/dev/null; then
       rm -f -- "$probe" 2>/dev/null || true
       add_check "sdcard_write" true info "sdcard 可写：$sd"
@@ -1738,7 +1738,7 @@ cmd_doctor() {
 
   # 6. rootfs 完整性
   local missing=() f
-  for f in bin/sh bin/bash usr/bin/env etc/os-release opt/dshroid/entry.sh \
+  for f in bin/sh bin/bash usr/bin/env etc/os-release opt/sunsetlinux/entry.sh \
            usr/local/bin/node usr/local/lib/node_modules/@deepseek-ai/dsh/package.json; do
     [[ -e "$ROOTFS/$f" ]] || missing+=("$f")
   done
@@ -1750,7 +1750,7 @@ cmd_doctor() {
 
   # 7. rootfs 可写
   if [[ -d "$ROOTFS" ]]; then
-    probe="$ROOTFS/.dshroid-write-test.$$"
+    probe="$ROOTFS/.sunsetlinux-write-test.$$"
     if ( : >"$probe" ) 2>/dev/null; then
       rm -f -- "$probe" 2>/dev/null || true
       add_check "rootfs_writable" true info "rootfs 可写（proot 模式下 rootfs 本身就是可写层）"
@@ -1839,7 +1839,7 @@ port_open_local() { # TCP 连接测试（占用/就绪通用）
 # =============================================================================
 usage() {
   cat >&2 <<EOF
-DSHroid linuxctl（proot / 非 root 降级运行时）v$LINUXCTL_VERSION
+SunsetLinux linuxctl（proot / 非 root 降级运行时）v$LINUXCTL_VERSION
 
 用法：linuxctl <子命令> [参数...]
 （stdout 只输出 JSON；status 严格遵循 docs/architecture.md §3.1 schema）
@@ -1860,10 +1860,10 @@ DSHroid linuxctl（proot / 非 root 降级运行时）v$LINUXCTL_VERSION
   doctor                          自检；有 error 级问题退出码 1
 
 环境变量：
-  DSHROID_APP_FILES   App 私有 files 目录（默认环境根 = \$DSHROID_APP_FILES/linux）
+  SUNSETLINUX_APP_FILES   App 私有 files 目录（默认环境根 = \$SUNSETLINUX_APP_FILES/sunsetlinux）
   LINUX_HOME          直接指定环境根（优先级最高）
-  DSHROID_PROOT_BIN   指定 proot 可执行文件（默认优先 \$LINUX_HOME/proot/proot-launch.sh）
-  DSHOID_* / DSHROID_* 见 runtime/proot/README.md
+  SUNSETLINUX_PROOT_BIN   指定 proot 可执行文件（默认优先 \$LINUX_HOME/proot/proot-launch.sh）
+  DSHOID_* / SUNSETLINUX_* 见 runtime/proot/README.md
 EOF
   return 0
 }

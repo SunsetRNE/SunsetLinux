@@ -110,7 +110,7 @@ function say(line) {
 
 async function main() {
   const argv = process.argv.slice(2);
-  if (wantsHelp(argv)) return printHelp('dshroid 频道校验（verify）', HELP);
+  if (wantsHelp(argv)) return printHelp('sunsetlinux 频道校验（verify）', HELP);
   const { values } = parseArgs(argv, spec);
 
   if (!values.pub) die('缺少 --pub <公钥>（channel.pub 文件路径、裸 base64 或 PEM）');

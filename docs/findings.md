@@ -294,7 +294,7 @@ RPATH: $ORIGIN/../../sharp-libvips-linux-arm64/lib : ... : $ORIGIN/.../node_modu
 | 层 | 内容 | 源体积 | 裸 erofs | 分发 `.zst` | 分发 `.gz` |
 |---|---|---|---|---|---|
 | `base-24.04.3-l1` | ubuntu-base + CA 证书 + 时区，已裁剪 | 109 MB | **95.3 MB** | **18.6 MB** | 26.5 MB |
-| `runtime-1.0.0` | Node v24.21.0 + pnpm 12.4.2 + `/opt/dshroid` 入口脚本 | 246 MB | **229.7 MB** | **46.5 MB** | 73.5 MB |
+| `runtime-1.0.0` | Node v24.21.0 + pnpm 12.4.2 + `/opt/sunsetlinux` 入口脚本 | 246 MB | **229.7 MB** | **46.5 MB** | 73.5 MB |
 | `dsh-0.1.5-rc.2` | `@deepseek-ai/dsh` + 191 依赖 + profile 工作区 | 270 MB | **201.5 MB** | **31.2 MB** | 47.8 MB |
 
 - **全量下载（zstd）= 18.6 + 46.5 + 31.2 = 96.3 MB**；gzip 路径 = 147.8 MB。

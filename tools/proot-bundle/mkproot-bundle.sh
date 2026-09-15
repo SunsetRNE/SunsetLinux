@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# DSHroid — proot 随包 bundle 制作工具（mkproot-bundle.sh）        v1.0.0
+# SunsetLinux — proot 随包 bundle 制作工具（mkproot-bundle.sh）        v1.0.0
 #
 # 目的：让 App 不依赖 Termux、也不依赖设备上已装的 proot。
 #   1. 从本机（或 --proot 指定路径）复制 proot 二进制；
@@ -43,7 +43,7 @@ VERSION_FALLBACK="unknown"
 
 usage() {
   cat >&2 <<EOF
-DSHroid proot bundle 制作工具
+SunsetLinux proot bundle 制作工具
 
 用法：
   mkproot-bundle.sh [选项]
@@ -180,7 +180,7 @@ build_bundle() {
   请用 --license <GPLv2 全文文件> 指定，或安装 common-licenses 包。"
   copyr=$(find_copyright_text)
 
-  STAGE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/dshroid-proot-bundle.XXXXXX")
+  STAGE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/sunsetlinux-proot-bundle.XXXXXX")
   trap '[[ "${KEEP:-0}" == 1 ]] || rm -rf -- "${STAGE_DIR:-}" 2>/dev/null || true' EXIT
   local stage="$STAGE_DIR"
   mkdir -p "$stage/bin" "$stage/lib" "$stage/license"
@@ -208,7 +208,7 @@ build_bundle() {
   #     —— Android 没有 /bin/sh，所以脚本本身与 start.sh 都会做解释器回退）
   cat >"$stage/proot-launch.sh" <<'WRAP'
 #!/bin/sh
-# DSHroid proot 启动包装器
+# SunsetLinux proot 启动包装器
 #
 # 默认行为：用 bundle 自带的 glibc 解释器显式加载 proot
 #     <lib>/ld-linux-*.so.* --library-path <lib> <bin>/proot "$@"
@@ -219,7 +219,7 @@ build_bundle() {
 #
 # Android 提示：本脚本 shebang 是 #!/bin/sh，Android 上请用
 #     /system/bin/sh /path/to/proot-launch.sh ...
-# 或让 start.sh 自动回退（DSHROID_PROOT_CMD='/system/bin/sh .../proot-launch.sh'）。
+# 或让 start.sh 自动回退（SUNSETLINUX_PROOT_CMD='/system/bin/sh .../proot-launch.sh'）。
 set -eu
 
 self=$0
@@ -259,7 +259,7 @@ Source: http://proot.me  /  https://github.com/proot-me/proot
 Copyright: 2013-2014, STMicroelectronics
 License: GPL-2.0-or-later
 
-本文件由 DSHroid 的 mkproot-bundle.sh 生成：
+本文件由 SunsetLinux 的 mkproot-bundle.sh 生成：
 打包时本机没有找到 /usr/share/doc/proot/copyright，因此这里给出等效的
 来源与版权声明。proot 的完整许可文本见同目录 GPL-2.0.txt。
 EOF
@@ -267,7 +267,7 @@ EOF
 
   # 2.5 SOURCE + README
   cat >"$stage/SOURCE" <<EOF
-DSHroid proot bundle —— 对应源码获取方式（GPLv2 合规要求）
+SunsetLinux proot bundle —— 对应源码获取方式（GPLv2 合规要求）
 =========================================================
 
 本 bundle 内含的 proot 二进制**未经修改**，按 GPL-2.0-or-later 分发。
@@ -294,13 +294,13 @@ DSHroid proot bundle —— 对应源码获取方式（GPLv2 合规要求）
 EOF
 
   cat >"$stage/README" <<EOF
-DSHroid PRoot 随包运行库（bundle）
+SunsetLinux PRoot 随包运行库（bundle）
 =================================
 
 架构：$ARCH
 proot 版本：$S_PROOT_VER
 打包时间（UTC）：$(date -u '+%Y-%m-%dT%H:%M:%SZ')
-生成工具：dshroid/tools/proot-bundle/mkproot-bundle.sh
+生成工具：sunsetlinux/tools/proot-bundle/mkproot-bundle.sh
 
 目录结构
 --------
@@ -337,7 +337,7 @@ Android 上的两个坑
 ------------------
   1. Android **没有 /bin/sh**，只有 /system/bin/sh。本 bundle 的包装器 shebang
      是 #!/bin/sh，所以：
-       - 要么用  DSHROID_PROOT_CMD='/system/bin/sh <bundle>/proot-launch.sh'
+       - 要么用  SUNSETLINUX_PROOT_CMD='/system/bin/sh <bundle>/proot-launch.sh'
          （start.sh 支持，会整体当作 proot 命令前缀使用）
        - 要么直接跑自带的 loader：
          <bundle>/lib/ld-linux-aarch64.so.1 --library-path <bundle>/lib <bundle>/bin/proot ...
@@ -360,7 +360,7 @@ EOF
 
   # 2.6 manifest
   {
-    printf '# DSHroid proot bundle manifest\n'
+    printf '# SunsetLinux proot bundle manifest\n'
     printf '# arch=%s proot_version=%s generated=%s\n' "$ARCH" "$S_PROOT_VER" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
     printf '# 原始二进制 sha256=%s\n' "$S_PROOT_SHA"
     printf '# 说明：以下 sha256 是 bundle 内文件自身的摘要（含 proot-launch.sh）。\n'
@@ -394,7 +394,7 @@ verify_bundle() {
   local tar_file=$1 tmp rc=0 out="" v="" missing=()
   [[ -f "$tar_file" ]] || { err_ "找不到 bundle：$tar_file"; return 1; }
   tar -tzf "$tar_file" >/dev/null 2>&1 || { err_ "不是合法的 tar.gz：$tar_file"; return 1; }
-  tmp=$(mktemp -d "${TMPDIR:-/tmp}/dshroid-proot-verify.XXXXXX")
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/sunsetlinux-proot-verify.XXXXXX")
   if ! tar -xzf "$tar_file" -C "$tmp" 2>/dev/null; then
     err_ "解包失败：$tar_file"; rm -rf -- "$tmp"; return 1
   fi

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================================
-# rootfs/build-layers.sh —— dshroid 三层 rootfs 的**发布构建脚本**
+# rootfs/build-layers.sh —— sunsetlinux 三层 rootfs 的**发布构建脚本**
 #                            （宿主 / CI 路径：路线 A，需要真 chroot）
 # ============================================================================
 #
@@ -45,7 +45,7 @@
 #   L0 base    : Ubuntu 24.04 minimal（profiles/base.packages）+ 三个硬依赖库
 #   L1 runtime : base + 层 profiles/runtime.packages + Node 官方 arm64 静态包 → /opt/node
 #                + pnpm（`dsh plugin` 的硬依赖，见 docs/dsh-profile.md §6）
-#                + /opt/dshroid 入口脚本（entry.sh / supervise.sh，必须在只读层）
+#                + /opt/sunsetlinux 入口脚本（entry.sh / supervise.sh，必须在只读层）
 #   L2 dsh     : runtime + npm i -g @deepseek-ai/dsh@<tag> → /usr/local
 #                + profile 工作区 → /root/.dsh/profiles/web（见 docs/dsh-profile.md §5）
 #   每层只打包**与上一层不同的文件**：用 `rsync -aHAX --compare-dest=<上一层完整树>` 生成
@@ -70,8 +70,8 @@
 #
 # ## 用法
 #   sudo rootfs/build-layers.sh --dsh-dist-tag next
-#   sudo rootfs/build-layers.sh --dsh-dist-tag next --base-url https://example.org/dshroid \
-#        --sign-key ~/.dshroid-keys/channel.key --channel-name "官方"
+#   sudo rootfs/build-layers.sh --dsh-dist-tag next --base-url https://example.org/sunsetlinux \
+#        --sign-key ~/.sunsetlinux-keys/channel.key --channel-name "官方"
 #
 # ============================================================================
 set -euo pipefail
@@ -139,7 +139,7 @@ usage() {
   cat <<'EOF'
 用法：sudo rootfs/build-layers.sh [选项]
 
-在宿主/CI 上用真 chroot 构建 dshroid 的三层 EROFS 镜像（base / runtime / dsh）。
+在宿主/CI 上用真 chroot 构建 sunsetlinux 的三层 EROFS 镜像（base / runtime / dsh）。
 层规格取自 rootfs/layer-spec.sh（命名/压缩/版本/禁止路径的唯一事实源）。
 
 版本与内容：
@@ -150,7 +150,7 @@ usage() {
   --node-version <vX.Y.Z>   Node 版本（默认：联网取 v24 最新 LTS，失败用 v24.21.0）
   --pnpm-version <ver>      pnpm 版本（默认：latest）—— dsh plugin 的硬依赖，见下
   --arch <arm64|amd64>      目标架构（默认：arm64）
-  --runtime-dir <目录>      把该目录内容复制到 **runtime 层** /opt/dshroid（entry.sh/supervise.sh）
+  --runtime-dir <目录>      把该目录内容复制到 **runtime 层** /opt/sunsetlinux（entry.sh/supervise.sh）
                             （默认自动尝试 runtime/root；见 layer-spec.sh 的 LAYER_RUNTIME_PATHS）
 
 产物：
@@ -184,10 +184,10 @@ usage() {
 举例：
   # 官方发布：打包 + 生成并签名 channel.json
   sudo rootfs/build-layers.sh --dsh-dist-tag next \
-      --base-url https://example.org/dshroid --sign-key ~/.dshroid-keys/channel.key
+      --base-url https://example.org/sunsetlinux --sign-key ~/.sunsetlinux-keys/channel.key
 
   # 只重出 dsh 层（DSH 升级场景，复用已有 base/runtime 树）
-  sudo rootfs/build-layers.sh --dsh-dist-tag alpha --work-dir /var/tmp/dshroid-build \
+  sudo rootfs/build-layers.sh --dsh-dist-tag alpha --work-dir /var/tmp/sunsetlinux-build \
       --skip-base --skip-runtime
 EOF
 }
@@ -317,7 +317,7 @@ setup_transport_cmds() {
   case "$TRANSPORT_PRIMARY" in
     zstd)
       # ★ 窗口必须锁在默认档（windowLog=23 = 8 MiB）：
-      #   dshroid App 用**纯 Java** zstd 解码器（io.airlift:aircompressor —— zstd-jni
+      #   sunsetlinux App 用**纯 Java** zstd 解码器（io.airlift:aircompressor —— zstd-jni
       #   没有 Android ABI），窗口上限就是 8 MiB。若改用 --long=27 / -22 之类放大窗口的
       #   参数，App 会**自动退回 gzip**：dsh 层从 31.2 MB 涨到 47.8 MB，用户白下。
       #   ⚠ 不要提高 windowLog。
@@ -496,7 +496,7 @@ resolve_node_version() {
 
 # =========================================================== 构建工作流 ====
 
-WORK_DIR="${WORK_DIR:-$(mktemp -d "${TMPDIR:-/tmp}/dshroid-build.XXXXXX")}"
+WORK_DIR="${WORK_DIR:-$(mktemp -d "${TMPDIR:-/tmp}/sunsetlinux-build.XXXXXX")}"
 mkdir -p "$WORK_DIR"
 trap cleanup EXIT
 
@@ -552,7 +552,7 @@ rm -rf "$ROOT"/var/cache/apt/* "$ROOT"/var/lib/apt/lists/* 2>/dev/null || true
 
 # 5) 固定的主机名/时区/解析器/machine-id 占位（entry.sh 运行时会按 Android 实际值重写）
 #    machine-id 用固定值而不是随机值：避免每次构建产生不同的层内容（层间 churn）。
-printf 'dshroid\n' > "$ROOT/etc/hostname"
+printf 'sunsetlinux\n' > "$ROOT/etc/hostname"
 printf '0123456789abcdef0123456789abcdef\n' > "$ROOT/etc/machine-id"
 printf 'nameserver 1.1.1.1\nnameserver 8.8.8.8\n' > "$ROOT/etc/resolv.conf"
 [ -e "$ROOT/etc/localtime" ] || ln -sfn /usr/share/zoneinfo/UTC "$ROOT/etc/localtime"
@@ -783,7 +783,7 @@ build_dsh() {
   [ -f "$profile_installer" ] || die "缺少 profile 安装脚本：$profile_installer"
   [ -d "$profile_template" ] || die "缺少 profile 模板目录：$profile_template"
 
-  local build_aux="$DSH_ROOT/tmp/dshroid-profile-build"
+  local build_aux="$DSH_ROOT/tmp/sunsetlinux-profile-build"
   mkdir -p "$build_aux"
   cp -f "$profile_installer" "$build_aux/install-web-profile.sh"
   cp -a "$profile_template" "$build_aux/web-profile"
@@ -795,13 +795,13 @@ build_dsh() {
     export PATH=/opt/node/bin:/usr/local/bin:/usr/bin:/bin
     export HOME=/root
     export NPM_BIN=npm
-    bash /tmp/dshroid-profile-build/install-web-profile.sh \
-         /tmp/dshroid-profile-build/web-profile \
+    bash /tmp/sunsetlinux-profile-build/install-web-profile.sh \
+         /tmp/sunsetlinux-profile-build/web-profile \
          /root/.dsh/profiles/web
   ' || die "profile 安装失败（脚本里有明确的中文报错，见上）"
 
   # 安装完立刻清掉构建辅助文件：它们不该出现在只读层里
-  rm -rf "$DSH_ROOT/tmp/dshroid-profile-build"
+  rm -rf "$DSH_ROOT/tmp/sunsetlinux-profile-build"
 
   # 3) 可选 /root/.dsh-defaults（默认配置模板；绝不含密钥）
   if [ -n "$DHS_DEFAULTS_DIR" ]; then
@@ -1030,7 +1030,7 @@ verify_erofs_profile() { # verify_erofs_profile <dsh.erofs> <staging 里对应�
 printf '\n%s' "$C_I" >&2
 cat >&2 <<EOF
 ════════════════════════════════════════════════════════════════════════
- dshroid 三层 rootfs 构建（宿主/CI 真 chroot 路径）
+ sunsetlinux 三层 rootfs 构建（宿主/CI 真 chroot 路径）
    目标架构 : $ARCH     宿主架构 : $HOST_ARCH     跨架构 : $CROSS
    Ubuntu   : $UBUNTU_VERSION ($UBUNTU_SUITE)
    DSH      : ${DSH_PACKAGE}@${DSH_VERSION:-<由 dist-tag ${DSH_DIST_TAG} 解析>}
@@ -1153,7 +1153,7 @@ fi
 # ---- 构建信息落盘（可追溯）----
 BUILD_INFO="$OUT_DIR/BUILD-INFO.txt"
 {
-  echo "dshroid 层构建信息"
+  echo "sunsetlinux 层构建信息"
   echo "构建时间（UTC）: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
   echo "构建主机       : $(uname -srm)  架构=$HOST_ARCH  目标=$ARCH  跨架构=$CROSS"
   echo "Ubuntu         : $UBUNTU_VERSION ($UBUNTU_SUITE)"
@@ -1217,7 +1217,7 @@ if [ -n "$SIGN_KEY" ]; then
     echo "  回退分发 = ${GZIP_CMD:+$TRANSPORT_FALLBACK（设备侧纯 CLI 走这条）}"
   } >> "$BUILD_INFO"
   sub "接下来把 $OUT_DIR 下所有文件上传到静态托管，并把 URL + 公钥 + 指纹发给用户"
-  sub "用户侧加入频道：dshroid-channel channels add --id <id> --url <URL> --pub <base64>"
+  sub "用户侧加入频道：sunsetlinux-channel channels add --id <id> --url <URL> --pub <base64>"
 fi
 
 printf '\n%s' "$C_K" >&2

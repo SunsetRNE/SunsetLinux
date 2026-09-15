@@ -30,7 +30,7 @@ let decompress = false;
 let level = 19;
 let levelSet = false;
 let algo = 'zstd'; // 'zstd' | 'gzip'
-// zstd 窗口上限默认 23（= 8 MiB）。**不要提高**：dshroid 的 App 用纯 Java 解码器
+// zstd 窗口上限默认 23（= 8 MiB）。**不要提高**：sunsetlinux 的 App 用纯 Java 解码器
 // （io.airlift:aircompressor，因为 zstd-jni 没有 Android ABI），窗口上限就是 8 MiB
 // （windowLog ≤ 23）。超过它 App 会退回 gzip，dsh 层下载体积 31.2 MB → 47.8 MB，用户白下。
 let windowLog = 23;
@@ -78,7 +78,7 @@ if (!Number.isInteger(windowLog) || windowLog < 10 || windowLog > 31) {
 if (algo === 'zstd' && windowLog > 23) {
   if (!allowLargeWindow) {
     die(
-      `--window ${windowLog} 超过 8 MiB 上限（windowLog 23）：dshroid App 的纯 Java zstd 解码器\n` +
+      `--window ${windowLog} 超过 8 MiB 上限（windowLog 23）：sunsetlinux App 的纯 Java zstd 解码器\n` +
       '解不了这么大的窗口，会自动退回 gzip 下载（等于让用户白下十几 MB）。\n' +
       '确实需要请显式加 --allow-large-window。',
     );

@@ -1,6 +1,6 @@
-#!/usr/bin/env bash
+#!/system/bin/sh
 # =============================================================================
-# dshroid · runtime/root/start.sh
+# sunsetlinux · runtime/root/start.sh
 #
 # 按 architecture.md §4 的 10 步顺序建立 root 模式挂载树，并把环境拉起来。
 #
@@ -39,8 +39,9 @@
 set -euo pipefail
 
 # --- 路径与常量 -------------------------------------------------------------
-SELF_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
-LINUX_HOME="${LINUX_HOME:-/data/linux}"
+SELF_PATH="${BASH_SOURCE[0]:-$0}"   # mksh 下 BASH_SOURCE 未定义 → 退回 $0
+SELF_DIR="$(cd -- "$(dirname -- "$SELF_PATH")" && pwd -P)"
+LINUX_HOME="${LINUX_HOME:-/data/sunsetlinux}"
 LH="$LINUX_HOME"
 
 RUN_DIR="$LH/run"
@@ -63,7 +64,8 @@ DAEMON_LOG="$RUN_DIR/start.log"
 
 # 层格式：空 = 自动探测；也可用 LINUX_LAYER_EXT=.squashfs 强制
 LINUX_LAYER_EXT="${LINUX_LAYER_EXT:-}"
-LAYER_NAMES=( base runtime dsh )
+# 层顺序：POSIX 空格分隔字符串（本脚本在设备侧由 mksh 执行，不能用 bash 数组）
+LAYER_NAMES="base runtime dsh"
 
 # 常用工具（本脚本在宿主 Android 侧运行，走 toybox；不要假定有 GNU 专属选项）
 UMOUNT=/system/bin/umount
@@ -121,7 +123,29 @@ fstype_of() { stat -f -c '%T' "$1" 2>/dev/null || echo unknown; }
 # 格式：key=value，value ∈ long|short|none
 PROBE_FILE="$RUN_DIR/cmdprobe"
 # util-linux mount 回退（检测到 base 层已挂时才会填上）
-UTIL_MOUNT=()
+# 用三个 POSIX 变量代替原来的数组（本脚本在设备侧由 mksh 执行）：
+#   UTIL_LD        base 层里的动态加载器
+#   UTIL_LIBPATH   base 层的库搜索路径
+#   UTIL_MNT_BIN   base 层里的 mount
+# 三者都非空才算可用；执行统一走 util_mount_run()。
+UTIL_LD=""
+UTIL_LIBPATH=""
+UTIL_MNT_BIN=""
+
+util_mount_run() {  # util_mount_run <mount 的参数...>
+    "$UTIL_LD" --library-path "$UTIL_LIBPATH" "$UTIL_MNT_BIN" "$@"
+}
+
+# 脱离控制终端地起守护进程：use=1 用 setsid 包一层，use=0 直接起。
+# 这是原来 `launcher` 数组的 POSIX 等价物（本脚本在设备侧由 mksh 执行，不能用数组）。
+spawn_detached() {  # spawn_detached <use_setsid> <cmd> [args...]
+    local use="$1"; shift
+    if [ "$use" = "1" ]; then
+        "$SETSID" "$@"
+    else
+        "$@"
+    fi
+}
 
 probe_get() {  # probe_get <key> [default]
     local v=""
@@ -145,13 +169,13 @@ probe_mount_syntax() {
     local m="$1" tmp out rc
     tmp="$RUN_DIR/.probe-$$"
     mkdir -p "$tmp" 2>/dev/null || tmp=/tmp
-    out="$("$m" --rbind /nonexistent-dshroid-probe "$tmp" 2>&1)"; rc=$?
+    out="$("$m" --rbind /nonexistent-sunsetlinux-probe "$tmp" 2>&1)"; rc=$?
     case "$out" in
         *[Uu]sage*|*[Bb]ad*option*|*unknown*option*|*[Ii]nvalid*|*unrecognized*)
             probe_set mount_rbind short ;;
         *)  [ "$rc" -ne 0 ] && probe_set mount_rbind long || probe_set mount_rbind long ;;
     esac
-    out="$("$m" -o rbind /nonexistent-dshroid-probe "$tmp" 2>&1)"; rc=$?
+    out="$("$m" -o rbind /nonexistent-sunsetlinux-probe "$tmp" 2>&1)"; rc=$?
     case "$out" in
         *[Uu]sage*|*[Bb]ad*option*|*unknown*option*|*[Ii]nvalid*|*unrecognized*)
             probe_set mount_rbind_o none ;;
@@ -198,10 +222,12 @@ detect_util_mount() {
         [ -x "$cand" ] && { m="$cand"; break; }
     done
     if [ -n "$ld" ] && [ -n "$m" ]; then
-        UTIL_MOUNT=( "$ld" --library-path "$base/lib:$base/usr/lib:$base/lib/aarch64-linux-gnu:$base/usr/lib/aarch64-linux-gnu" "$m" )
+        UTIL_LD="$ld"
+        UTIL_MNT_BIN="$m"
+        UTIL_LIBPATH="$base/lib:$base/usr/lib:$base/lib/aarch64-linux-gnu:$base/usr/lib/aarch64-linux-gnu"
         probe_set util_mount yes
     else
-        UTIL_MOUNT=()
+        UTIL_LD=""; UTIL_MNT_BIN=""; UTIL_LIBPATH=""
         probe_set util_mount no
     fi
 }
@@ -431,8 +457,8 @@ do_bind() {
     # 语法自适应：--rbind / -o rbind / -o bind（见 do_rbind_op）
     if ! do_rbind_op "$src" "$dst"; then
         # 最后兜底：base 层里的 util-linux mount（若能取到）
-        if [ "${#UTIL_MOUNT[@]}" -gt 0 ] && \
-           "${UTIL_MOUNT[@]}" --rbind "$src" "$dst" 2>>"$DAEMON_LOG"; then
+        if [ -n "$UTIL_MNT_BIN" ] && \
+           util_mount_run --rbind "$src" "$dst" 2>>"$DAEMON_LOG"; then
             warn_soft "$rel 走 util-linux 回退路径（toybox mount 语法不足）"
         else
             die "bind 挂载 $src -> $rel 失败（toybox mount 不支持，且无 util-linux 回退）"
@@ -454,21 +480,24 @@ do_bind() {
 unmount_recorded() {
     local rel
     [ -f "$MOUNTS_FILE" ] || return 0
-    # tac 不一定有：用数组反序
-    local -a list=()
+    # 反序卸载：tac 在 toybox 里不一定有，C 式 for + 数组又不保证 mksh 能跑，
+    # 所以每读一行就**前插**进字符串，读完自然就是倒序。
+    local rev=""
     while IFS= read -r rel; do
-        [ -n "$rel" ] && list+=( "$rel" )
+        [ -n "$rel" ] && rev="$rel
+$rev"
     done < "$MOUNTS_FILE"
-    local i
-    for (( i=${#list[@]}-1; i>=0; i-- )); do
-        rel="${list[$i]}"
+    while IFS= read -r rel; do
+        [ -n "$rel" ] || continue
         if is_mounted "$rel"; then
             log "回滚：umount $rel"
             "$UMOUNT" -l "$ROOTFS_DIR/$rel" 2>/dev/null || \
                 "$UMOUNT" -f "$ROOTFS_DIR/$rel" 2>/dev/null || \
                 log "WARN: umount $rel 失败（可能需要手动清理）"
         fi
-    done
+    done <<EOF
+$rev
+EOF
     : > "$MOUNTS_FILE"
 }
 
@@ -488,7 +517,7 @@ cleanup_on_fail() {
 build_mount_tree() {
     # --- 前置检查：层文件齐不齐 + 格式是否被内核支持 -----------------------
     local l lf fmt
-    for l in "${LAYER_NAMES[@]}"; do
+    for l in $LAYER_NAMES; do
         lf="$(find_layer "$l" || true)"
         [ -n "$lf" ] || die "缺少层文件 $LAYERS_DIR/$l.{erofs,squashfs}（先跑 linuxctl provision）"
         fmt="$(layer_format "$lf" 2>/dev/null || echo unknown)"
@@ -518,7 +547,7 @@ build_mount_tree() {
     # 代价：多 3 个 loop 挂载；收益：格式无关（erofs/squashfs 都行），且能对每层
     # 单独做健康检查。
     mkdir -p "$LAYERS_MNT"
-    for l in "${LAYER_NAMES[@]}"; do
+    for l in $LAYER_NAMES; do
         mount_layer "$l" "$(find_layer "$l")"
     done
     # base 层挂上之后才可能取到 util-linux 的 mount，这里补一次探测，
@@ -544,7 +573,7 @@ build_mount_tree() {
     # --- 抓取 Android 侧事实（DNS/时区），chroot 后就取不到了 ---------------
     gather_android_facts
 
-    # --- 先把 /opt/dshroid 入口脚本同步进 rootfs（本地最新版优先）----------
+    # --- 先把 /opt/sunsetlinux 入口脚本同步进 rootfs（本地最新版优先）----------
     # 理由：entry.sh/supervise.sh 属于"启动器"，不该随 squashfs 层更新才有新版。
     install_runtime_entry
 
@@ -706,12 +735,12 @@ gather_android_facts() {
 }
 
 # ---------------------------------------------------------------------------
-# /opt/dshroid 启动器脚本同步（幂等）
+# /opt/sunsetlinux 启动器脚本同步（幂等）
 # ---------------------------------------------------------------------------
 install_runtime_entry() {
-    local src="" dst="$ROOTFS_DIR/opt/dshroid"
+    local src="" dst="$ROOTFS_DIR/opt/sunsetlinux"
     # 来源优先级：KernelSU 模块目录 → 本脚本同目录 → LINUX_HOME/bin
-    for cand in /data/adb/modules/dshroid/bin "$SELF_DIR" "$LH/bin"; do
+    for cand in /data/adb/modules/sunsetlinux/bin "$SELF_DIR" "$LH/bin"; do
         if [ -f "$cand/entry.sh" ] && [ -f "$cand/supervise.sh" ]; then
             src="$cand"; break
         fi
@@ -778,7 +807,7 @@ mount_sdcard() {
 
 # ---------------------------------------------------------------------------
 # 生成 mounted.json —— 给 status 用的"层挂载态"快照
-#   判定方式：解析宿主 /proc/self/mountinfo，看 /data/linux/rootfs 上的 overlay
+#   判定方式：解析宿主 /proc/self/mountinfo，看 /data/sunsetlinux/rootfs 上的 overlay
 #   挂载的 lowerdir 列表里是否出现该层文件，以及 upper.img 是否 loop 挂着。
 # ---------------------------------------------------------------------------
 write_mounted_json() {
@@ -877,7 +906,7 @@ main() {
         build_mount_tree
 
         # UTS：本 ns 内改主机名；不改宿主（findings §6）
-        if have hostname; then hostname dshroid 2>/dev/null || log "WARN: hostname dshroid 失败（非致命）"; fi
+        if have hostname; then hostname sunsetlinux 2>/dev/null || log "WARN: hostname sunsetlinux 失败（非致命）"; fi
 
         write_mounted_json "$$"
         printf '%s\n' "$$" > "$SUPERVISOR_PID_FILE"
@@ -885,7 +914,7 @@ main() {
         : > "$READY_FILE"
         log "挂载树就绪，交给 entry.sh"
         local rc=0
-        chroot "$ROOTFS_DIR" /opt/dshroid/entry.sh "$(config_port)" || rc=$?
+        chroot "$ROOTFS_DIR" /opt/sunsetlinux/entry.sh "$(config_port)" || rc=$?
         finish_environment "$rc"
         trap - EXIT
         exit "$rc"
@@ -913,7 +942,7 @@ main() {
 
     # 前置检查放在起守护进程之前，失败能立刻给 App 可读原因
     local l
-    for l in "${LAYER_NAMES[@]}"; do
+    for l in $LAYER_NAMES; do
         find_layer "$l" >/dev/null 2>&1 || die "缺少层文件 $LAYERS_DIR/$l.{erofs,squashfs}（先跑 linuxctl provision）"
     done
     [ -f "$LH/upper.img" ] || die "缺少可写层镜像 $LH/upper.img（先跑 linuxctl provision）"
@@ -924,9 +953,10 @@ main() {
     fi
 
     # 启动方式：setsid + unshare(-m -u) --fork，双 fork 脱离终端与生命周期
-    local launcher=()
+    # （原来用数组装 launcher，改成布尔开关 + spawn_detached()，见该函数注释）
+    local use_setsid=0
     if [ -x "$SETSID" ] && [ "$FOREGROUND" = "0" ]; then
-        launcher=( "$SETSID" )
+        use_setsid=1
     fi
 
     # 启动方式：setsid + unshare(-m -u) + 守护子进程。
@@ -939,7 +969,7 @@ main() {
     local uc_ok=0
     if [ "$prop" = "yes" ]; then
         # 首选：显式要求私有传播（一步到位，最干净）
-        if "${launcher[@]}" "$UNSHARE" -m -u --propagation private --fork \
+        if spawn_detached "$use_setsid" "$UNSHARE" -m -u --propagation private --fork \
                 "$SELF_DIR/start.sh" --inner >>"$DAEMON_LOG" 2>&1; then
             uc_ok=1
         fi
@@ -947,7 +977,7 @@ main() {
     if [ "$uc_ok" != "1" ] && [ "$prop" = "yes" ]; then
         # --propagation 认了但 --fork 不认 → 去掉 --fork（用 setsid 兜底脱离）
         log "提示：unshare --fork 可能不支持，改用不带 --fork 的形式"
-        if "${launcher[@]}" "$UNSHARE" -m -u --propagation private \
+        if spawn_detached "$use_setsid" "$UNSHARE" -m -u --propagation private \
                 "$SELF_DIR/start.sh" --inner >>"$DAEMON_LOG" 2>&1; then
             uc_ok=1
         fi
@@ -955,7 +985,7 @@ main() {
     if [ "$uc_ok" != "1" ]; then
         # 退化：只 unshare -m -u，然后在**内层**自己把传播设为 private
         log "提示：unshare 不支持 --propagation，改为内层 make-rprivate"
-        if "${launcher[@]}" "$UNSHARE" -m -u "$SELF_DIR/start.sh" --inner --make-private >>"$DAEMON_LOG" 2>&1; then
+        if spawn_detached "$use_setsid" "$UNSHARE" -m -u "$SELF_DIR/start.sh" --inner --make-private >>"$DAEMON_LOG" 2>&1; then
             uc_ok=1
         fi
     fi

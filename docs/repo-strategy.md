@@ -8,7 +8,7 @@
 ## 一、决策
 
 ```
-dshroid/            ← 就这一个仓库
+sunsetlinux/            ← 就这一个仓库
   module/           # KernelSU 模块（含 webroot/ 模块 WebUI、lib/ 挂载探测）
   runtime/          # 运行时：linuxctl / start / stop / doctor / update / entry / supervise
     root/           #   root 模式（真 chroot + overlay）
@@ -92,7 +92,7 @@ App 的真实源码约 **36 个 Kotlin 文件 / 9k 行**。真正大的只有产
 
 | 想要的效果 | 单仓下的做法 |
 |---|---|
-| 只要模块的人不装 App | `git tag module-v0.1.0` → 把 `dshroid-module-0.1.0.zip` 挂到该 Release；KernelSU 用户只下这个 zip |
+| 只要模块的人不装 App | `git tag module-v0.1.0` → 把 `sunsetlinux-module-0.1.0.zip` 挂到该 Release；KernelSU 用户只下这个 zip |
 | 模块独立发版 | 打 `module-*` tag；模块版本与 App 版本解耦（各自 semver） |
 | 只发前端 | 打 `app-*` tag，只挂 APK |
 | **用户侧更新** | 走**已建好的签名频道**（HTTP 频道 + npm 频道），比"多仓库"更强：验签失败一律拒绝（已实测篡改/冒签都会被拒） |

@@ -1,5 +1,5 @@
 # ============================================================================
-# dshroid base 层包清单（L0 · Ubuntu 24.04 minimal for arm64）
+# sunsetlinux base 层包清单（L0 · Ubuntu 24.04 minimal for arm64）
 # ============================================================================
 # 裁剪目标：只装「让内核能 chroot 进去 + 让 Node/DSH 能跑起来 + 让用户能自救」
 #           的最小集合。预期体积：解包后 ~330–420 MB，mksquashfs 后 ~120–180 MB。
@@ -29,7 +29,7 @@ libgcc-s1             # 上面两者的 libgcc_s.so.1（异常展开、栈回溯
 zlib1g                # 部分原生模块运行时 dlopen libz；体积可忽略
 
 # --- B. 基础系统骨架（chroot 进去要有个能用的 shell 和文件工具） --------------
-bash                  # 交互与脚本入口；/opt/dshroid/*.sh 全部 is bash
+bash                  # 交互与脚本入口；/opt/sunsetlinux/*.sh 全部 is bash
 coreutils             # ls/cp/mv/rm/sha256sum/stat… 没有它寸步难行
 dash                  # /bin/sh → dash；node-pty 要一个可用的 /bin/sh（findings §6.1）
 sed                   # entry.sh/supervise.sh 里改 /etc/resolv.conf 等

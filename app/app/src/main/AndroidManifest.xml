@@ -21,7 +21,7 @@
          sdcard 直挂由 root 侧的挂载树负责。 -->
 
     <application
-        android:name=".DshApp"
+        android:name=".SunsetLinuxApp"
         android:allowBackup="false"
         android:enableOnBackInvokedCallback="true"
         android:icon="@mipmap/ic_launcher"
@@ -29,13 +29,14 @@
         android:networkSecurityConfig="@xml/network_security_config"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
-        android:theme="@style/Theme.Dshroid">
+        android:theme="@style/Theme.SunsetLinux">
 
         <activity
+            android:windowSoftInputMode="adjustResize"
             android:name=".LauncherActivity"
             android:exported="true"
             android:launchMode="singleTop"
-            android:theme="@style/Theme.Dshroid.Splash">
+            android:theme="@style/Theme.SunsetLinux.Splash">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
@@ -45,6 +46,7 @@
         <!-- 加载 DSH Web GUI。configChanges 让旋转不重建 Activity，
              WebView 因此不会重放一次带令牌的登录跳转（虽然令牌可复用，但没必要）。 -->
         <activity
+            android:windowSoftInputMode="adjustResize"
             android:name=".DshWebActivity"
             android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboardHidden|uiMode"
             android:exported="false"
@@ -52,28 +54,34 @@
 
         <!-- 首启引导：模式选择 / 模块安装指引 / 部署 / 完成 -->
         <activity
+            android:windowSoftInputMode="adjustResize"
             android:name=".WelcomeActivity"
             android:exported="false"
             android:launchMode="singleTop" />
 
         <activity
+            android:windowSoftInputMode="adjustResize"
             android:name=".ProvisionActivity"
             android:exported="false" />
 
         <!-- 一键诊断（doctor 流式输出 + 复制 + 导出） -->
         <activity
+            android:windowSoftInputMode="adjustResize"
             android:name=".DiagnosticsActivity"
             android:exported="false" />
 
         <activity
+            android:windowSoftInputMode="adjustResize"
             android:name=".SettingsActivity"
             android:exported="false" />
 
         <activity
+            android:windowSoftInputMode="adjustResize"
             android:name=".LogActivity"
             android:exported="false" />
 
         <activity
+            android:windowSoftInputMode="adjustResize"
             android:name=".UpdateActivity"
             android:exported="false" />
 
@@ -91,7 +99,7 @@
         <!-- 排障包分享：FileProvider 只暴露 cacheDir/exports 与 filesDir/crash -->
         <provider
             android:name="androidx.core.content.FileProvider"
-            android:authorities="io.dshroid.files"
+            android:authorities="io.github.sunsetrne.sunsetlinux.files"
             android:exported="false"
             android:grantUriPermissions="true">
             <meta-data

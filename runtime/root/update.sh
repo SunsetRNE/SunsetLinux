@@ -1,6 +1,6 @@
-#!/usr/bin/env bash
+#!/system/bin/sh
 # =============================================================================
-# dshroid · runtime/root/update.sh
+# sunsetlinux · runtime/root/update.sh
 #
 # 更新管理（**给 App 与模块 WebUI 共用**）。所有输出都是 JSON（stdout），
 # 人类可读信息走 stderr —— 与 linuxctl 的约定一致。
@@ -39,7 +39,7 @@
 set -uo pipefail
 
 SELF_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")" && pwd -P)"
-LINUX_HOME="${LINUX_HOME:-/data/linux}"
+LINUX_HOME="${LINUX_HOME:-/data/sunsetlinux}"
 LH="$LINUX_HOME"
 
 LAYERS_DIR="$LH/layers"
@@ -47,8 +47,8 @@ ETC_DIR="$LH/etc"
 RUN_DIR="$LH/run"
 CACHE_DIR="$LH/cache"
 DL_DIR="${UPDATE_DOWNLOAD_DIR:-$LH/cache/updates}"
-# 模块自身目录（读 module.prop、落新包）。默认 /data/adb/modules/dshroid。
-MODULE_DIR="${MODULE_DIR:-/data/adb/modules/dshroid}"
+# 模块自身目录（读 module.prop、落新包）。默认 /data/adb/modules/sunsetlinux。
+MODULE_DIR="${MODULE_DIR:-/data/adb/modules/sunsetlinux}"
 # 模块更新包的落点：优先 Download（用户/管理器最容易拿到），回落 $LH/cache
 MODULE_PKG_DIR="${MODULE_PKG_DIR:-/sdcard/Download}"
 CHANNELS_JSON="$ETC_DIR/channels.json"
@@ -108,7 +108,7 @@ find_node() {
 # channel 工具链位置（验签逻辑的唯一实现，绝不在这里重写密码学）
 find_channel_tool() {
     local c
-    for c in "$LH/bin/dshroid-channel" "$SELF_DIR/dshroid-channel" "$SELF_DIR/channel/dshroid-channel"; do
+    for c in "$LH/bin/sunsetlinux-channel" "$SELF_DIR/sunsetlinux-channel" "$SELF_DIR/channel/sunsetlinux-channel"; do
         [ -f "$c" ] && { printf '%s' "$c"; return 0; }
     done
     return 1
@@ -116,7 +116,7 @@ find_channel_tool() {
 
 # ---------------------------------------------------------------------------
 # 底层：用 Node 做"拉清单 + 验签"，把结果 JSON 打出来
-#   为什么不直接调 dshroid-channel verify：verify 面向本地文件 + 人类输出；
+#   为什么不直接调 sunsetlinux-channel verify：verify 面向本地文件 + 人类输出；
 #   这里要的是"网络拉取 + 验签 + 结构化输出"，所以在 Node 里复用同一套
 #   common.mjs 的公钥/指纹实现（保证与 CLI 工具一致），但流程自己控制。
 # ---------------------------------------------------------------------------
@@ -254,7 +254,7 @@ for (const c of enabled) {
     rec.dsh_npm = manifest.dsh_npm ?? null;
 
     // ---- 模块自身更新（清单里的可选 module 段）----
-    // 结构（可选）：{ "version":"0.2.0", "versionCode":10001, "url":"dshroid-module-0.2.0.zip",
+    // 结构（可选）：{ "version":"0.2.0", "versionCode":10001, "url":"sunsetlinux-module-0.2.0.zip",
     //                 "sha256":"…", "size":123456, "changelog":"…" }
     // 与层用**同一套安全模型**：签名无效时上面已经 throw，走不到这里。
     if (mode === 'module') {
@@ -347,14 +347,14 @@ cmd_check() {
         return 1
     fi
     if [ ! -f "$CHANNELS_JSON" ]; then
-        emit '{"ok":false,"error":"没有频道配置","hint":"先在 App 的设置页添加频道，或运行：$LINUX_HOME/bin/dshroid-channel channels add ..."}'
+        emit '{"ok":false,"error":"没有频道配置","hint":"先在 App 的设置页添加频道，或运行：$LINUX_HOME/bin/sunsetlinux-channel channels add ..."}'
         return 1
     fi
     write_node_verifier
     local out=""
     out="$("$node" "$NODE_VERIFIER" "$CHANNELS_JSON" "$STATE_JSON" 2>/dev/null)" || true
     if [ -z "$out" ]; then
-        emit '{"ok":false,"error":"检查更新失败（验签脚本没有输出）","hint":"可手动运行：linuxctl exec -- node /data/linux/cache/.update-verify.mjs /data/linux/etc/channels.json /data/linux/etc/state.json"}'
+        emit '{"ok":false,"error":"检查更新失败（验签脚本没有输出）","hint":"可手动运行：linuxctl exec -- node /data/sunsetlinux/cache/.update-verify.mjs /data/sunsetlinux/etc/channels.json /data/sunsetlinux/etc/state.json"}'
         return 1
     fi
     # 网络/频道层面的错误也如实透出（不掩盖）
@@ -571,7 +571,7 @@ cmd_module_apply() {
     mkdir -p "$DL_DIR" 2>/dev/null || true
     local base fname
     base="$(basename "${url%%\?*}")"
-    case "$base" in *.zip) ;; *) base="dshroid-module-$version.zip" ;; esac
+    case "$base" in *.zip) ;; *) base="sunsetlinux-module-$version.zip" ;; esac
     fname="$DL_DIR/$base"
 
     # --- 空间检查（模块包只有几十 KB~几百 KB，但要挡住 /data 已满的情况）---

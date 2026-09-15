@@ -1,6 +1,6 @@
-#!/usr/bin/env bash
+#!/system/bin/sh
 # =============================================================================
-# DSHroid — proot 模式 entry.sh 解析器自测（selftest.sh）        v1.0.0
+# SunsetLinux — proot 模式 entry.sh 解析器自测（selftest.sh）        v1.0.0
 #
 # 为什么单独有这个文件：
 #   `dsh web` 的登录令牌只能从启动那一行解析出来（architecture.md §3.3），
@@ -9,7 +9,7 @@
 #   单独拉出来做回归测试：用合成日志直接调 entry.sh 里的真实函数。
 #
 # 安全性：entry.sh 会写 /etc/hosts、/etc/localtime、/etc/resolv.conf，
-#   在开发机上直接执行很危险；entry.sh 因此提供了 DSHROID_ENTRY_LIB=1 钩子，
+#   在开发机上直接执行很危险；entry.sh 因此提供了 SUNSETLINUX_ENTRY_LIB=1 钩子，
 #   只加载函数、不碰系统文件。本脚本用的就是这个钩子，**不会改动任何系统文件**。
 #
 # 用法：runtime/proot/selftest.sh          # 全部通过退出码 0
@@ -20,7 +20,7 @@ SELF_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd -P)
 ENTRY="$SELF_DIR/entry.sh"
 [ -f "$ENTRY" ] || { printf '找不到 %s\n' "$ENTRY" >&2; exit 1; }
 
-TMP=$(mktemp -d "${TMPDIR:-/tmp}/dshroid-entry-selftest.XXXXXX")
+TMP=$(mktemp -d "${TMPDIR:-/tmp}/sunsetlinux-entry-selftest.XXXXXX")
 trap 'rm -rf -- "$TMP"' EXIT
 
 RUNDIR="$TMP/run"
@@ -30,7 +30,7 @@ LOG="$RUNDIR/linux.log"
 
 # 只加载 entry.sh 的函数（不执行主流程）
 # shellcheck disable=SC1090
-DSHROID_ENTRY_LIB=1 DSHROID_RUN_DIR="$RUNDIR" . "$ENTRY"
+SUNSETLINUX_ENTRY_LIB=1 SUNSETLINUX_RUN_DIR="$RUNDIR" . "$ENTRY"
 
 PASS=0; FAIL=0
 ok()   { PASS=$(( PASS + 1 )); printf '  [OK]   %s\n' "$1"; }

@@ -1,6 +1,6 @@
 #!/system/bin/sh
 # =============================================================================
-# dshroid · module/service.sh
+# sunsetlinux · module/service.sh
 #
 # late_start 阶段调用 `linuxctl start` —— **开机自启，与 App 完全无关**。
 # 这正是"环境不被 App 杀死"的关键（architecture.md §1 生命周期 / §6.1）。
@@ -15,7 +15,7 @@
 # =============================================================================
 
 MODDIR="${0%/*}"
-LINUX_HOME="${LINUX_HOME:-/data/linux}"
+LINUX_HOME="${LINUX_HOME:-/data/sunsetlinux}"
 RUN="$LINUX_HOME/run"
 LOG="$RUN/linux.log"
 SERVICE_LOG="$RUN/service.log"

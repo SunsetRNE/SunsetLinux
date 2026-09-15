@@ -26,7 +26,7 @@ ksu.exec(command, optionsJsonString, callbackNameString)
 function exec(command) {
   return new Promise((resolve, reject) => {
     if (typeof ksu === "undefined") { resolve({ errno: -1, stdout: "", stderr: "dev-preview" }); return; }
-    const cb = "dshroid_cb_" + Date.now() + "_" + Math.floor(Math.random() * 1e6);
+    const cb = "sunsetlinux_cb_" + Date.now() + "_" + Math.floor(Math.random() * 1e6);
     window[cb] = (errno, stdout, stderr) => { delete window[cb]; resolve({ errno, stdout, stderr }); };
     try { ksu.exec(command, "{}", cb); } catch (e) { delete window[cb]; reject(e); }
   });

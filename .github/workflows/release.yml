@@ -1,0 +1,139 @@
+# ============================================================================
+# 发布（分支式，**不使用 tag**）
+#
+#   推送 beta 分支 → 发布到 gh-pages 的 /beta/   （预发布）
+#   推送 main 分支 → 发布到 gh-pages 的 /stable/ （正式）
+#
+# 为什么不建 tag：GitHub Releases 机制上必须挂 tag，所以"不建 tag + 要给人下载"
+# 只能用别的载体 —— 这里用 **gh-pages 分支的固定目录**，它同时充当：
+#   · 用户的下载页（稳定 URL，浏览器直接下）
+#   · 频道的静态托管（channel.json / .sig 放同一处）
+#
+# 本工作流只发布**体积小、每次推送都该更新**的东西：APK + 模块 zip + index.json。
+# 三层镜像（合计约 150 MB，且需要 arm64 + qemu）**不在每次推送里重建** ——
+# 层的更新交给频道机制（用户只下变化的那一层），或在有 arm64 机器时手动构建后上传。
+# 详见 docs/release-ci.md。
+# ============================================================================
+name: 发布
+
+on:
+  push:
+    branches: [beta, main]
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false      # 发布不并发跑，避免两个运行同时写 gh-pages
+
+jobs:
+  # ① 发布前必须过全量回归（复用 ci.yml，结构上保证，不靠人记得）
+  gate:
+    uses: ./.github/workflows/ci.yml
+
+  # ② 构建并发布
+  publish:
+    needs: gate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write            # 需要推 gh-pages 分支
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 确定发布通道（beta / stable）
+        id: ch
+        run: |
+          if [ "${{ github.ref_name }}" = "beta" ]; then
+            echo "dir=beta"   >> "$GITHUB_OUTPUT"
+            echo "label=预发布（beta）" >> "$GITHUB_OUTPUT"
+          else
+            echo "dir=stable" >> "$GITHUB_OUTPUT"
+            echo "label=正式（stable）" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+
+      - name: 关掉 Gradle 守护进程
+        run: echo "org.gradle.daemon=false" >> app/gradle.properties
+
+      - name: 构建 APK
+        working-directory: app
+        run: ./gradlew --no-daemon :app:assembleDebug
+
+      - name: 打包 KernelSU 模块
+        run: |
+          # 版本取 module.prop 里的 version=，构建号用 run_number 便于区分
+          V="$(sed -n 's/^version=//p' module/module.prop | head -n1)"
+          [ -n "$V" ] || { echo "module.prop 里没有 version="; exit 1; }
+          bash module/mkmodule.sh --version "$V"
+          echo "MODULE_VERSION=$V" >> "$GITHUB_ENV"
+
+      - name: 收集产物 + 生成 index.json
+        run: |
+          set -euo pipefail
+          OUT="dist/_publish"
+          rm -rf "$OUT"; mkdir -p "$OUT"
+          cp -v dist/*.apk "$OUT"/
+          cp -v dist/*module*.zip "$OUT"/
+          cp -v dist/*module*.zip.sha256 "$OUT"/ 2>/dev/null || true
+
+          python3 - <<'PY'
+          import json, hashlib, os, glob, datetime, subprocess
+          out="dist/_publish"
+          files=[]
+          for p in sorted(glob.glob(os.path.join(out,"*"))):
+              if p.endswith(".json"): continue
+              h=hashlib.sha256(open(p,'rb').read()).hexdigest()
+              files.append({"name":os.path.basename(p),"size":os.path.getsize(p),"sha256":h})
+          mod=os.environ.get("MODULE_VERSION","")
+          data={
+            "schema":1,
+            "channel":os.environ.get("CHANNEL_DIR",""),
+            "built_at":datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "commit":os.environ.get("GITHUB_SHA",""),
+            "run_number":int(os.environ.get("GITHUB_RUN_NUMBER","0") or 0),
+            "module_version":mod,
+            "files":files,
+          }
+          json.dump(data, open(os.path.join(out,"index.json"),"w"), indent=2, ensure_ascii=False)
+          print(json.dumps(data, indent=2, ensure_ascii=False))
+          PY
+        env:
+          CHANNEL_DIR: ${{ steps.ch.outputs.dir }}
+
+      - name: 发布到 gh-pages 的对应目录
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: dist/_publish
+          destination_dir: ${{ steps.ch.outputs.dir }}
+          keep_files: true          # ★ 关键：不要抹掉另一个通道的目录
+
+      - name: 输出下载地址
+        run: |
+          SITE="https://${{ github.repository_owner }}.github.io/${{ github.repository }}"
+          DIR="${{ steps.ch.outputs.dir }}"
+          {
+            echo "### ${{ steps.ch.outputs.label }} 已发布"
+            echo ""
+            echo "- 目录：\`$DIR/\`"
+            echo "- 索引：$SITE/$DIR/index.json"
+            echo "- 模块版本：\`$MODULE_VERSION\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+# ---------------------------------------------------------------------------
+# 三层镜像 / 签名频道：**不在本工作流里**
+#
+# 原因：三层两式约 150 MB，且构建需要 arm64 + 真 chroot（runner 是 x86-64，要 qemu）。
+# 每次推送都重建既慢又浪费，而且层的日常增量本来就由频道机制承担
+# （用户升级只下变化的层，如 dsh 层约 31 MB）。
+#
+# 做法：在有 arm64 的机器（或本机）执行 `rootfs/build-layers.sh`，
+# 再 `sunsetlinux-channel gen-manifest → sign`，把 channel.json / .sig 与层文件
+# 手动放到 gh-pages 的同一目录下即可。签名私钥只应存在于你的离线备份与
+# 仓库 Secret `CHANNEL_SIGNING_KEY`，**绝不提交**。
+# ---------------------------------------------------------------------------

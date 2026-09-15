@@ -49,7 +49,7 @@ const spec = {
 
 async function main() {
   const argv = process.argv.slice(2);
-  if (wantsHelp(argv)) return printHelp('dshroid 频道密钥生成（keygen）', HELP);
+  if (wantsHelp(argv)) return printHelp('sunsetlinux 频道密钥生成（keygen）', HELP);
 
   const { values } = parseArgs(argv, spec);
   const outDir = path.resolve(values['out-dir']);

@@ -19,13 +19,13 @@
 
 | 产物 | 说明 | 状态 |
 |---|---|---|
-| `dshroid-launcher-debug.apk` | Android 启动器（Compose M3） | ⚠️ 单色化后**待重建**（源码已通过编译） |
-| `dshroid-module-0.1.0.zip` | KernelSU 模块（开机自启 + 挂载探测 + 模块 WebUI） | ⚠️ 单色化后**待重打** |
+| `sunsetlinux-launcher-debug.apk` | Android 启动器（Compose M3） | ⚠️ 单色化后**待重建**（源码已通过编译） |
+| `sunsetlinux-module-0.1.0.zip` | KernelSU 模块（开机自启 + 挂载探测 + 模块 WebUI） | ⚠️ 单色化后**待重打** |
 | `base-24.04.3-l1.erofs.{zst,gz}` | base 层 | ✅ 已产出并验证 |
 | `runtime-1.0.0.erofs.{zst,gz}` | runtime 层（Node 24.21.0 + pnpm 12.4.2 + 入口脚本） | ✅ |
 | `dsh-0.1.5-rc.2.erofs.{zst,gz}` | dsh 层（DSH + 191 依赖 + profile 工作区） | ✅ |
 | `channel/` | **已签名、可发布的频道**（三层两式 + 清单 + 签名） | ✅ 全链路跑通 |
-| `dshroid-seed-*.tar.zst` | 离线种子（ubuntu-base + Node 官方包） | ✅ |
+| `sunsetlinux-seed-*.tar.zst` | 离线种子（ubuntu-base + Node 官方包） | ✅ |
 | `proot-bundle-arm64.tar.gz` | 非 root 模式的 proot（GPLv2 合规，随附许可与 SOURCE） | ✅ |
 
 **分发体积**：全量 **96.3 MB**（zstd）；**DSH 单层升级 31.2 MB**。
@@ -61,6 +61,53 @@
   因此**不受 KernelSU 删除内置挂载实现的影响**；自有 overlay 挂载在 `unshare -m` 的私有命名空间内，
   与 metamodule 的全局 overlay 互不可见。
 - **权限边界**：`doctor` 能准确识别 `CapEff=0`（伪造 root）与真 root 的区别。
+
+### 3.4 ★ 设备侧 shell 可移植性（这轮修掉的一类真问题）
+
+**背景**：Android 上**没有 bash**（`/system/bin/bash` 不存在，`/system/bin/sh` 是 mksh）。
+而这套运行时脚本最早是按"宿主上有 bash"写的 —— 后果是**本地 bash 全绿、真机一行都跑不了**。
+
+实测证据（本轮）：
+```
+$ mksh -n runtime/root/start.sh
+E: runtime/root/start.sh[458]: syntax error: unexpected '('      ← 真机上这就是最终结果
+$ mksh runtime/root/linuxctl.sh status
+E: .../status_json.sh[64]: syntax error: unexpected '(('
+E: .../layer-spec.sh[167]: syntax error: unexpected '('
+E: linuxctl.sh[1578]: dsh_status_json: inaccessible or not found   ← 状态 JSON 根本产不出来
+```
+
+已修（全部有回归证据）：
+
+| 问题 | 位置 | 修法 |
+|---|---|---|
+| `declare -a` / `local -a` 是 mksh 语法错误 | `doctor.sh`、`stop.sh`、`layer-spec.sh`、`device-provision.sh` | 去掉数组声明，改 POSIX 字符串 / 先声明再赋值 |
+| C 式 `for (( … ))` 不被 mksh 支持 | `start.sh`、`stop.sh`、`linuxctl.sh`、`status_json.sh` | 改 `while read` + 前插构造逆序；JSON 转义改 awk `gsub` |
+| `a=( … )` 当函数局部量声明 | 同上 | 拆分声明与赋值 |
+| **被 source 的库自动执行"自检"** | `runtime/common/{status_json,http_health}.sh` | 经典 `[ "${BASH_SOURCE[0]:-$0}" = "$0" ]` 在 mksh 下**恒真** → 改成 source 方显式打标记 `SUNSETLINUX_SOURCED=1`（`http_health.sh` 里那个自检带 `exit`，会让 linuxctl 一启动就退出） |
+| `BASH_SOURCE` 定不到自身路径 | `stop/start/status/selftest.sh` | 改 `${BASH_SOURCE[0]:-$0}`（mksh 下退回 `$0`） |
+| shebang 写着 `#!/usr/bin/env bash`，但设备上要**直接执行**它 | 设备侧全部脚本 | 统一 `#!/system/bin/sh`；只有环境内（chroot/proot 后）的 `entry.sh`/`supervise.sh` 保留 bash |
+
+**验收证据**：`mksh runtime/root/selftest.sh` → **19/19 通过**；
+`mksh runtime/root/linuxctl.sh status` 与 `bash` 版输出**逐字节一致**，并通过 §3.1 冻结契约校验。
+新增闸门 `tools/shell-compat-check.mjs` 已进 CI：设备侧脚本过不了 mksh 就**直接失败**。
+
+### 3.5 ★ App 冷启动与系统栏交互（用户实测的三个问题，已修）
+
+| 用户看到的现象 | 根因（源码级） | 修法 | 回归 |
+|---|---|---|---|
+| 首装"很大的黑屏页面，过一会才有模式引导" | ①主题 `windowBackground` 是纯黑；②`LauncherActivity` 在**没走完引导时也组合整套外壳**（顶栏+3 面板+日志轮询），引导页再盖上去 —— 首帧要等这套重活；③`ViewModel` 构造器里同步跑 zstd 能力探测（写临时文件 + 解 zstd 帧，磁盘 IO） | 门禁下沉到 `setContent` 内部：未完成引导时**只画轻量占位屏**（`ui/BootPlaceholder.kt`，有标题/进度/出路），不组合外壳；`onResume` 重新读 `onboarded` 以便引导完成后立刻切换；zstd 探测移到 IO 协程 | `UiInsetsContractTest` ×2 |
+| 键盘盖住输入框（插件包名 / 频道 URL / 本地源 / DSH Web 输入） | 边到边（`enableEdgeToEdge`）后窗口不再为键盘让位，而全 App **没有任何 `imePadding`**；且 Activity 未声明 `adjustResize`，部分版本连 IME inset 都不派发 | `AppShell` 统一消费一次 + DSH WebView 自行消费；6 个 Activity 加 `imePadding`；manifest 全部 activity 加 `windowSoftInputMode="adjustResize"` | `UiInsetsContractTest` ×2 |
+| 系统返回键在非首页直接退出 App | `AppShell` 切了 tab 却没登记返回回调（只有 DSH Web 面板有） | 新增 `BackHandler(tab != START)`：先回首页；侧边栏打开时仍由抽屉自己的回调优先（后注册优先） | — |
+
+顺带清掉的一处隐患：悬浮胶囊底栏的留白 `96.dp` 原先在 4 个地方各写一遍，
+现统一为 `ui/components/Common.kt` 的 `CapsuleReserve`（漏改一处就会让最后一个面板被胶囊压住）。
+
+> ⚠️ **需要你在真机确认的一点**：你说的「对系统虚拟导航的消费处理」我按"导航栏 inset 有没有被正确消费"
+> 查了一遍 —— 结论是**各屏都消费了**（`safeDrawingPadding` / `navigationBarsPadding`，且有测试守着），
+> 没找到确定缺陷。如果你看到的其实是下面某一种，请告诉我具体现象，我按那条修：
+> ①底部胶囊被系统导航栏压住/贴太近；②底部区域点按没反应（与手势区冲突）；
+> ③内容被导航栏盖住；④三键导航下对话框按钮被盖住。
 
 ---
 
@@ -99,6 +146,26 @@
 - **单色界面的代价**：错误态失去红色后显眼度下降，改用「✕/! 图标 + 白色粗描边 + 加粗文案」补偿。
 - **局域网访问未做**：`dsh web` 只监听 `127.0.0.1`，界面里是灰态占位，没有伪造能力。
 
+### 4.4 ❌ **proot 模式的宿主侧脚本仍是 bash —— 真机不可用**
+
+`runtime/proot/linuxctl.sh` 与 `start.sh` 重度依赖 bash：`[[ =~ ]]` 正则、数组、
+C 式 `for`、进程替换 `2> >(tee …)`。而：
+
+- 设备上**没有 bash**（`/system/bin/bash` 不存在，只有 `/system/bin/sh` = mksh）；
+- Android 10+ **禁止 `execve` App 私有目录里的文件**（W^X），所以 App 只能
+  用 `/system/bin/sh <脚本>` 去跑它 → 直接撞上 mksh 语法错。
+
+结论：**proot 模式目前跑不起来**，这不是"待验证"，是已确定的缺陷（root 模式不受影响，
+它已经改成 mksh 可解析并通过 mksh 下的自测）。两条修法，二选一：
+
+| 方案 | 做法 | 代价 |
+|---|---|---|
+| **A（推荐）** | 把 `runtime/proot/{linuxctl,start}.sh` 也改成 POSIX（照 `runtime/root/*` 的做法：数组→字符串、`=~`→`case`/`grep -qE`、进程替换→临时文件） | 约 1800 行，机械但量大 |
+| B | 随包带一个**静态 bash**，以 native lib 形式落 `nativeLibraryDir` 再调用 | 引入二进制产物 + 需要可信来源与校验 |
+
+`tools/shell-compat-check.mjs` 已经把这两个文件登记为「欠债」并在 CI 里**显式列出**：
+修好一个就必须从名单里删一个，名单不会腐烂。
+
 ---
 
 ## 五、需要你做的（唯一的阻塞点）
@@ -106,7 +173,7 @@
 按 `docs/smoke-test.md` 走，**第一条最关键**：
 
 ```bash
-su -c '/data/linux/bin/linuxctl doctor'
+su -c '/data/sunsetlinux/bin/linuxctl doctor'
 ```
 
 它一次性能回答 §4.2 里的第 1 项（`§1b` 命令能力表）、挂载实现探测（`§1c`）、
@@ -126,6 +193,15 @@ su -c '/data/linux/bin/linuxctl doctor'
 
 ## 七、下一步（按优先级）
 
-1. **重打两个产物**：单色化后的 APK 与模块 zip（源码已通过编译，只差打包）；
-2. **你在真机跑 `doctor`** → 我据此修真机问题（最可能是 toybox mount 的降级分支）；
-3. 真机通过后再考虑：局域网访问、脚本自更新、更多频道的实测。
+1. **你在真机跑 `doctor`** → 我据此修真机问题（最可能是 toybox mount 的降级分支）。
+   现在 root 侧脚本已经是 mksh 可解析的，这一步**第一次真的有可能跑出结果**（以前会直接语法错）。
+2. **修 proot 模式**（§4.4）：把 `runtime/proot/linuxctl.sh`、`start.sh` 改成 POSIX。
+   在修好之前，proot 模式在真机上是不可用状态，别把它当作可用的降级路径。
+3. **重打三层层镜像**：现有 `dist/*.erofs` 里还留着改名前的死文件 `/opt/dshroid/*.sh`
+   （不影响功能：`start.sh` 启动时会把模块里的新版同步到 `/opt/sunsetlinux`）。
+   重建必须在**有 CAP_SYS_ADMIN 的宿主 / CI** 上跑 `rootfs/build-layers.sh`（本工作容器
+   没有该能力，`chroot` 报 `Function not implemented`，只能跑到 mmdebstrap 报错为止）。
+4. App 侧「彻底卸载」入口（先备份 → 确认 → `purge --yes` → 展示 `footprint`）：
+   **机制已就绪**（`linuxctl purge [--yes|--arm|--disarm]` + `footprint`），只差 UI。
+5. 真机通过后再考虑：局域网访问、脚本自更新、更多频道的实测。
+

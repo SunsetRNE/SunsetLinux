@@ -11,7 +11,7 @@
  *
  * ## 支持的频道条目（channels.json）
  *   { "id":"dev", "name":"某开发者内测", "type":"npm",
- *     "package":"dshroid-channel-dev", "version":"latest",
+ *     "package":"sunsetlinux-channel-dev", "version":"latest",
  *     "pubkey":"<ed25519 raw base64>", "enabled":true, "priority":50 }
  *   `version` 支持 npm spec：dist-tag（latest/next/...）、确切版本、`^1.2.0`/`~1.2`/`1.x`/
  *   `>=1.0.0 <2.0.0`、`*`。不支持的写法会**明确报错**，不会"猜一个版本"。
@@ -257,7 +257,7 @@ export async function fetchToFile(url, dest, { token, timeoutMs = 60000 } = {}) 
   const ac = new AbortController();
   const t = setTimeout(() => ac.abort(), timeoutMs);
   try {
-    const headers = { 'user-agent': 'dshroid-channel/1.0' };
+    const headers = { 'user-agent': 'sunsetlinux-channel/1.0' };
     if (token) headers.authorization = `Bearer ${token}`;
     const r = await fetch(url, { signal: ac.signal, headers, redirect: 'follow' });
     if (!r.ok) {
@@ -527,7 +527,7 @@ export async function resolveNpmChannel(entry, opts = {}) {
   const manifestRaw = files.get(CHANNEL_MANIFEST);
   const sigRaw = files.get(CHANNEL_SIG);
   if (!manifestRaw) {
-    throw new Error(`包 ${pkg}@${chosen.version} 里没有 ${CHANNEL_MANIFEST}（这不是一个 dshroid 频道包？）`);
+    throw new Error(`包 ${pkg}@${chosen.version} 里没有 ${CHANNEL_MANIFEST}（这不是一个 sunsetlinux 频道包？）`);
   }
   if (!sigRaw) {
     throw new Error(

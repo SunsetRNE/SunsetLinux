@@ -34,13 +34,13 @@ DSH 换版本时通常只有 `dsh-<版本>.erofs.zst` 变了，**不需要重下
 
 ### 1.1 层、版本与状态
 
-设备上的层放在 `$LINUX_HOME/layers/`（root 模式是 `/data/linux/layers/`），
+设备上的层放在 `$LINUX_HOME/layers/`（root 模式是 `/data/sunsetlinux/layers/`），
 **运行时用的是解压后的裸镜像**（挂载点直接吃 EROFS）：
 
 | 层 | 设备侧镜像 | 内容 | 变化频率 |
 |---|---|---|---|
 | L0 | `layers/base.erofs` | Ubuntu 24.04 minimal（OS 与运行库） | 很少 |
-| L1 | `layers/runtime.erofs` | Node 24 + pnpm + git/python3/ripgrep + `/opt/dshroid` 入口脚本 | 偶尔 |
+| L1 | `layers/runtime.erofs` | Node 24 + pnpm + git/python3/ripgrep + `/opt/sunsetlinux` 入口脚本 | 偶尔 |
 | L2 | `layers/dsh.erofs` | DSH 本体 + profile 工作区与移动端插件 | **经常** |
 
 频道里发布的**分发产物**带传输压缩后缀，而且**两种都发布**：
@@ -81,7 +81,7 @@ dsh-0.1.5-rc.2.erofs.zst / .gz
 
 ```bash
 # 命令行（等价于 App 设置页里的"频道管理"）
-dshroid-channel channels list
+sunsetlinux-channel channels list
 ```
 
 输出会列出每个频道的：启用状态、优先级、**公钥指纹**、名称、URL。
@@ -92,10 +92,10 @@ dshroid-channel channels list
 把公钥通过**带外渠道**核对一次指纹，然后：
 
 ```bash
-dshroid-channel channels add \
+sunsetlinux-channel channels add \
   --id someone-dev \
   --name "某开发者的内测" \
-  --url https://example.org/dshroid/channel.json \
+  --url https://example.org/sunsetlinux/channel.json \
   --pub 'QSHdDrvryJ6lY3wEKPP+vVUI+lbPiJxpVMQNsX26Vpw=' \
   --priority 50
 ```
@@ -104,7 +104,7 @@ dshroid-channel channels add \
 * 加完先做一次体检（会真的把清单拉下来验签）：
 
 ```bash
-dshroid-channel channels check --id someone-dev
+sunsetlinux-channel channels check --id someone-dev
 ```
 
 通过会打印 `✅ 验签通过` 与清单名、各层版本；失败会明确告诉你原因，并且**该频道的内容不会生效**。
@@ -160,16 +160,16 @@ linuxctl update dsh $LINUX_HOME/layers/dsh-0.1.5-rc.1.erofs.prev
 ```bash
 # 在电脑上先做好（或在有网的设备上做）
 tools/seed/mkseed.sh --verify
-# → dist/dshroid-seed-<日期>.tar.zst   约 57 MB
-#   dist/dshroid-seed-<日期>.tar.zst.sha256
+# → dist/sunsetlinux-seed-<日期>.tar.zst   约 57 MB
+#   dist/sunsetlinux-seed-<日期>.tar.zst.sha256
 
 # 传到手机后先校验，再解开
-tools/seed/verify-seed.sh dshroid-seed-2026-09-15.tar.zst
-mkdir -p /data/linux/seeds
-tar --zstd -xf dshroid-seed-2026-09-15.tar.zst -C /data/linux/seeds --strip-components=1
+tools/seed/verify-seed.sh sunsetlinux-seed-2026-09-15.tar.zst
+mkdir -p /data/sunsetlinux/seeds
+tar --zstd -xf sunsetlinux-seed-2026-09-15.tar.zst -C /data/sunsetlinux/seeds --strip-components=1
 
 # 首次部署带上 --seed，本地有就不联网
-/data/linux/bin/linuxctl provision --seed /data/linux/seeds
+/data/sunsetlinux/bin/linuxctl provision --seed /data/sunsetlinux/seeds
 ```
 
 种子包内含：`ubuntu-base-24.04.3-base-arm64.tar.gz`、`node-v24.21.0-linux-arm64.tar.xz`、
@@ -206,9 +206,9 @@ dsh plugin --profile web list
 ### 2.1 生成密钥（一次就够，然后保管好私钥）
 
 ```bash
-tools/channel/dshroid-channel keygen --out-dir ~/.dshroid-keys
-# 私钥  ~/.dshroid-keys/channel.key   (PKCS#8 PEM, 权限 0600)
-# 公钥  ~/.dshroid-keys/channel.pub   (Ed25519 raw 32 字节的 base64)
+tools/channel/sunsetlinux-channel keygen --out-dir ~/.sunsetlinux-keys
+# 私钥  ~/.sunsetlinux-keys/channel.key   (PKCS#8 PEM, 权限 0600)
+# 公钥  ~/.sunsetlinux-keys/channel.pub   (Ed25519 raw 32 字节的 base64)
 # 指纹  ed25519:62:1c:8a:49:65:67:8d:72   ← 让用户核对这个
 ```
 
@@ -241,10 +241,10 @@ tools/channel/dshroid-channel keygen --out-dir ~/.dshroid-keys
 ### 2.3 生成清单
 
 ```bash
-tools/channel/dshroid-channel gen-manifest \
+tools/channel/sunsetlinux-channel gen-manifest \
   --dir dist/layers-20260915 \
   --name "某开发者的内测" \
-  --base-url https://example.org/dshroid \
+  --base-url https://example.org/sunsetlinux \
   --dsh-dist-tag next \
   --strict
 ```
@@ -292,7 +292,7 @@ tools/channel/dshroid-channel gen-manifest \
 > 老清单里可能只有 `size`/`transport_size`（没有 `.gz` 与 `*_raw`）——`verify` 会自动兼容，
 > 但**新发布的频道请用新字段**：`.gz` 缺失时设备侧的纯 CLI 路径就断了。
 
-示例（`--base-url https://example.org/dshroid` 时）：
+示例（`--base-url https://example.org/sunsetlinux` 时）：
 
 ```json
 {
@@ -302,10 +302,10 @@ tools/channel/dshroid-channel gen-manifest \
   "layers": [
     { "id": "dsh", "version": "0.1.5-rc.2", "fs": "erofs",
       "transport": "zstd",
-      "url":   "https://example.org/dshroid/dsh-0.1.5-rc.2.erofs.zst",
+      "url":   "https://example.org/sunsetlinux/dsh-0.1.5-rc.2.erofs.zst",
       "sha256": "…", "size": 92103456,
       "transport_gz": "gzip",
-      "url_gz": "https://example.org/dshroid/dsh-0.1.5-rc.2.erofs.gz",
+      "url_gz": "https://example.org/sunsetlinux/dsh-0.1.5-rc.2.erofs.gz",
       "sha256_gz": "…", "size_gz": 118336512,
       "sha256_raw": "…", "size_raw": 356515840 },
     { "id": "runtime", "version": "1.0.0", "…": "（同上结构）" },
@@ -347,9 +347,9 @@ tools/channel/dshroid-channel gen-manifest \
 ### 2.4 签名
 
 ```bash
-tools/channel/dshroid-channel sign \
+tools/channel/sunsetlinux-channel sign \
   --in  dist/layers-20260915/channel.json \
-  --key ~/.dshroid-keys/channel.key
+  --key ~/.sunsetlinux-keys/channel.key
 # → dist/layers-20260915/channel.json.sig
 ```
 
@@ -360,8 +360,8 @@ tools/channel/dshroid-channel sign \
 ### 2.5 发布前自检 → 上传 → 把 URL + 公钥发出去
 
 ```bash
-tools/channel/dshroid-channel publish-check \
-  --pub ~/.dshroid-keys/channel.pub --dir dist/layers-20260915
+tools/channel/sunsetlinux-channel publish-check \
+  --pub ~/.sunsetlinux-keys/channel.pub --dir dist/layers-20260915
 # 以 --strict 语义检查（发布前把关，任何一项不过就退出码 1）：
 #   channel.json/.sig 齐备；每层的 .zst 与 .gz 都在本地；验签通过；
 #   两份产物的 sha256/size 匹配；真解压复算 sha256_raw/size_raw；
@@ -378,7 +378,7 @@ tools/channel/dshroid-channel publish-check \
 然后把这两样东西发给用户（**通过另一个渠道**）：
 
 ```
-URL    : https://example.org/dshroid/channel.json
+URL    : https://example.org/sunsetlinux/channel.json
 公钥   : QSHdDrvryJ6lY3wEKPP+vVUI+lbPiJxpVMQNsX26Vpw=
 指纹   : ed25519:62:1c:8a:49:65:67:8d:72
 ```
@@ -386,8 +386,8 @@ URL    : https://example.org/dshroid/channel.json
 用户侧：
 
 ```bash
-dshroid-channel channels add --id your-id --name "你的频道" \
-    --url https://example.org/dshroid/channel.json --pub '<公钥>' --priority 50
+sunsetlinux-channel channels add --id your-id --name "你的频道" \
+    --url https://example.org/sunsetlinux/channel.json --pub '<公钥>' --priority 50
 ```
 
 > 也可以把清单发到任何地方（论坛、群文件），只要 `channel.json` 与 `channel.json.sig` 成对出现。
@@ -471,7 +471,7 @@ dshroid-channel channels add --id your-id --name "你的频道" \
 * 私有镜像（把你那份文件改掉）→ 验签失败，用户拒绝。
 * 把公钥和清单一起换掉 → 只要用户核对过指纹就发现不了**唯一**条件是用户没核对。
   → 所以请把指纹和公钥放到与清单**不同的渠道**，并鼓励用户核对
-  （`dshroid-channel channels list` 会显示指纹，`add` 时也会打印）。
+  （`sunsetlinux-channel channels list` 会显示指纹，`add` 时也会打印）。
 * HTTP（非 HTTPS）托管本身不是致命的（有签名），但会让攻击者知道你在下载什么，
   也给"顺手改公钥"留下机会 → **能用 HTTPS 就用 HTTPS**。
 
@@ -517,13 +517,13 @@ dshroid-channel channels add --id your-id --name "你的频道" \
 
 | 命令 | 作用 |
 |---|---|
-| `dshroid-channel keygen` | 生成 Ed25519 频道密钥对（`channel.key` 0600 / `channel.pub` base64） |
-| `dshroid-channel gen-manifest` | 扫描层文件 → 生成冻结 schema 的 `channel.json`（主/回退产物的 sha256+size、裸镜像 `sha256_raw`/`size_raw`） |
-| `dshroid-channel sign` | 对 `channel.json` 原始字节签名 → `channel.json.sig` |
-| `dshroid-channel verify` | 验签 + 主/回退产物 sha256/size + **解压复算** `sha256_raw`/`size_raw` + zstd 窗口合规；退出码 0/1（`--no-raw-recompute` 可跳过复算，会明确提示） |
-| `dshroid-channel channels …` | `list/add/remove/set/enable/disable/check/init` 管理 `channels.json` |
-| `dshroid-channel publish-check` | 发布前体检（`--strict` 语义）：层两种产物齐备 + 验签 + sha256 + 解压复算 + zstd 窗口 |
-| `tools/seed/mkseed.sh` | 制作离线种子包 `dist/dshroid-seed-<日期>.tar.zst` |
+| `sunsetlinux-channel keygen` | 生成 Ed25519 频道密钥对（`channel.key` 0600 / `channel.pub` base64） |
+| `sunsetlinux-channel gen-manifest` | 扫描层文件 → 生成冻结 schema 的 `channel.json`（主/回退产物的 sha256+size、裸镜像 `sha256_raw`/`size_raw`） |
+| `sunsetlinux-channel sign` | 对 `channel.json` 原始字节签名 → `channel.json.sig` |
+| `sunsetlinux-channel verify` | 验签 + 主/回退产物 sha256/size + **解压复算** `sha256_raw`/`size_raw` + zstd 窗口合规；退出码 0/1（`--no-raw-recompute` 可跳过复算，会明确提示） |
+| `sunsetlinux-channel channels …` | `list/add/remove/set/enable/disable/check/init` 管理 `channels.json` |
+| `sunsetlinux-channel publish-check` | 发布前体检（`--strict` 语义）：层两种产物齐备 + 验签 + sha256 + 解压复算 + zstd 窗口 |
+| `tools/seed/mkseed.sh` | 制作离线种子包 `dist/sunsetlinux-seed-<日期>.tar.zst` |
 | `tools/seed/verify-seed.sh` | 校验种子包（整包 sha256 + MANIFEST + 文件魔数） |
 | `rootfs/build-layers.sh` | 宿主/CI 上用真 chroot 构建三层 EROFS 镜像 + 生成 `.erofs.zst` 与 `.erofs.gz` 双分发产物 |
 | `rootfs/layer-spec.sh` | **层规格唯一事实源**：命名/镜像格式/压缩/版本/禁止路径/断言（被构建脚本 source） |

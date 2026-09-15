@@ -1,4 +1,4 @@
-# DSHroid — proot 降级运行时（非 root）
+# SunsetLinux — proot 降级运行时（非 root）
 
 本目录是 **非 root（proot）模式** 的全部实现。契约见 `docs/architecture.md` §2.2 / §3 / §3.2；
 设备实测事实见 `docs/findings.md`（尤其 §3 DSHA 的做法 与 §3.3「proot 文件系统视图不可信」）。
@@ -15,10 +15,10 @@ tools/proot-bundle/
   mkproot-bundle.sh   # 产出 dist/proot-bundle-<arch>.tar.gz（自带 proot + 依赖 + GPLv2 许可）
 ```
 
-环境根默认 `$DSHROID_APP_FILES/linux`，可用 `LINUX_HOME` 覆盖：
+环境根默认 `$SUNSETLINUX_APP_FILES/sunsetlinux`，可用 `LINUX_HOME` 覆盖：
 
 ```
-$APP_FILES/linux/
+$APP_FILES/sunsetlinux/
   rootfs/                  # 直接解开的 Ubuntu 目录（proot 模式下它本身就是可写层）
   etc/{config.json,channels.json,state.json,env,binds?}
   run/{dsh.url,dsh.pid,dsh.pid.starttime,dsh.port,proot.pid,state,linux.log,last_error}
@@ -31,15 +31,15 @@ $APP_FILES/linux/
 ## 1. 快速上手
 
 ```bash
-export DSHROID_APP_FILES=/data/user/0/io.dshroid/files      # App 一般自动注入
-BIN=$DSHROID_APP_FILES/linux/bin
+export SUNSETLINUX_APP_FILES=/data/user/0/io.github.sunsetrne.sunsetlinux/files      # App 一般自动注入
+BIN=$SUNSETLINUX_APP_FILES/sunsetlinux/bin
 
 # 0) 一次性：解包随包 proot（不依赖设备上已装 proot / Termux）
-mkdir -p "$DSHROID_APP_FILES/linux/proot"
-tar -xzf dist/proot-bundle-arm64.tar.gz -C "$DSHROID_APP_FILES/linux/proot"
+mkdir -p "$SUNSETLINUX_APP_FILES/sunsetlinux/proot"
+tar -xzf dist/proot-bundle-arm64.tar.gz -C "$SUNSETLINUX_APP_FILES/sunsetlinux/proot"
 
 # 1) 部署（需要一个 Ubuntu base tarball 作为出厂种子）
-linuxctl provision --seed /sdcard/dshroid-seed
+linuxctl provision --seed /sdcard/sunsetlinux-seed
 
 # 2) 启动 / 状态 / 日志
 linuxctl start
@@ -54,19 +54,19 @@ linuxctl attach                 # 交互 shell
 linuxctl exec -- id             # 非交互
 ```
 
-`provision` 的种子默认按 `--seed` → `$DSHROID_SEED_DIR` → `$LINUX_HOME/seeds` →
+`provision` 的种子默认按 `--seed` → `$SUNSETLINUX_SEED_DIR` → `$LINUX_HOME/seeds` →
 `$LINUX_HOME/cache` 的顺序查找 `*ubuntu*.*` / `*base*.*` / 任意 `*.tar.{zst,gz,xz,bz2}`。
 
 ### 1.1 部署后校验（照这个清单确认，别只看 provision 的退出码）
 
 ```bash
-H=$DSHROID_APP_FILES/linux
+H=$SUNSETLINUX_APP_FILES/sunsetlinux
 
 # 1) 契约入口必须在（App 只调这个路径；provision 会幂等补齐）
 test -x "$H/bin/linuxctl" && echo "OK bin/linuxctl"
 
 # 2) rootfs 内入口必须在（每次 provision/start 都会刷新成最新版本）
-test -f "$H/rootfs/opt/dshroid/entry.sh" && echo "OK entry.sh"
+test -f "$H/rootfs/opt/sunsetlinux/entry.sh" && echo "OK entry.sh"
 
 # 3) 状态 JSON 合法（§3.1）
 "$H/bin/linuxctl" status | python3 -m json.tool >/dev/null && echo "OK status JSON"
@@ -107,7 +107,7 @@ test -s "$H/run/dsh.url" && grep -q '?token=' "$H/run/dsh.url" && echo "OK 已�
 | 底座 | 真 root（KernelSU）+ 真 chroot | PRoot（ptrace 系统调用翻译） | 每个系统调用被拦截改写，进程创建/小文件写明显变慢 |
 | 隔离 | `unshare -m` + `unshare -u` | **无** | 环境与宿主共享挂载/网络栈；`mount` 不可用 |
 | 分层 | squashfs + ext4 overlayfs | **无**，直接目录 | 没有原子层切换，`update` 是解包覆盖；`reset` 靠出厂种子重建 |
-| 环境根 | `/data/linux`（卸载 App 不丢） | `$APP_FILES/linux`（**App 私有，卸载即毁**） | 这是 proot 模式的固有限制：改路径就得有 root |
+| 环境根 | `/data/sunsetlinux`（卸载 App 不丢） | `$APP_FILES/sunsetlinux`（**App 私有，卸载即毁**） | 这是 proot 模式的固有限制：改路径就得有 root |
 | sdcard | `/mnt/pass_through/0/emulated`（直挂，绕 FUSE） | `/storage/emulated/0`（FUSE，**绕不开**） | sdcard 上大量小文件 IO 很慢 |
 | 生命周期 | 与 App 解耦（KernelSU 模块开机自启） | 与 App 同 uid，靠 `setsid+nohup` 尽量脱离调用方 | 系统冻结/清理 App 时可能连环境一起冻；root 模式的豁免名单这里用不上 |
 | 身份 | 真 uid 0 + 真 capabilities | **保持 App 真实 uid（默认不伪造）** | 不能 `mount/chown/mknod`，不能装包（要装包得显式 `--fake-root`，见 §5） |
@@ -115,7 +115,7 @@ test -s "$H/run/dsh.url" && grep -q '?token=' "$H/run/dsh.url" && echo "OK 已�
 
 **仍然保持一致的部分**（这是设计目标）：
 
-* 同一个 Linux 侧入口 `rootfs/opt/dshroid/entry.sh`；
+* 同一个 Linux 侧入口 `rootfs/opt/sunsetlinux/entry.sh`；
 * `linuxctl` 路径、子命令、退出码语义，以及 **`status` 的 §3.1 JSON 结构完全一致**；
 * `mode` 字段固定为 `"proot"`，App 只读这一个字段就能区分模式。
 
@@ -125,8 +125,8 @@ proot 没有 squashfs 分层，所以字段是**逻辑映射**（键不可省略
 
 | 字段 | proot 模式含义 |
 |---|---|
-| `layers.base` | `rootfs/` 里 `/usr/local` 以外的部分；`version` 取 `rootfs/etc/dshroid-base-version` 或 `/etc/os-release` 的 `VERSION_ID` |
-| `layers.runtime` | `rootfs/usr/local` 里除 DSH 以外的部分；`version` 取 `rootfs/etc/dshroid-runtime-version`（层构建时写入），否则 `null` |
+| `layers.base` | `rootfs/` 里 `/usr/local` 以外的部分；`version` 取 `rootfs/etc/sunsetlinux-base-version` 或 `/etc/os-release` 的 `VERSION_ID` |
+| `layers.runtime` | `rootfs/usr/local` 里除 DSH 以外的部分；`version` 取 `rootfs/etc/sunsetlinux-runtime-version`（层构建时写入），否则 `null` |
 | `layers.dsh` | `rootfs/usr/local/lib/node_modules/@deepseek-ai/dsh`；`version` 读它的 `package.json` |
 | `layers.*.mounted` | 「该部分已就位」（不是真的 mount） |
 | `storage.upper_used` | `rootfs` 实际占用（缓存值） |
@@ -154,21 +154,21 @@ proot 没有 squashfs 分层，所以字段是**逻辑映射**（键不可省略
 ## 4. 启动时到底做了什么（`start.sh`）
 
 ```
-1. 解析环境根 / rootfs / run 目录；校验 rootfs 完整性（/bin/sh、/opt/dshroid/entry.sh）
-2. 解析 proot：DSHROID_PROOT_CMD > DSHROID_PROOT_BIN > $LINUX_HOME/proot/proot-launch.sh
+1. 解析环境根 / rootfs / run 目录；校验 rootfs 完整性（/bin/sh、/opt/sunsetlinux/entry.sh）
+2. 解析 proot：SUNSETLINUX_PROOT_CMD > SUNSETLINUX_PROOT_BIN > $LINUX_HOME/proot/proot-launch.sh
    > $BIN_DIR/proot-launch.sh > $LINUX_HOME/proot/bin/proot > PATH
    （脚本型包装器若 shebang 解释器不存在 —— Android 上没有 /bin/sh —— 自动改用找到的 sh 执行）
 3. 组装 proot 参数：-r <rootfs> -w /root
    -b /dev -b /proc -b /sys -b /system -b /apex
    -b /proc/self/fd:/dev/fd -b /storage/emulated/0:/sdcard
-   -b <LINUX_HOME>/run:/run/dshroid          # 控制通道：写回 dsh.pid/dsh.port/linux.log
+   -b <LINUX_HOME>/run:/run/sunsetlinux          # 控制通道：写回 dsh.pid/dsh.port/linux.log
    （不存在的 bind 源会警告并跳过；/dev /proc /sys 缺失则直接失败）
-   可选：etc/binds 文件、DSHROID_EXTRA_BINDS、--link2symlink（npm 硬链接兜底）、-0（仅 --fake-root）
+   可选：etc/binds 文件、SUNSETLINUX_EXTRA_BINDS、--link2symlink（npm 硬链接兜底）、-0（仅 --fake-root）
 4. DNS：多路回退 getprop(net.dns1/各接口 dns) → /system/etc/resolv.conf → /etc/resolv.conf → ndc
    → 公共 DNS，写进 rootfs/etc/resolv.conf，并把来源与结果写进日志 + status 附加字段
-5. 时区：getprop persist.sys.timezone → 导出 TZ + 写 rootfs/etc/dshroid-tz
+5. 时区：getprop persist.sys.timezone → 导出 TZ + 写 rootfs/etc/sunsetlinux-tz
 6. 密钥：读取 etc/env（0600，权限不对会被收紧）→ 以环境变量传给 guest（**不进命令行**）
-7. 后台启动：setsid nohup bash -c '写 run/proot.pid; exec proot ... /opt/dshroid/entry.sh'
+7. 后台启动：setsid nohup bash -c '写 run/proot.pid; exec proot ... /opt/sunsetlinux/entry.sh'
    （同时关闭继承来的 fd 3..64：否则后台 guest 会一直持有 linuxctl 的 flock 锁）
 8. 等待就绪：run/dsh.pid + run/dsh.port + TCP 可连；进程提前退出则把日志尾部的原因写进 last_error
 ```
@@ -190,12 +190,12 @@ proot 没有 squashfs 分层，所以字段是**逻辑映射**（键不可省略
 9. 前台 wait 受监管的 node；它退出后同样清理，并写 state（rc=0 → stopped，rc≠0 → error + last_error）
 ```
 
-> **关于 `supervise.sh`**：`architecture.md` §3.2 描述的 supervisor 是 `/opt/dshroid/supervise.sh`。
+> **关于 `supervise.sh`**：`architecture.md` §3.2 描述的 supervisor 是 `/opt/sunsetlinux/supervise.sh`。
 > proot 模式下**刻意不拆这个文件**，而由 `entry.sh` 同时承担入口与 supervisor 职责
 > （准备环境 → 后台起 dsh → 截获令牌 → 落盘 → 前台等待 → 信号透传）。
 > 行为契约与 root 侧 `runtime/root/supervise.sh` **一致**：
 > `run/dsh.url`(0600)、`run/dsh.port`、`run/dsh.pid`、`run/linux.log`，以及「退出即删凭证文件」；
-> 差别只是 proot 模式的 run 目录经 `-b $LINUX_HOME/run:/run/dshroid` 这个 bind 暴露给环境内。
+> 差别只是 proot 模式的 run 目录经 `-b $LINUX_HOME/run:/run/sunsetlinux` 这个 bind 暴露给环境内。
 
 `exec` 之后 PID 不变，所以 `run/dsh.pid` 就是最终 node 的 PID；proot 不虚拟 PID，
 因此这个 PID 在宿主侧同样有效 —— `linuxctl status` 靠 `PID + /proc/<pid>/stat` 的 starttime
@@ -213,10 +213,10 @@ proot 没有 squashfs 分层，所以字段是**逻辑映射**（键不可省略
    App 私有目录里、属主就是当前 uid，解包/覆盖/删除都不需要 root 身份；
    `/etc/resolv.conf`、`/etc/hosts` 这些由宿主侧写真实文件（不是 proot 合成的视图）。
 3. 需要「装包」这类场景（apt/dpkg 会检查 uid）确实要 `-0`，所以做成**显式开关**：
-   `linuxctl start --fake-root` 或 `DSHROID_PROOT_FAKE_ROOT=1`（另有 `--no-fake-root` 关回去）。
+   `linuxctl start --fake-root` 或 `SUNSETLINUX_PROOT_FAKE_ROOT=1`（另有 `--no-fake-root` 关回去）。
    打开时会：
    * 在 stderr + `run/linux.log` 打印「当前为伪造 root（proot -0）…没有真实 capabilities」；
-   * 把 `DSHROID_FAKE_ROOT=1` 传给环境，`entry.sh` 再警告一次；
+   * 把 `SUNSETLINUX_FAKE_ROOT=1` 传给环境，`entry.sh` 再警告一次；
    * 把选择固化进 `etc/config.json` 的 `fake_root`，`doctor` 读得到。
 
 结论：**伪造 root 是一个需要用户明确点头的降级开关，不是一个默认会被误认成真 root 的状态。**
@@ -231,7 +231,7 @@ proot 没有 squashfs 分层，所以字段是**逻辑映射**（键不可省略
   （实测：proot 内 `du -sh rootfs` 报 7 KB，原生报 16 GB）。
 * 因此 `linuxctl` 检测到自己在被 ptrace 跟踪时**不做现场测量**，只用 `etc/state.json`
   的缓存值，并在 `doctor` 里以 `context` 检查项明确报告。
-  需要强制测量可以设 `DSHROID_ALLOW_TRACED_MEASURE=1`（只在你知道后果时用）。
+  需要强制测量可以设 `SUNSETLINUX_ALLOW_TRACED_MEASURE=1`（只在你知道后果时用）。
 * 推论：**`status`/`doctor` 最好由 App 原生侧调用**。若你的 App 只能用自带 proot 进
   rootfs 调 `linuxctl`，功能可用（PID/信号/HTTP 健康都还准），但容量字段会退化成缓存值。
 
@@ -274,7 +274,7 @@ proot 没有 squashfs 分层，所以字段是**逻辑映射**（键不可省略
 * 没有 zstd 时快照/层包自动回退 `tar.gz`（两条路径都实测过：本机起初没有 zstd，走 gzip；
   后来 `zstd` 出现在 `/usr/bin`，103 MB 的 rootfs 打出 25 MB 的 `.tar.zst` 并成功 restore）。
   Android 系统本身没有 zstd，而 root 版产出的种子/层常是 `.tar.zst`，
-  所以 `linuxctl` 支持把静态 zstd 放进 `$LINUX_HOME/bin/zstd`（或设 `DSHROID_ZSTD`）；
+  所以 `linuxctl` 支持把静态 zstd 放进 `$LINUX_HOME/bin/zstd`（或设 `SUNSETLINUX_ZSTD`）；
   缺 zstd 时会给出明确指引，而不是含糊地失败。
 * 端口冲突、`/data` 被挂载为 `noexec`（proot 二进制没法 exec）都会在 `doctor` 里报出来。
 
@@ -316,22 +316,22 @@ proot 没有 squashfs 分层，所以字段是**逻辑映射**（键不可省略
 
 | 变量 | 作用 |
 |---|---|
-| `DSHROID_APP_FILES` | App 私有 files 目录；默认环境根 = `$DSHROID_APP_FILES/linux` |
+| `SUNSETLINUX_APP_FILES` | App 私有 files 目录；默认环境根 = `$SUNSETLINUX_APP_FILES/sunsetlinux` |
 | `LINUX_HOME` | 直接指定环境根（优先级最高） |
-| `DSHROID_PROOT_CMD` | proot 命令前缀，如 `/system/bin/sh /path/proot-launch.sh`（空格分隔） |
-| `DSHROID_PROOT_BIN` | 单个 proot 可执行文件 |
-| `DSHROID_PROOT_FAKE_ROOT` | `1` 等价 `--fake-root`（默认 0） |
-| `DSHROID_PORT` / `DSHROID_HOST` | 覆盖 `etc/config.json` 里的端口/监听地址 |
-| `DSHROID_START_TIMEOUT` | `start` 等就绪上限（秒，默认 120） |
-| `DSHROID_START_GRACE` | 超过这么多秒还不健康 → `state=error`（默认 90） |
-| `DSHROID_STOP_TIMEOUT` | `stop` 等进程退出上限（秒，默认 20） |
-| `DSHROID_LOCK_TIMEOUT` | 抢锁等待上限（秒，默认 30） |
-| `DSHROID_EXTRA_BINDS` | 追加 bind，空格分隔（`/a:/b /c`）；也支持 `etc/binds` 文件 |
-| `DSHROID_LINK2SYMLINK` | `1` 加 `--link2symlink`（等价 `config.json:link2symlink`） |
-| `DSHROID_SDCARD` | sdcard 宿主路径（默认 `/storage/emulated/0`） |
-| `DSHROID_HOSTNAME` | guest 主机名（默认 `dshroid`） |
-| `DSHROID_ALLOW_TRACED_MEASURE` | `1` 允许在被 ptrace 跟踪时也做容量测量（默认禁止） |
-| `DSHROID_SEED_DIR` | 出厂种子的额外搜索目录 |
+| `SUNSETLINUX_PROOT_CMD` | proot 命令前缀，如 `/system/bin/sh /path/proot-launch.sh`（空格分隔） |
+| `SUNSETLINUX_PROOT_BIN` | 单个 proot 可执行文件 |
+| `SUNSETLINUX_PROOT_FAKE_ROOT` | `1` 等价 `--fake-root`（默认 0） |
+| `SUNSETLINUX_PORT` / `SUNSETLINUX_HOST` | 覆盖 `etc/config.json` 里的端口/监听地址 |
+| `SUNSETLINUX_START_TIMEOUT` | `start` 等就绪上限（秒，默认 120） |
+| `SUNSETLINUX_START_GRACE` | 超过这么多秒还不健康 → `state=error`（默认 90） |
+| `SUNSETLINUX_STOP_TIMEOUT` | `stop` 等进程退出上限（秒，默认 20） |
+| `SUNSETLINUX_LOCK_TIMEOUT` | 抢锁等待上限（秒，默认 30） |
+| `SUNSETLINUX_EXTRA_BINDS` | 追加 bind，空格分隔（`/a:/b /c`）；也支持 `etc/binds` 文件 |
+| `SUNSETLINUX_LINK2SYMLINK` | `1` 加 `--link2symlink`（等价 `config.json:link2symlink`） |
+| `SUNSETLINUX_SDCARD` | sdcard 宿主路径（默认 `/storage/emulated/0`） |
+| `SUNSETLINUX_HOSTNAME` | guest 主机名（默认 `sunsetlinux`） |
+| `SUNSETLINUX_ALLOW_TRACED_MEASURE` | `1` 允许在被 ptrace 跟踪时也做容量测量（默认禁止） |
+| `SUNSETLINUX_SEED_DIR` | 出厂种子的额外搜索目录 |
 
 `etc/config.json` 字段：`port` / `host` / `fake_root` / `link2symlink` / `extra_binds` / `linux_home`。
 
@@ -370,7 +370,7 @@ proot 没有 squashfs 分层，所以字段是**逻辑映射**（键不可省略
      全部通过；`snapshot` 在 zstd 可用时产出 `.tar.zst` 并成功 restore。
   3. **令牌链路（§3.3）**：
      a. `runtime/proot/selftest.sh`（18 条断言）：直接加载 `entry.sh` 的真实解析函数
-        （`DSHROID_ENTRY_LIB=1` 钩子，不碰任何系统文件），用合成日志验证
+        （`SUNSETLINUX_ENTRY_LIB=1` 钩子，不碰任何系统文件），用合成日志验证
         「标准行 / `(LAN: …)` 尾部不贪婪 / 行首空白与 CR / 只有 401 行 → 空 /
         旧令牌被 start_line 过滤 / 缺 `?token=` 不算 / 落盘 0600 / 端口取自 URL /
         非法输入拒绝 / 清理函数」。

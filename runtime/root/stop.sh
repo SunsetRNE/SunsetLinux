@@ -1,6 +1,6 @@
-#!/usr/bin/env bash
+#!/system/bin/sh
 # =============================================================================
-# dshroid · runtime/root/stop.sh
+# sunsetlinux · runtime/root/stop.sh
 #
 # 按 **相反顺序** 整洁卸载 architecture.md §4 的挂载树，并停掉 supervisor。
 #
@@ -14,8 +14,9 @@
 # =============================================================================
 set -uo pipefail
 
-SELF_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
-LINUX_HOME="${LINUX_HOME:-/data/linux}"
+SELF_PATH="${BASH_SOURCE[0]:-$0}"   # mksh 下 BASH_SOURCE 未定义 → 退回 $0
+SELF_DIR="$(cd -- "$(dirname -- "$SELF_PATH")" && pwd -P)"
+LINUX_HOME="${LINUX_HOME:-/data/sunsetlinux}"
 LH="$LINUX_HOME"
 
 RUN_DIR="$LH/run"
@@ -36,18 +37,21 @@ NSENTER=/system/bin/nsenter
 # 兜底卸载顺序（**§4 的严格逆序**）：先叶子后根
 #   mnt/sdcard → dev/shm → dev/pts → dev → sys → proc → run → tmp
 #   → overlay(rootfs) → layers-mnt/* → upper
-FALLBACK_ORDER=(
-    mnt/sdcard
-    dev/shm
-    dev/pts
-    dev
-    sys
-    proc
-    run
-    tmp
-)
+#
+# 用**逐行字符串**而不是数组：本脚本在设备侧由 /system/bin/sh（Android mksh）执行，
+# 不保证有 bash 数组语义。遍历一律 `while IFS= read -r rel; do … done <<EOF`。
+FALLBACK_ORDER="mnt/sdcard
+dev/shm
+dev/pts
+dev
+sys
+proc
+run
+tmp"
 # 层挂载（相对 $LH，不在 rootfs 内）
-LAYER_MNT_REL=( layers-mnt/dsh layers-mnt/runtime layers-mnt/base )
+LAYER_MNT_REL="layers-mnt/dsh
+layers-mnt/runtime
+layers-mnt/base"
 
 log() {
     local line
@@ -128,33 +132,34 @@ kill_stray_dsh() {
 # 2) 反序卸载 rootfs 内的挂载点
 # ---------------------------------------------------------------------------
 unmount_rootfs_tree() {
-    local -a order=()
-    local rel
+    local rel order=""
 
     # 优先用 start.sh 写下的**实际**登记表（精确、反映真实顺序）
     if [ -s "$MOUNTS_FILE" ]; then
         log "按 $MOUNTS_FILE 的登记反序卸载"
-        local -a recorded=()
+        # 登记表是"挂载顺序"，所以每读一行就**前插**，读完即得逆序
+        # （原来的 C 式 for + 数组下标在 mksh 上不可靠）
+        local rec=""
         while IFS= read -r rel; do
-            [ -n "$rel" ] && [ "$rel" != "overlay" ] && recorded+=( "$rel" )
+            [ -n "$rel" ] && [ "$rel" != "overlay" ] && rec="$rel
+$rec"
         done < "$MOUNTS_FILE"
-        local i
-        for (( i=${#recorded[@]}-1; i>=0; i-- )); do
-            order+=( "${recorded[$i]}" )
-        done
+        order="$rec"
     fi
     # 兜底顺序补齐（登记表可能缺失/不全）
-    for rel in "${FALLBACK_ORDER[@]}"; do
-        order+=( "$rel" )
-    done
+    order="${order}${order:+
+}${FALLBACK_ORDER}"
 
     local seen=" "
-    for rel in "${order[@]}"; do
+    while IFS= read -r rel; do
+        [ -n "$rel" ] || continue
         # 去重
         case "$seen" in *" $rel "*) continue ;; esac
         seen="$seen$rel "
         do_umount "$ROOTFS_DIR/$rel" && log "已卸载 $rel" || true
-    done
+    done <<EOF
+$order
+EOF
     return 0
 }
 
@@ -171,9 +176,12 @@ unmount_overlay() {
 # ---------------------------------------------------------------------------
 unmount_layers() {
     local rel
-    for rel in "${LAYER_MNT_REL[@]}"; do
+    while IFS= read -r rel; do
+        [ -n "$rel" ] || continue
         do_umount "$LH/$rel" && log "已卸载 $rel" || true
-    done
+    done <<EOF
+$LAYER_MNT_REL
+EOF
     # 极端情况：squashfs/erofs 层曾经被直接挂在 layers 目录下
     local f
     for f in "$LAYERS_DIR"/*.erofs "$LAYERS_DIR"/*.squashfs; do
@@ -209,13 +217,19 @@ cleanup_run_files() {
 verify_clean() {
     local left=""
     local rel
-    for rel in "${FALLBACK_ORDER[@]}"; do
+    while IFS= read -r rel; do
+        [ -n "$rel" ] || continue
         mountpoint -q "$ROOTFS_DIR/$rel" 2>/dev/null && left="$left $rel"
-    done
+    done <<EOF
+$FALLBACK_ORDER
+EOF
     mountpoint -q "$ROOTFS_DIR" 2>/dev/null && left="$left overlay"
-    for rel in "${LAYER_MNT_REL[@]}"; do
+    while IFS= read -r rel; do
+        [ -n "$rel" ] || continue
         mountpoint -q "$LH/$rel" 2>/dev/null && left="$left $rel"
-    done
+    done <<EOF
+$LAYER_MNT_REL
+EOF
     mountpoint -q "$UPPER_DIR" 2>/dev/null && left="$left upper"
     if [ -n "$left" ]; then
         warn "仍有挂载残留：$left"

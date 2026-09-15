@@ -35,7 +35,7 @@
  *
  * 用法：
  *   node gen-manifest.mjs --dir dist/layers-2026-09-15 \
- *        --name "官方" --base-url https://example.org/dshroid --dsh-dist-tag next
+ *        --name "官方" --base-url https://example.org/sunsetlinux --dsh-dist-tag next
  */
 
 import fs from 'node:fs';
@@ -93,7 +93,7 @@ const spec = {
   'quick-raw': { type: 'boolean', default: false },
 };
 
-const quietStderr = process.env.DSHROID_QUIET === '1';
+const quietStderr = process.env.SUNSETLINUX_QUIET === '1';
 
 function isoUtc(d = new Date()) {
   return `${d.toISOString().slice(0, 19)}Z`;
@@ -101,7 +101,7 @@ function isoUtc(d = new Date()) {
 
 async function main() {
   const argv = process.argv.slice(2);
-  if (wantsHelp(argv)) return printHelp('dshroid 频道清单生成（gen-manifest）', HELP);
+  if (wantsHelp(argv)) return printHelp('sunsetlinux 频道清单生成（gen-manifest）', HELP);
 
   const { values } = parseArgs(argv, spec);
   const dir = path.resolve(values.dir);

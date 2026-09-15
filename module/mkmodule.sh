@@ -3,14 +3,14 @@
 # 打包 KernelSU 模块（把运行时脚本铺进 bin/ 再压成 zip）
 #
 # 为什么需要这个脚本：`module/post-fs-data.sh` 会从 `$MODDIR/bin` 同步运行时脚本到
-# `/data/linux/bin`，而仓库里的 `module/` **本身不含 bin/**（它是打包产物）。
+# `/data/sunsetlinux/bin`，而仓库里的 `module/` **本身不含 bin/**（它是打包产物）。
 # 没有这一步，模块装上去 `bin/` 是空的 → `post-fs-data.sh` 无事可做 →
-# **`/data/linux/bin/linuxctl` 永远不会出现 → App 无法控制环境**。
+# **`/data/sunsetlinux/bin/linuxctl` 永远不会出现 → App 无法控制环境**。
 #
 # 用法：
 #   bash module/mkmodule.sh [--version <ver>] [--out <zip 路径>]
 # 产物：
-#   dist/dshroid-module.zip（+ .sha256、MANIFEST 清单）
+#   dist/sunsetlinux-module.zip（+ .sha256、MANIFEST 清单）
 # =============================================================================
 set -euo pipefail
 
@@ -58,7 +58,7 @@ BIN_REQUIRED=(
     linuxctl.sh          # 主入口（App 通过 su 调用）
     layer-spec.sh        # linuxctl.sh 会 source 它（唯一事实源）
     start.sh  stop.sh  status.sh
-    entry.sh             # 环境内入口（也会被装进 runtime 层的 /opt/dshroid）
+    entry.sh             # 环境内入口（也会被装进 runtime 层的 /opt/sunsetlinux）
     supervise.sh
     doctor.sh
     update.sh            # WebUI / App 的更新入口（缺失→更新功能整块失效）
@@ -193,7 +193,7 @@ log "bin/ 铺入 $(find "$STAGE/bin" -type f | wc -l) 个脚本"
 log "顶层文件：$(find "$STAGE" -maxdepth 1 -type f | wc -l) 个"
 
 # ---- 打包 -------------------------------------------------------------------
-[ -n "$OUT" ] || OUT="$REPO_DIR/dist/dshroid-module-$VERSION.zip"
+[ -n "$OUT" ] || OUT="$REPO_DIR/dist/sunsetlinux-module-$VERSION.zip"
 mkdir -p "$(dirname "$OUT")"
 rm -f "$OUT"
 ( cd "$STAGE" && zip -q -r -X "$OUT" . )

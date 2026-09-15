@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/system/bin/sh
 # =============================================================================
 # root 运行时自测（本机可在**无真 root**下运行）
 #
@@ -9,16 +9,17 @@
 #   症状极具误导性："层明明是好的却报格式不可识别"。
 #
 # 用法：  bash runtime/root/selftest.sh
-# 环境：  DSHROID_FIXTURES 可覆盖夹具目录（默认 <repo>/build/fixtures）
+# 环境：  SUNSETLINUX_FIXTURES 可覆盖夹具目录（默认 <repo>/build/fixtures）
 # 退出码：0 全过；1 有失败
 # =============================================================================
 set -uo pipefail
 
-SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SELF_PATH="${BASH_SOURCE[0]:-$0}"   # mksh 下 BASH_SOURCE 未定义 → 退回 $0
+SELF_DIR="$(cd -- "$(dirname -- "$SELF_PATH")" && pwd -P)"
 REPO_DIR="$(cd "$SELF_DIR/../.." 2>/dev/null && pwd || printf '%s' "$SELF_DIR")"
 # 夹具查找顺序：显式指定 → 脚本同目录/fixtures（**模块安装后自带，真机可用**）→ 仓库 build/fixtures
 FIXTURES=""
-for cand in "${DSHROID_FIXTURES:-}" "$SELF_DIR/fixtures" "$REPO_DIR/build/fixtures" "$SELF_DIR/../build/fixtures"; do
+for cand in "${SUNSETLINUX_FIXTURES:-}" "$SELF_DIR/fixtures" "$REPO_DIR/build/fixtures" "$SELF_DIR/../build/fixtures"; do
     [ -n "$cand" ] && [ -d "$cand" ] && { FIXTURES="$cand"; break; }
 done
 TMP="$(mktemp -d)"
@@ -46,7 +47,7 @@ extract_fmt() { # extract_fmt <脚本路径> <输出文件>
 head_ "夹具检查"
 if [ -z "$FIXTURES" ]; then
     printf '  \033[33mSKIP\033[0m 未找到夹具目录，跳过全部断言（不是失败）\n'
-    printf '       查找顺序：$DSHROID_FIXTURES → %s/fixtures → %s/build/fixtures\n' "$SELF_DIR" "$REPO_DIR"
+    printf '       查找顺序：$SUNSETLINUX_FIXTURES → %s/fixtures → %s/build/fixtures\n' "$SELF_DIR" "$REPO_DIR"
     printf '       模块安装后自带 bin/fixtures/；仓库里在 build/fixtures/。\n'
     exit 0
 fi

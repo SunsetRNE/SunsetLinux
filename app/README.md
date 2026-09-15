@@ -1,4 +1,4 @@
-# DSHroid 启动器（Android App）
+# SunsetLinux 启动器（Android App）
 
 Kotlin + Jetpack Compose + Material 3 的启动器，用于在 Android 上原生运行 DSH
 （Node.js CLI + Web GUI），替代旧的 proot 方案。
@@ -34,7 +34,7 @@ export ANDROID_HOME=/path/to/Android
 | Kotlin | 2.3.10（**AGP 9 内置 Kotlin 支持**，不要再 apply `org.jetbrains.kotlin.android`） |
 | Compose BOM | 2026.01.01（material3 1.4.0 / ui 1.10.2） |
 | compileSdk / targetSdk / minSdk | 35 / 35 / 26 |
-| 包名 | `io.dshroid` |
+| 包名 | `io.github.sunsetrne.sunsetlinux` |
 
 ### 在 aarch64 设备上构建的注意事项
 
@@ -56,8 +56,8 @@ android.aapt2FromMavenOverride=/opt/aapt2-arm64/aapt2
 ## 代码结构
 
 ```
-app/src/main/java/io/dshroid/
-  DshApp.kt               Application：通知渠道 + 全局崩溃处理器
+app/src/main/java/io/github/sunsetrne/sunsetlinux/
+  SunsetLinuxApp.kt               Application：通知渠道 + 全局崩溃处理器
   LauncherActivity.kt     外壳宿主：沉浸式 + 首启门禁 + 权限；界面在 ui/AppShell.kt
   WelcomeActivity.kt      首启引导（选模式 → 分支准备 → 部署 → 完成）
   DiagnosticsActivity.kt  一键诊断：流式 doctor + 复制 + 导出 + 常见失败对照表
@@ -145,7 +145,7 @@ app/src/main/java/io/dshroid/
 
 契约路径是 `$LINUX_HOME/bin/linuxctl`。实际部署中：
 
-- KernelSU 模块 `module/post-fs-data.sh` 会把 `linuxctl.sh` 同步到 `/data/linux/bin/`
+- KernelSU 模块 `module/post-fs-data.sh` 会把 `linuxctl.sh` 同步到 `/data/sunsetlinux/bin/`
   并**建立契约路径软链** `bin/linuxctl` → 一致；
 - proot 运行时包（`dist/droid-proot-runtime.tar.gz`）里只有 `linuxctl.sh`。
 
@@ -187,7 +187,7 @@ app/src/main/java/io/dshroid/
   解码后再与 `sha256_raw`/`size_raw` 比对；`sha256_raw` 通过而 `size_raw` 不符时按
   "清单笔误"告警而非硬失败（否则一条元数据笔误就能让更新永远卡死）。
 
-**测试**：`app/src/test/java/io/dshroid/core/LayerDecompressorTest.kt` 用 `dist/` 里的
+**测试**：`app/src/test/java/io/github/sunsetrne/sunsetlinux/core/LayerDecompressorTest.kt` 用 `dist/` 里的
 **真实产物**验证：两种传输产物解压后**逐字节一致**、`sha256_raw` 匹配、喂错格式必须失败、
 以及 §5.2 规则 1 的选产物矩阵。产物缺失时那几条自动跳过。
 

@@ -1,5 +1,5 @@
 /**
- * tools/channel/common.mjs —— dshroid 频道工具链共用小工具
+ * tools/channel/common.mjs —— sunsetlinux 频道工具链共用小工具
  *
  * 约束（见 docs/architecture.md §5、docs/findings.md §4）：
  *   - 只用 Node 内置模块，零第三方依赖。
@@ -124,7 +124,7 @@ export function wantsHelp(argv) {
 export function printHelp(title, body) {
   process.stdout.write(`${bold(title)}\n\n${body}\n`);
   process.stdout.write(
-    `\n${dim('dshroid 频道工具链 · 详见 docs/updates.md 与 docs/architecture.md §5')}\n`,
+    `\n${dim('sunsetlinux 频道工具链 · 详见 docs/updates.md 与 docs/architecture.md §5')}\n`,
   );
 }
 

@@ -1,6 +1,6 @@
-#!/usr/bin/env bash
+#!/system/bin/sh
 # =============================================================================
-# DSHroid 分层规格 —— 唯一共同事实源
+# SunsetLinux 分层规格 —— 唯一共同事实源
 # =============================================================================
 # `rootfs/build-layers.sh`（宿主/CI 发布构建）与 `rootfs/device-provision.sh`
 # （设备侧原生构建）**必须都 source 本文件**，不得各自内联定义层内容、命名、
@@ -117,11 +117,11 @@ LAYER_BASE_TRIM=(
 # 放在 runtime 层（而不是 base）是因为它们的变更频率属于"运行时"而不是"OS 基线"。
 LAYER_RUNTIME_PATHS=(
   /opt/node            # Node 官方 arm64 静态包 + 全局 pnpm
-  /opt/dshroid         # entry.sh / supervise.sh（环境内入口，只读）
+  /opt/sunsetlinux         # entry.sh / supervise.sh（环境内入口，只读）
 )
-LAYER_RUNTIME_ENTRY_DIR=/opt/dshroid
-LAYER_RUNTIME_ENTRY=/opt/dshroid/entry.sh
-LAYER_RUNTIME_SUPERVISE=/opt/dshroid/supervise.sh
+LAYER_RUNTIME_ENTRY_DIR=/opt/sunsetlinux
+LAYER_RUNTIME_ENTRY=/opt/sunsetlinux/entry.sh
+LAYER_RUNTIME_SUPERVISE=/opt/sunsetlinux/supervise.sh
 
 # ---- dsh 层：DSH 主体 + profile 工作区 --------------------------------------
 LAYER_DSH_PATHS=(
@@ -164,7 +164,11 @@ layer_spec_assert_no_forbidden() {
   [[ -n "$root" && -d "$root" ]] || { printf 'layer-spec: 根目录不存在：%s\n' "$root" >&2; return 1; }
 
   # 直接构造 find 参数：-o 只插在**表达式组之间**，绝不能插在 -name/-path 与其参数之间
-  local args=() i=0
+  # ⚠️ 不能写 `local args=() i=0`：mksh（Android /system/bin/sh）里
+  #    `local x=()` 是**语法错误**，而本文件被 linuxctl 整份 source，
+  #    一个语法错就会让 linuxctl 完全不可用。拆成"先声明、再赋值"。
+  local args i=0
+  args=()
   for f in "${LAYER_FORBIDDEN_PATHS[@]}"; do
     (( i > 0 )) && args+=( -o )
     if [[ "$f" == /* ]]; then

@@ -1,0 +1,100 @@
+# ============================================================================
+# 回归门禁：任何分支推送 / PR 都必须过这一套，否则不允许发布。
+#
+# 为什么把"全部检查"放在一个工作流里：这些检查之间是**互相补位**的关系，
+# 只跑一部分会让问题潜伏到真机才爆 —— 开发中真实发生过：
+#   · `assembleDebug` **不编译 test 源集**，只跑它 → 40 个单测静默失效；
+#   · 单测引用了已删除的符号（theme 改名），而 APK 照样出得来。
+# 所以下面每条都跑，**任一条失败即失败**。
+# ============================================================================
+name: 回归门禁
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+  # 允许发布工作流复用本门禁（release.yml 里 `uses: ./.github/workflows/ci.yml`）
+  # —— 这样"发布前必须过全量回归"是**结构上保证**的，不靠人记得跑。
+  workflow_call:
+
+# 同一分支的旧运行自动取消，省 runner
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  regression:
+    name: 全量回归
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 准备工具（proot 供非 root 运行时自测；zstd 供需；mksh 供设备侧语法闸门）
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq proot zstd mksh
+
+      - name: 脚本断言 — root 运行时
+        run: bash runtime/root/selftest.sh
+
+      # 设备侧真正跑的是 /system/bin/sh（mksh），不是 bash。这一关用 mksh 再跑一遍
+      # 同一套断言 —— 语法闸门只管"能不能解析"，这里才验证"跑起来行为一致"。
+      - name: 脚本断言 — root 运行时（mksh，模拟设备侧）
+        run: mksh runtime/root/selftest.sh
+
+      - name: 脚本断言 — proot 运行时
+        run: bash runtime/proot/selftest.sh
+
+      # 设备上只有 /system/bin/sh（mksh），没有 bash：这一关专门防"本地 bash 跑得通、
+      # 真机一行都跑不了"的语法漂移（历史上真的发生过，见 tools/shell-compat-check.mjs 注释）
+      - name: 断言 — 设备侧脚本能被 mksh 解析
+        run: node tools/shell-compat-check.mjs --verbose
+
+      - name: 断言 — 模块 WebUI 纯函数
+        run: node module/webroot/selftest.mjs
+
+      - name: 断言 — 三方版本比较一致性
+        run: node tools/cmp-consistency.mjs
+
+      - name: 断言 — status JSON 契约（冻结 schema）
+        run: |
+          node tools/contract-check.mjs --cmd 'bash runtime/root/linuxctl.sh status'
+          node tools/contract-check.mjs --cmd 'bash runtime/proot/linuxctl.sh status'
+
+      - name: 断言 — shell/node 语法
+        run: |
+          fail=0
+          while IFS= read -r f; do
+            bash -n "$f" 2>/dev/null || { echo "语法错误: $f"; fail=1; }
+          done < <(find . -name '*.sh' -not -path './app/*' -not -path './build/*' -not -path './dist/*')
+          for f in $(find tools module/webroot -name '*.mjs'); do
+            node --check "$f" 2>/dev/null || { echo "语法错误: $f"; fail=1; }
+          done
+          exit $fail
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+
+      - name: 关掉 Gradle 守护进程（CI 上没必要常驻）
+        run: echo "org.gradle.daemon=false" >> app/gradle.properties
+
+      - name: Android 构建 + 单测（★ 两条一起跑）
+        working-directory: app
+        run: ./gradlew --no-daemon :app:assembleDebug :app:testDebugUnitTest
+
+      - name: 单测结果摘要
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import glob, xml.etree.ElementTree as ET
+          t=f=e=s=0
+          for p in glob.glob('app/app/build/test-results/**/*.xml', recursive=True):
+              r=ET.parse(p).getroot()
+              t+=int(r.get('tests',0)); f+=int(r.get('failures',0))
+              e+=int(r.get('errors',0)); s+=int(r.get('skipped',0))
+          print(f"单测汇总：tests={t} failures={f} errors={e} skipped={s}")
+          raise SystemExit(1 if (f or e or t == 0) else 0)
+          PY

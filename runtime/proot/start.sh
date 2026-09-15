@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # =============================================================================
-# DSHroid — proot 模式启动器（start.sh）                v1.0.0
+# SunsetLinux — proot 模式启动器（start.sh）                v1.0.0
 #
-# 职责：把 rootfs「用 proot 装起来」，然后 exec rootfs 内的 /opt/dshroid/entry.sh。
+# 职责：把 rootfs「用 proot 装起来」，然后 exec rootfs 内的 /opt/sunsetlinux/entry.sh。
 #
 # 相对上游 DSHA 的四个硬改进（都在这一个文件里落实）：
 #   1) **不用 -0 伪造 root**。默认保持真实 uid（App 的 uid），需要写 rootfs 的地方
 #      靠「rootfs 本来就在 App 私有目录里、属主就是当前用户」解决，不需要 root 身份。
-#      确实要 -0（比如装包）时用 --fake-root / DSHROID_PROOT_FAKE_ROOT=1 显式打开，
+#      确实要 -0（比如装包）时用 --fake-root / SUNSETLINUX_PROOT_FAKE_ROOT=1 显式打开，
 #      并会在 stderr + 日志里明确写「当前为伪造 root，能力受限」。
 #   2) **不用 --kill-on-exit**。用 setsid + nohup 让 proot 进入独立会话，PID 记到
 #      run/proot.pid，生命周期尽量与调用方（App/终端）解耦。
@@ -21,12 +21,12 @@
 #   start.sh --inner -- <cmd> [args...]                    # 前台进入环境执行命令（linuxctl 用）
 #
 # 环境变量：
-#   LINUX_HOME / DSHROID_APP_FILES  环境根（见 linuxctl.sh）
-#   DSHROID_PROOT_BIN               proot 可执行文件（默认优先 $LINUX_HOME/proot/proot-launch.sh）
-#   DSHROID_START_TIMEOUT           等待就绪上限（秒，默认 120）
-#   DSHROID_HOSTNAME                guest 主机名（默认 dshroid）
-#   DSHROID_SDCARD                  sdcard 宿主路径（默认 /storage/emulated/0）
-#   DSHROID_EXTRA_BINDS            额外 bind，空格分隔，形如 "/a:/b /c"
+#   LINUX_HOME / SUNSETLINUX_APP_FILES  环境根（见 linuxctl.sh）
+#   SUNSETLINUX_PROOT_BIN               proot 可执行文件（默认优先 $LINUX_HOME/proot/proot-launch.sh）
+#   SUNSETLINUX_START_TIMEOUT           等待就绪上限（秒，默认 120）
+#   SUNSETLINUX_HOSTNAME                guest 主机名（默认 sunsetlinux）
+#   SUNSETLINUX_SDCARD                  sdcard 宿主路径（默认 /storage/emulated/0）
+#   SUNSETLINUX_EXTRA_BINDS            额外 bind，空格分隔，形如 "/a:/b /c"
 # =============================================================================
 set -euo pipefail
 
@@ -34,10 +34,10 @@ SCHEMA_VERSION=1
 MODE="proot"
 SELF_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd -P)
 
-START_TIMEOUT=${DSHROID_START_TIMEOUT:-120}
-HOSTNAME_GUEST=${DSHROID_HOSTNAME:-dshroid}
-SDCARD_HOST=${DSHROID_SDCARD:-/storage/emulated/0}
-GUEST_RUNDIR=/run/dshroid          # 宿主 $LINUX_HOME/run 通过 bind 出现在 guest 的这个位置
+START_TIMEOUT=${SUNSETLINUX_START_TIMEOUT:-120}
+HOSTNAME_GUEST=${SUNSETLINUX_HOSTNAME:-sunsetlinux}
+SDCARD_HOST=${SUNSETLINUX_SDCARD:-/storage/emulated/0}
+GUEST_RUNDIR=/run/sunsetlinux          # 宿主 $LINUX_HOME/run 通过 bind 出现在 guest 的这个位置
 # 注意：本脚本跑在宿主侧，读 run 文件必须用宿主路径 $RUN_DIR/*；
 # GUEST_RUNDIR 只用于拼 bind 参数与传给 entry.sh 的环境变量。
 
@@ -107,12 +107,12 @@ fail_json() { # fail_json <exit> <message>
 # 路径解析
 # -----------------------------------------------------------------------------
 resolve_paths() {
-  local home="${LINUX_HOME:-}" appfiles="${DSHROID_APP_FILES:-}"
+  local home="${LINUX_HOME:-}" appfiles="${SUNSETLINUX_APP_FILES:-}"
   if [[ -n "$home" ]]; then :
   elif [[ -n "$appfiles" ]]; then home="${appfiles%/}/linux"
   elif [[ -d "$SELF_DIR/../rootfs" ]]; then home=$(cd -- "$SELF_DIR/.." >/dev/null 2>&1 && pwd -P)
   else
-    fail_json 2 "未找到环境根：请设置 LINUX_HOME 或 DSHROID_APP_FILES（默认环境根 = \$DSHROID_APP_FILES/linux）。"
+    fail_json 2 "未找到环境根：请设置 LINUX_HOME 或 SUNSETLINUX_APP_FILES（默认环境根 = \$SUNSETLINUX_APP_FILES/sunsetlinux）。"
   fi
   LINUX_HOME=$home
   ROOTFS="$LINUX_HOME/rootfs"
@@ -152,18 +152,18 @@ resolve_proot() {
   local cand="" src="" interp="" sh=""
 
   # 1) 显式命令前缀（最可靠，Android 上常用：/system/bin/sh /path/proot-launch.sh）
-  if [[ -n "${DSHROID_PROOT_CMD:-}" ]]; then
+  if [[ -n "${SUNSETLINUX_PROOT_CMD:-}" ]]; then
     # shellcheck disable=SC2206
-    PROOT_CMD=(${DSHROID_PROOT_CMD})
+    PROOT_CMD=(${SUNSETLINUX_PROOT_CMD})
     [[ -e "${PROOT_CMD[0]}" || -x "${PROOT_CMD[0]}" ]] || \
-      fail_json 1 "DSHROID_PROOT_CMD 的第一个元素不存在：${PROOT_CMD[0]}"
-    log "proot 命令前缀（DSHROID_PROOT_CMD）：${PROOT_CMD[*]}"
+      fail_json 1 "SUNSETLINUX_PROOT_CMD 的第一个元素不存在：${PROOT_CMD[0]}"
+    log "proot 命令前缀（SUNSETLINUX_PROOT_CMD）：${PROOT_CMD[*]}"
     return 0
   fi
 
   # 2) 单个可执行文件
-  if [[ -n "${DSHROID_PROOT_BIN:-}" ]]; then
-    cand=$DSHROID_PROOT_BIN; src="DSHROID_PROOT_BIN"
+  if [[ -n "${SUNSETLINUX_PROOT_BIN:-}" ]]; then
+    cand=$SUNSETLINUX_PROOT_BIN; src="SUNSETLINUX_PROOT_BIN"
   else
     # 3) 随包 bundle 优先（proot-launch.sh 会用自己的 lib 加载 proot，不依赖宿主库）
     for cand in "$LINUX_HOME/proot/proot-launch.sh" "$BIN_DIR/proot-launch.sh" \
@@ -181,8 +181,8 @@ resolve_proot() {
   [[ -n "$cand" && -f "$cand" ]] || fail_json 1 "找不到可用的 proot。
   请先产出随包 bundle：tools/proot-bundle/mkproot-bundle.sh，
   再把 dist/proot-bundle-arm64.tar.gz 解包到 \$LINUX_HOME/proot/（含 proot-launch.sh + lib/）。
-  也可以临时用 DSHROID_PROOT_BIN=/path/to/proot 或
-  DSHROID_PROOT_CMD='/system/bin/sh /path/to/proot-launch.sh' 指定。"
+  也可以临时用 SUNSETLINUX_PROOT_BIN=/path/to/proot 或
+  SUNSETLINUX_PROOT_CMD='/system/bin/sh /path/to/proot-launch.sh' 指定。"
 
   # 脚本型包装器：shebang 解释器在 Android 上可能不存在（典型：#!/bin/sh 但只有 /system/bin/sh），
   # 这时显式用找得到的 sh 去跑它，避免 ENOENT。
@@ -239,7 +239,7 @@ build_proot_args() {
   add_bind "/proc/self/fd:/dev/fd" 0
   add_bind "$SDCARD_HOST:/sdcard" 0
 
-  # 控制通道：宿主 $LINUX_HOME/run ↔ guest /run/dshroid。
+  # 控制通道：宿主 $LINUX_HOME/run ↔ guest /run/sunsetlinux。
   # 有了它，entry.sh 才能把 dsh.pid / dsh.port / linux.log 写回宿主可见的位置，
   # 而 proot 模式下这是唯一可靠的「状态交换」方式（不依赖 -0，也不伪造 /proc）。
   PROOT_ARGS+=(-b "$RUN_DIR:$GUEST_RUNDIR")
@@ -254,14 +254,14 @@ build_proot_args() {
       add_bind "$spec" 0
     done <"$binds_file"
   fi
-  if [[ -n "${DSHROID_EXTRA_BINDS:-}" ]]; then
-    for spec in $DSHROID_EXTRA_BINDS; do add_bind "$spec" 0; done
+  if [[ -n "${SUNSETLINUX_EXTRA_BINDS:-}" ]]; then
+    for spec in $SUNSETLINUX_EXTRA_BINDS; do add_bind "$spec" 0; done
   fi
 
   # 可选：npm 在 FUSE/不支持硬链接的文件系统上需要 link2symlink 兜底
   local l2s=""
   l2s=$(json_get_bool "$ETC_DIR/config.json" link2symlink)
-  if [[ "$l2s" == "true" || "${DSHROID_LINK2SYMLINK:-0}" == "1" ]]; then
+  if [[ "$l2s" == "true" || "${SUNSETLINUX_LINK2SYMLINK:-0}" == "1" ]]; then
     PROOT_ARGS+=(--link2symlink)
     log "已启用 --link2symlink（npm/硬链接兜底；会让 hard link 表现为 symlink）"
   fi
@@ -344,9 +344,9 @@ prepare_dns() {
   DNS_SOURCE=${first_src:-未知}
 
   mkdir -p -- "$ROOTFS/etc" 2>/dev/null || fail_json 1 "无法创建 $ROOTFS/etc"
-  local tmp="$ROOTFS/etc/resolv.conf.dshroid.$$"
+  local tmp="$ROOTFS/etc/resolv.conf.sunsetlinux.$$"
   {
-    printf '# 由 DSHroid start.sh 写入 %s（来源：%s）\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$DNS_SOURCE"
+    printf '# 由 SunsetLinux start.sh 写入 %s（来源：%s）\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$DNS_SOURCE"
     printf '# 不要手动编辑：每次 start 都会按 Android 当前 DNS 重写。\n'
     local x
     for x in "${DNS_IPS[@]}"; do printf 'nameserver %s\n' "$x"; done
@@ -368,7 +368,7 @@ prepare_tz() {
   [[ -n "$tz" && "$tz" != "null" ]] || tz="UTC"
   TZ_GUEST=$tz
   export TZ="$tz"
-  printf '%s\n' "$tz" >"$ROOTFS/etc/dshroid-tz" 2>/dev/null || true
+  printf '%s\n' "$tz" >"$ROOTFS/etc/sunsetlinux-tz" 2>/dev/null || true
   log "时区：$tz"
   return 0
 }
@@ -449,7 +449,7 @@ launch_background() {
     prog=$1
     shift
     exec "$prog" "$@"
-  ' _ "$RUN_DIR/proot.pid" "${PROOT_ARGS[@]}" /opt/dshroid/entry.sh >>"$LOG_FILE" 2>&1 </dev/null &
+  ' _ "$RUN_DIR/proot.pid" "${PROOT_ARGS[@]}" /opt/sunsetlinux/entry.sh >>"$LOG_FILE" 2>&1 </dev/null &
 
   log "已后台启动（独立会话，日志追加到 $LOG_FILE）"
   return 0
@@ -528,24 +528,24 @@ main() {
 
   # 明确拒绝注入式补丁：NODE_OPTIONS --import=... 是 DSHA 那套脆弱做法的根源
   if [[ -n "${NODE_OPTIONS:-}" ]]; then
-    warn "检测到继承来的 NODE_OPTIONS，已清除（DSHroid 不使用 --import 注入式补丁）：$NODE_OPTIONS"
+    warn "检测到继承来的 NODE_OPTIONS，已清除（SunsetLinux 不使用 --import 注入式补丁）：$NODE_OPTIONS"
     unset NODE_OPTIONS
   fi
 
   [[ -d "$ROOTFS" ]] || fail_json 1 "rootfs 不存在：$ROOTFS（先执行 linuxctl provision --seed <dir>）"
   [[ -e "$ROOTFS/bin/sh" || -e "$ROOTFS/bin/bash" ]] || \
     fail_json 1 "rootfs 不完整（找不到 /bin/sh）：$ROOTFS。请 linuxctl reset 或 provision --seed 重新部署。"
-  [[ -f "$ROOTFS/opt/dshroid/entry.sh" ]] || \
-    fail_json 1 "rootfs 内缺少 /opt/dshroid/entry.sh。请先执行 linuxctl provision（会把 entry.sh 装进去）。"
+  [[ -f "$ROOTFS/opt/sunsetlinux/entry.sh" ]] || \
+    fail_json 1 "rootfs 内缺少 /opt/sunsetlinux/entry.sh。请先执行 linuxctl provision（会把 entry.sh 装进去）。"
 
-  mkdir -p -- "$RUN_DIR" "$ROOTFS/root" "$ROOTFS/run/dshroid" "$ROOTFS/var/run" "$ROOTFS/sdcard" 2>/dev/null || true
+  mkdir -p -- "$RUN_DIR" "$ROOTFS/root" "$ROOTFS/run/sunsetlinux" "$ROOTFS/var/run" "$ROOTFS/sdcard" 2>/dev/null || true
 
   resolve_proot
 
   # 伪造 root 的决策顺序：命令行 > 环境变量 > config.json（默认 false）
   FAKE_ROOT=""
   if [[ -n "$FAKE_ROOT_FLAG" ]]; then FAKE_ROOT=$FAKE_ROOT_FLAG
-  elif [[ -n "${DSHROID_PROOT_FAKE_ROOT:-}" ]]; then FAKE_ROOT=$([[ "${DSHROID_PROOT_FAKE_ROOT}" =~ ^(1|true|yes|on)$ ]] && printf 1 || printf 0)
+  elif [[ -n "${SUNSETLINUX_PROOT_FAKE_ROOT:-}" ]]; then FAKE_ROOT=$([[ "${SUNSETLINUX_PROOT_FAKE_ROOT}" =~ ^(1|true|yes|on)$ ]] && printf 1 || printf 0)
   else
     FAKE_ROOT=$(json_get_bool "$ETC_DIR/config.json" fake_root)
   fi
@@ -564,24 +564,24 @@ main() {
   load_env_file
 
   local port="" host="127.0.0.1"
-  port=${DSHROID_PORT:-}
+  port=${SUNSETLINUX_PORT:-}
   [[ -n "$port" ]] || port=$(json_get_num "$ETC_DIR/config.json" port)
   [[ -n "$port" ]] || port=3080
-  host=${DSHROID_HOST:-}
+  host=${SUNSETLINUX_HOST:-}
   [[ -n "$host" ]] || host=$(sed -n 's/.*"host"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$ETC_DIR/config.json" 2>/dev/null | head -1 || true)
   [[ -n "$host" ]] || host=127.0.0.1
 
   # 传给 guest 的环境变量（这是密钥进环境的唯一通道，命令行里永远没有它们）
-  export DSHROID_PORT="$port"
-  export DSHROID_HOST="$host"
-  export DSHROID_RUN_DIR="$GUEST_RUNDIR"
-  export DSHROID_LINUX_HOME="$LINUX_HOME"
-  export DSHROID_HOSTNAME="$HOSTNAME_GUEST"
-  export DSHROID_FAKE_ROOT="$FAKE_ROOT"
-  export DSHROID_DNS_SOURCE="$DNS_SOURCE"
-  export DSHROID_TZ="$TZ_GUEST"
+  export SUNSETLINUX_PORT="$port"
+  export SUNSETLINUX_HOST="$host"
+  export SUNSETLINUX_RUN_DIR="$GUEST_RUNDIR"
+  export SUNSETLINUX_LINUX_HOME="$LINUX_HOME"
+  export SUNSETLINUX_HOSTNAME="$HOSTNAME_GUEST"
+  export SUNSETLINUX_FAKE_ROOT="$FAKE_ROOT"
+  export SUNSETLINUX_DNS_SOURCE="$DNS_SOURCE"
+  export SUNSETLINUX_TZ="$TZ_GUEST"
   export TZ="$TZ_GUEST"
-  export DSHROID_TOP="$LINUX_HOME"
+  export SUNSETLINUX_TOP="$LINUX_HOME"
 
   if (( MODE_INNER )); then
     # 前台进入环境执行命令：stdout/退出码都属于被执行的命令本身

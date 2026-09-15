@@ -1,4 +1,4 @@
-# DSHroid 启动器 —— Gradle 版本目录
+# SunsetLinux 启动器 —— Gradle 版本目录
 #
 # 版本选择依据（本机 aarch64 / Android 16）：
 # * AGP 9.0.0：本机构建缓存中唯一可用的大版本；AGP 8.x 的 aapt2 只发布 x86-64/部分

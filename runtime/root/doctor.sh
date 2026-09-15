@@ -1,6 +1,6 @@
-#!/usr/bin/env bash
+#!/system/bin/sh
 # =============================================================================
-# dshroid · runtime/root/doctor.sh
+# sunsetlinux · runtime/root/doctor.sh
 #
 # 自检：内核能力 / 层完整性 / 可写层可挂性 / 端口占用 / SELinux denial / proot
 #       可用性 / DSH profile 可解析性。
@@ -18,7 +18,7 @@ set -uo pipefail
 # 脚本自身目录：用于定位可选的辅助脚本（detect-mount.sh 等）
 SELF_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")" && pwd -P)"
 
-LINUX_HOME="${LINUX_HOME:-/data/linux}"
+LINUX_HOME="${LINUX_HOME:-/data/sunsetlinux}"
 LH="$LINUX_HOME"
 LAYERS_DIR="$LH/layers"
 ETC_DIR="$LH/etc"
@@ -110,9 +110,13 @@ jesc() {
     printf '%s' "$s"
 }
 
-# 收集给 JSON 的结论（用 bash 数组，避免依赖外部工具）
-declare -a FINDINGS=()
-add_finding() { FINDINGS+=( "{\"level\":\"$1\",\"id\":\"$(jesc "$2")\",\"detail\":\"$(jesc "$3")\"}" ); }
+# 收集给 JSON 的结论（**纯 POSIX 字符串累加**，不依赖数组）
+#
+# ⚠️ 为什么不用数组：本脚本在**设备侧**由 /system/bin/sh（Android mksh）执行，不是 bash。
+#    `declare -a` 在 mksh 里是**语法错误** → 整个脚本一行都跑不了（真机上实测过）。
+#    逗号就地拼好（`${FINDINGS:+,}`），省掉输出端的 first 标志。
+FINDINGS=""
+add_finding() { FINDINGS="${FINDINGS}${FINDINGS:+,}{\"level\":\"$1\",\"id\":\"$(jesc "$2")\",\"detail\":\"$(jesc "$3")\"}"; }
 
 # ===========================================================================
 head_ "0. 运行环境"
@@ -320,7 +324,7 @@ head_ "1c. 挂载实现（root 管理器 / KernelSU metamodule）"
 # 背景（实测）：KernelSU 某版本起**删掉了自带的模块挂载实现**，改为完全交给第三方
 # metamodule（具体实现由第三方提供，各设备不同）；Magisk 仍是原生挂载。
 # 社区里大量模块是"自动挂载"型，它们的假设在装了 metamodule 的环境里经常不成立。
-# DSHroid 是**纯脚本模块**（module/ 下没有 system/、vendor/ 等目录），**不需要挂载**，
+# SunsetLinux 是**纯脚本模块**（module/ 下没有 system/、vendor/ 等目录），**不需要挂载**，
 # 所以不受这次变动影响 —— 这条要在报告里明确讲出来，省掉用户排查。
 #
 # ★ 上下文守卫（重要）：/data/adb 在不同上下文可见性完全不同 ——
@@ -536,7 +540,7 @@ else
     ok "upper.img 存在（表观 $(( usize / 1024 / 1024 / 1024 )) GiB，稀疏）"
     # 只读试挂：挂到临时目录，立刻卸载（绝不改内容）
     if [ -w /dev ] || [ -e /dev/block/loop-control ]; then
-        TMPMNT="$(mktemp -d 2>/dev/null || echo /tmp/dshroid-doctor-mnt)"
+        TMPMNT="$(mktemp -d 2>/dev/null || echo /tmp/sunsetlinux-doctor-mnt)"
         mkdir -p "$TMPMNT"
         if "$MOUNT" -t ext4 -o loop,ro "$UPPER_IMG" "$TMPMNT" 2>/dev/null; then
             ok "upper.img 可挂载（ext4, loop, ro）"
@@ -648,7 +652,7 @@ fi
 # ===========================================================================
 head_ "6. proot 降级路线可用性"
 PROOT_BIN=""
-for c in "$LH/bin/proot" /usr/bin/proot /system/bin/proot /data/adb/dshroid/proot; do
+for c in "$LH/bin/proot" /usr/bin/proot /system/bin/proot /data/adb/sunsetlinux/proot; do
     [ -x "$c" ] && { PROOT_BIN="$c"; break; }
 done
 if [ -n "$PROOT_BIN" ]; then
@@ -772,16 +776,8 @@ else
 fi
 
 # 结尾一行 JSON（App / 自动化解析用）
-{
-    printf '{"schema":1,"ok":%s,"fails":%d,"warns":%d,"linux_home":"%s","findings":[' \
-        "$([ "$FAILS" -eq 0 ] && echo true || echo false)" "$FAILS" "$WARNS" "$(jesc "$LH")"
-    first=1
-    for f in "${FINDINGS[@]}"; do
-        [ "$first" = 1 ] || printf ','
-        printf '%s' "$f"
-        first=0
-    done
-    printf ']}\n'
-}
+# findings 已由 add_finding 拼成逗号分隔的完整数组体，这里直接嵌进去
+printf '{"schema":1,"ok":%s,"fails":%d,"warns":%d,"linux_home":"%s","findings":[%s]}\n' \
+    "$([ "$FAILS" -eq 0 ] && echo true || echo false)" "$FAILS" "$WARNS" "$(jesc "$LH")" "$FINDINGS"
 
 [ "$FAILS" -eq 0 ] && exit 0 || exit 1

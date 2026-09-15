@@ -1,11 +1,11 @@
-# DSHroid
+# SunsetLinux
 
 在 Android 手机上**原生**运行 [DSH](https://www.npmjs.com/package/@deepseek-ai/dsh)（DeepSeek Harness）的移植方案。
 
 用**真 root + 真 chroot + overlayfs 分层 rootfs** 取代现有的 PRoot 方案（如 DSHA），
 目标是：真 capabilities、环境不被 App 杀死、更新只下变化的那一层、任何人都能自建更新频道。
 
-> 工作名 `dshroid` / 包名 `io.dshroid`，都可随意改。
+> 工作名 `sunsetlinux` / 包名 `io.github.sunsetrne.sunsetlinux`，都可随意改。
 
 ## 为什么不用现成方案
 
@@ -72,6 +72,9 @@
 | [`docs/ksu-webui-api.md`](docs/ksu-webui-api.md) | KernelSU 模块 WebUI（`webroot/`）与 `ksu` JS API 的**实测签名** |
 | [`docs/smoke-test.md`](docs/smoke-test.md) | **真机冒烟测试**：照着跑、把输出发回来的清单（含已知阻塞项） |
 | [`docs/updates.md`](docs/updates.md) | 频道/更新/签名，面向用户与第三方发布者 |
+| [`docs/uninstall.md`](docs/uninstall.md) | **卸载与清理**：默认保留什么、怎么真正清干净、怎么验证清干净了 |
+| [`docs/naming.md`](docs/naming.md) | **命名体系**：为什么叫 SunsetLinux、改名清单、哪些名字绝不能动 |
+| [`docs/release-ci.md`](docs/release-ci.md) | 分支式发布、回归门禁、层产物为什么不每次重建 |
 | [`docs/repo-strategy.md`](docs/repo-strategy.md) | **仓库策略**：为什么是单仓、什么时候才该拆、怎么拆才不痛 |
 
 ## 许可边界（分发前必读）
@@ -99,7 +102,7 @@ DSH 的移动端体验靠 `~/.dsh/profiles/` 里的插件提供。我们实测�
 ## 仓库结构
 
 ```
-dshroid/
+sunsetlinux/
   docs/          # findings / architecture / dsh-profile / install / updates / smoke-test
   rootfs/        # layer-spec.sh（唯一事实源）+ 分层构建脚本 + 包列表 + profile 模板
   runtime/       # root 与 proot 两套运行时（linuxctl 等）
@@ -120,16 +123,16 @@ cd dist && sha256sum -c <(awk 'NF>=3 && $2 ~ /^[0-9]+$/ {print $3"  "$1}' MANIFE
 
 | 产物 | 说明 |
 |---|---|
-| `dshroid-launcher-debug.apk` | Android 启动器（装它） |
-| `dshroid-module-0.1.0.zip` | KernelSU 模块（**开机自启、让环境不依赖 App**；内含运行时脚本 + 挂载探测 + 模块 WebUI） |
+| `sunsetlinux-launcher-debug.apk` | Android 启动器（装它） |
+| `sunsetlinux-module-0.1.0.zip` | KernelSU 模块（**开机自启、让环境不依赖 App**；内含运行时脚本 + 挂载探测 + 模块 WebUI） |
 | `base-*.erofs.{zst,gz}` / `runtime-*.erofs.{zst,gz}` / `dsh-*.erofs.{zst,gz}` | 三层 rootfs（可从频道分发；设备侧也能自己构建） |
-| `dshroid-seed-*.tar.zst` | 离线种子（ubuntu-base + Node 官方包） |
+| `sunsetlinux-seed-*.tar.zst` | 离线种子（ubuntu-base + Node 官方包） |
 | `proot-bundle-arm64.tar.gz` | 非 root 模式用的 proot 二进制（GPLv2 合规） |
 | `channel/` | **一份完整可发布的频道**：`channel.json` + `.sig` + 三层两式产物（已跑通 `gen-manifest → sign → verify --deep → publish-check`） |
 
 步骤：
 
-1. 装 APK：`adb install -r dist/dshroid-launcher-debug.apk`
+1. 装 APK：`adb install -r dist/sunsetlinux-launcher-debug.apk`
 2. 打包并刷模块：`bash module/mkmodule.sh --version 0.1.0` → 用 KernelSU 管理器安装生成的 zip
 3. 按 [`docs/smoke-test.md`](docs/smoke-test.md) 在 root 终端跑一次冒烟测试
    （**挂载与安装步骤必须由你执行**，原因见该文档开头）

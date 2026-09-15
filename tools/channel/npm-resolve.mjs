@@ -12,8 +12,8 @@
  *   6. 把验过的两份文件写到 --out 目录，并打印 JSON 摘要（stdout）
  *
  * 用法：
- *   node npm-resolve.mjs --package dshroid-channel-dev --pub <base64|文件> [--version latest]
- *   node npm-resolve.mjs --channels /data/linux/etc/channels.json --id dev
+ *   node npm-resolve.mjs --package sunsetlinux-channel-dev --pub <base64|文件> [--version latest]
+ *   node npm-resolve.mjs --channels /data/sunsetlinux/etc/channels.json --id dev
  *   node npm-resolve.mjs --channels channels.json --all-npm          # 所有启用的 npm 频道
  */
 
@@ -32,7 +32,7 @@ const HELP = `用法：node npm-resolve.mjs [选项]
 解析一个「npm 形态」的频道（npm 只是传输渠道，**信任根仍是公钥验签**）。
 
 指定频道（二选一）：
-  --package <npm 包名>     npm 包名（可带 scope，如 @me/dshroid-channel）
+  --package <npm 包名>     npm 包名（可带 scope，如 @me/sunsetlinux-channel）
   --version <spec>         npm spec：dist-tag（latest/next）| 确切版本 | 范围（^1.2.0 / ~1.2 / 1.x / >=1.0.0）默认 latest
   --pub <文件|base64>      频道公钥（**必须由用户提供**，绝不从包里读）
   --channels <文件>        或者：从 channels.json 里取条目
@@ -115,7 +115,7 @@ async function resolveOne(entry, values) {
 
 async function main() {
   const argv = process.argv.slice(2);
-  if (wantsHelp(argv)) return printHelp('dshroid npm 频道解析（npm-resolve）', HELP);
+  if (wantsHelp(argv)) return printHelp('sunsetlinux npm 频道解析（npm-resolve）', HELP);
   const { values } = parseArgs(argv, spec);
 
   let entries = [];

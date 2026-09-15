@@ -7,7 +7,7 @@
 
       windowBackground = #070C16：冷启动第一帧就是深墨蓝，不会先闪一下白。
     -->
-    <style name="Theme.Dshroid" parent="@android:style/Theme.Material.NoActionBar">
+    <style name="Theme.SunsetLinux" parent="@android:style/Theme.Material.NoActionBar">
         <item name="android:windowBackground">@color/dsh_bg</item>
         <item name="android:statusBarColor">@android:color/transparent</item>
         <item name="android:navigationBarColor">@android:color/transparent</item>
@@ -19,5 +19,5 @@
       LauncherActivity 用这个：API 31+ 在 values-v31 里补上 SplashScreen 相关属性，
       低版本这里只是一个空继承（避免在 Android 12 上启动画面用系统默认的浅色底）。
     -->
-    <style name="Theme.Dshroid.Splash" parent="Theme.Dshroid" />
+    <style name="Theme.SunsetLinux.Splash" parent="Theme.SunsetLinux" />
 </resources>

@@ -1,4 +1,4 @@
-# DSHroid 架构与接口契约
+# SunsetLinux 架构与接口契约
 
 > 目标：在 Android 上自建一套**可原生运行、可增量更新、可第三方分发**的 DSH 运行环境，替代 DSHA(proot) 的体验。
 > 本文件是唯一事实源。所有组件必须严格遵守这里的路径、命令与 JSON schema。
@@ -15,7 +15,7 @@
 | 界面丑 | 启动器用 Kotlin + **Compose Material 3** 重做 |
 | 更新又拖又慢 | **三层 erofs 分层**，只更新变化的那层；支持断点续传与本地种子 |
 | 拿不到第三方内测 | **可插拔频道**：任何人有公钥即可建频道；DSH 版本按 npm dist-tag（`latest`/`next`/`alpha`）或自定义 tarball 选择 |
-| 数据易失 | 环境根在 `/data/linux`（非 App 私有），卸载 App 不丢；可写层可快照 |
+| 数据易失 | 环境根在 `/data/sunsetlinux`（非 App 私有），卸载 App 不丢；可写层可快照 |
 
 ---
 
@@ -28,29 +28,50 @@
 | 底座 | 真 root（KernelSU）+ 真 chroot | PRoot（ptrace） |
 | 隔离 | `unshare -m` + `unshare -u` | 无 |
 | 分层 | overlayfs：erofs(lower) + ext4(upper) | 无 overlay，直接目录 |
-| 环境根 | `/data/linux` | `$APP_FILES/linux` |
+| 环境根 | `/data/sunsetlinux` | `$APP_FILES/sunsetlinux` |
 | sdcard | `/mnt/pass_through/0/emulated` 直挂（绕 FUSE） | `/storage/emulated/0`（FUSE） |
 | 生命周期 | 与 App **解耦**；KernelSU 模块开机自启 | 随 App 进程 |
 | 定位 | 主力 | 兼容兜底 |
 
-两种模式**共用同一个 Linux 侧入口**：`/opt/dshroid/entry.sh`（在 rootfs 内），
+两种模式**共用同一个 Linux 侧入口**：`/opt/sunsetlinux/entry.sh`（在 rootfs 内），
 只有"如何进入 rootfs"的启动器不同。这样行为一致、便于测试。
+
+### 1.1 ★ 宿主侧脚本的 shell 约束（**冻结，踩过坑**）
+
+**Android 上没有 bash。** `/system/bin/bash` 不存在，`/system/bin/sh` 是 **mksh**。
+因此：
+
+| 脚本 | 运行位置 | 解释器约束 |
+|---|---|---|
+| `module/*.sh` | Android（KernelSU 调用） | 必须 `#!/system/bin/sh` 且能被 mksh 解析 |
+| `runtime/root/*.sh` | Android（`su -c` / 开机自启 / App 调用） | 同上（`linuxctl` 会被 App **直接执行**，吃 shebang） |
+| `runtime/common/*.sh` | Android（被 `linuxctl` **整份 source**） | 同上：一个语法错就让整个 `linuxctl` 报废 |
+| `rootfs/{layer-spec,device-provision}.sh` | Android（`layer-spec.sh` 被 source） | 同上 |
+| `runtime/root/{entry,supervise}.sh` | **chroot 后**的 Ubuntu 内 | 可用 bash（环境内一定有） |
+
+**禁止**在宿主侧脚本里使用：`declare -a` / `local x=()`、C 式 `for (( … ))`、
+`${var:i:1}`、进程替换 `>(…)`、`[[ =~ ]]`。
+`[[ ]]`、`${v//pat/rep}`、`+=`（数组追加）在 mksh R59 里**可用**，但仍不推荐。
+
+> 为什么写成冻结约束：这不是理论问题。改名前实测 `mksh -n runtime/root/start.sh`
+> 直接报 `syntax error: unexpected '('` —— 也就是说真机上 `linuxctl start` 从来没能
+> 跑起来过。现在 `tools/shell-compat-check.mjs` 在 CI 里守着这条线。
 
 ---
 
 ## 2. 设备侧目录布局
 
-### 2.1 root 模式（`LINUX_HOME=/data/linux`）
+### 2.1 root 模式（`LINUX_HOME=/data/sunsetlinux`）
 
 ```
-/data/linux/
+/data/sunsetlinux/
   etc/
     config.json          # 运行配置（端口、模式、开机自启、冻结豁免）
     channels.json        # 频道列表（见 §5）
     state.json           # 当前已装层版本 + 上次更新时间
   layers/
     base-24.04.3-l1.erofs  # L0 只读：Ubuntu 24.04 minimal（很少变）
-    runtime-1.0.0.erofs    # L1 只读：Node + pnpm + 工具 + /opt/dshroid 入口脚本
+    runtime-1.0.0.erofs    # L1 只读：Node + pnpm + 工具 + /opt/sunsetlinux 入口脚本
     dsh-<npm版本>.erofs    # L2 只读：@deepseek-ai/dsh + profile 工作区（经常变）
   layers-mnt/              # 每层的 loop 挂载点
     {base,runtime,dsh}/    # ★ overlay 的 lowerdir 必须是**目录**，不能直接给镜像文件
@@ -71,10 +92,10 @@
     entry.sh             # 兼容入口（转发到 linuxctl）
 ```
 
-### 2.2 proot 模式（`LINUX_HOME=$APP_FILES/linux`）
+### 2.2 proot 模式（`LINUX_HOME=$APP_FILES/sunsetlinux`）
 
 ```
-$APP_FILES/linux/
+$APP_FILES/sunsetlinux/
   rootfs/                # 直接解开的 Ubuntu 目录（非分层）
   etc/{config.json,channels.json,state.json}
   run/{dsh.pid,dsh.port,dsh.url,linux.log}   # dsh.url 为 0600 的带令牌登录地址
@@ -148,11 +169,11 @@ App 不需要关心模式差异，只读 `status` 里的 `mode` 字段。
 
 ### 3.2 环境内约定（rootfs 内部）
 
-- 环境入口：`/opt/dshroid/entry.sh`
+- 环境入口：`/opt/sunsetlinux/entry.sh`
   - 职责：准备 `/etc/resolv.conf`（取 Android 当前 DNS）、`/etc/hosts`、时区、
     `HOME=/root`、`DSH_HOME=/root/.dsh`，然后 `exec` supervisor。
   - **不得**使用 `NODE_OPTIONS --import` 之类注入式补丁。
-- supervisor：`/opt/dshroid/supervise.sh`
+- supervisor：`/opt/sunsetlinux/supervise.sh`
   - 无 systemd；跑 **`dsh web --no-open --host 127.0.0.1 --port <port>`**。
     （**不要**写成 `exec node <dsh bin> web ...`：profile 工作区要靠 `dsh` launcher 解析，
     见 [`dsh-profile.md`](dsh-profile.md)；`dsh` 是 `lib/bin.js`，`web` 是 `--profile web` 的别名。）
@@ -205,7 +226,7 @@ WebView 需启用 Cookie。加载后应停在 `/`（已鉴权），而不是停�
 
 ```
 1. unshare -m --propagation private           # 独立 mount 命名空间
-2. unshare -u  → hostname dshroid             # 独立 UTS
+2. unshare -u  → hostname sunsetlinux             # 独立 UTS
    （保留宿主 netns：进 netns 会断网）
 3. 可写层：mount -t ext4 -o loop,rw,noatime upper.img upper/
 4. 只读层逐层 loop 挂载（★ lowerdir 必须是目录，不能直接给镜像文件）：
@@ -233,7 +254,7 @@ WebView 需启用 Cookie。加载后应停在 `/`（已鉴权），而不是停�
      mount --rbind /mnt/pass_through/0/emulated rootfs/mnt/sdcard
      ln -sfn /mnt/sdcard rootfs/storage/emulated/0
    失败则回退 mount --rbind /storage/emulated/0
-11. chroot rootfs /opt/dshroid/entry.sh
+11. chroot rootfs /opt/sunsetlinux/entry.sh
 ```
 
 **注意**：
@@ -251,7 +272,7 @@ WebView 需启用 Cookie。加载后应停在 `/`（已鉴权），而不是停�
 {
   "schema": 1,
   "channels": [
-    { "id": "official", "name": "官方", "url": "https://example.org/dshroid/channel.json",
+    { "id": "official", "name": "官方", "url": "https://example.org/sunsetlinux/channel.json",
       "pubkey": "<ed25519 公钥 base64>", "enabled": true, "priority": 100 },
     { "id": "some-dev", "name": "某开发者内测", "url": "https://.../channel.json",
       "pubkey": "...", "enabled": true, "priority": 50 }
@@ -370,7 +391,7 @@ WebView 需启用 Cookie。加载后应停在 `/`（已鉴权），而不是停�
 
 ## 6. Android App 契约
 
-- 包名：`io.dshroid`（可改）；minSdk 26，targetSdk 36。
+- 包名：`io.github.sunsetrne.sunsetlinux`（可改）；minSdk 26，targetSdk 36。
 - 技术：Kotlin + Jetpack Compose + Material 3（深色优先）。
 - 与 Linux 侧唯一接口：调用 `linuxctl`（root 模式经 `su -c`）并解析 §3.1 的 JSON。
 - 组件：
@@ -389,10 +410,10 @@ WebView 需启用 Cookie。加载后应停在 `/`（已鉴权），而不是停�
 ```
 module/
   module.prop
-  customize.sh        # 安装时：写 /data/linux、探测挂载实现、打印结论
+  customize.sh        # 安装时：写 /data/sunsetlinux、探测挂载实现、打印结论
   post-fs-data.sh     # 早期：准备目录与权限、同步脚本（不启动）
-  service.sh          # late_start：调用 /data/linux/bin/linuxctl start（尊重 autostart）
-  uninstall.sh        # 默认保留 /data/linux（不删用户数据），仅清理模块自身
+  service.sh          # late_start：调用 /data/sunsetlinux/bin/linuxctl start（尊重 autostart）
+  uninstall.sh        # 默认保留 /data/sunsetlinux（不删用户数据），仅清理模块自身
   webroot/index.html  # ★ KernelSU 模块 WebUI（见 §6.2）
   mkmodule.sh         # 打包：把运行时脚本与 webroot/ 打进 zip
 ```
@@ -473,7 +494,7 @@ module/
 ## 7. 仓库结构
 
 ```
-dshroid/
+sunsetlinux/
   docs/{findings.md,architecture.md,dsh-profile.md,ksu-webui-api.md,install.md,updates.md,smoke-test.md}
   rootfs/
     layer-spec.sh          # ★ 唯一共同事实源：层格式/命名/压缩/版本/禁 path 断言

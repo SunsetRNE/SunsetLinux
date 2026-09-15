@@ -1,4 +1,4 @@
-// DSHroid 启动器 App —— Gradle 设置
+// SunsetLinux 启动器 App —— Gradle 设置
 //
 // 说明：本机（Android 手机内的 Ubuntu）以 aarch64 运行，AGP 默认从 Google Maven 取
 // x86-64 版 aapt2，无法执行。构建环境已通过 ~/.gradle/gradle.properties 的
@@ -22,5 +22,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "dshroid-launcher"
+rootProject.name = "sunsetlinux-launcher"
 include(":app")

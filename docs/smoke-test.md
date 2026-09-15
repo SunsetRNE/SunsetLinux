@@ -13,7 +13,7 @@
 
 ```bash
 # 装启动器（我做不了这一步）
-adb install -r dist/dshroid-launcher-debug.apk
+adb install -r dist/sunsetlinux-launcher-debug.apk
 # 或把 APK 传到手机点击安装
 ```
 
@@ -21,7 +21,7 @@ adb install -r dist/dshroid-launcher-debug.apk
 
 | 选择 | 后续 |
 |---|---|
-| **Root 模式**（能力完整） | 需要先装 **KernelSU 模块**（`dist/dshroid-module-*.zip`）。模块负责**开机自启 + 让环境不依赖 App**。刷完重启，再回来部署层 |
+| **Root 模式**（能力完整） | 需要先装 **KernelSU 模块**（`dist/sunsetlinux-module-*.zip`）。模块负责**开机自启 + 让环境不依赖 App**。刷完重启，再回来部署层 |
 | **非 root 模式**（兼容） | 走 proot 虚拟环境，免 root。无真 capabilities、绕不开 FUSE、环境随 App 进程 |
 
 > 两条路径最终都用同一套 `linuxctl`，所以后面 §1–§7 的命令**完全一样**（`status.mode` 会告诉我是哪种）。
@@ -39,14 +39,14 @@ KernelSU 已把**模块文件挂载**交给第三方 metamodule（本机装的�
 ## 1. 自检（最先跑这个，它一次性告诉我们内核能力）
 
 ```bash
-su -c '/data/linux/bin/linuxctl doctor'
+su -c '/data/sunsetlinux/bin/linuxctl doctor'
 ```
 
 > ⚠️ **必须在 Android 侧的 root 终端跑**（也就是上面这条 `su -c` 的形式）。
 > 别进环境里跑（`linuxctl exec -- doctor`）——环境内**看不到 `/data/adb`**
 > （实测：proot 内只有 1 项，原生 root 有 19 项），那一节会显示"[不适用]"，不是环境坏了。
 
-> 如果 `/data/linux/bin/linuxctl` 还不存在（模块没刷或没部署过），先在 App 里完成一次 provision，
+> 如果 `/data/sunsetlinux/bin/linuxctl` 还不存在（模块没刷或没部署过），先在 App 里完成一次 provision，
 > 或者先跑 `device-provision.sh`（见 §2）。
 
 **请把完整输出发我。** 我要看五件事：
@@ -64,15 +64,15 @@ su -c '/data/linux/bin/linuxctl doctor'
 
 ```bash
 # 有离线种子时（更快，且不依赖网络）
-su -c '/data/linux/bin/linuxctl provision --seed /data/linux/seeds'
+su -c '/data/sunsetlinux/bin/linuxctl provision --seed /data/sunsetlinux/seeds'
 ```
 
 没有种子、让设备自己联网构建也可以（设备上**有** `/system/bin/mkfs.erofs`，能原生建层）。
 
 **要确认的**：
-- 三层是否都产出：`ls -la /data/linux/layers/` → 期望看到
+- 三层是否都产出：`ls -la /data/sunsetlinux/layers/` → 期望看到
   `base-<ver>.erofs`、`runtime-<ver>.erofs`、`dsh-<ver>.erofs`
-- `upper.img` 是否创建：`ls -la /data/linux/upper.img`
+- `upper.img` 是否创建：`ls -la /data/sunsetlinux/upper.img`
 - 若失败：把 `linuxctl logs` 和 `cache/.erofs-args`（mkfs.erofs 实际用的参数）发我。
 
 ---
@@ -80,14 +80,14 @@ su -c '/data/linux/bin/linuxctl provision --seed /data/linux/seeds'
 ## 3. 启动并取状态
 
 ```bash
-su -c '/data/linux/bin/linuxctl start'
-su -c '/data/linux/bin/linuxctl status'
+su -c '/data/sunsetlinux/bin/linuxctl start'
+su -c '/data/sunsetlinux/bin/linuxctl status'
 ```
 
 **期望**：`state` 为 `running`、`dsh.healthy` 为 `true`、**`dsh.url` 里含 `?token=`**。
 
 > ⚠️ `dsh.url` 必须带令牌。如果它是 `null` 或不含 `token`，**App 的 WebView 一定会 401**。
-> 这时把 `cat /data/linux/run/linux.log | tail -40` 发我 —— 里面应该有
+> 这时把 `cat /data/sunsetlinux/run/linux.log | tail -40` 发我 —— 里面应该有
 > `dsh web: http://127.0.0.1:<port>/?token=...` 那一行。
 
 ---
@@ -98,19 +98,19 @@ su -c '/data/linux/bin/linuxctl status'
 
 ```bash
 # ① 真 root（不是伪造的）
-su -c '/data/linux/bin/linuxctl exec -- id'
+su -c '/data/sunsetlinux/bin/linuxctl exec -- id'
 #    期望：uid=0(root)，而不是普通应用 uid
 
 # ② 真 capabilities（DSHA 做不到）
-su -c '/data/linux/bin/linuxctl exec -- grep CapEff /proc/self/status'
+su -c '/data/sunsetlinux/bin/linuxctl exec -- grep CapEff /proc/self/status'
 #    期望：CapEff 非 0。DSHA 的 proot 是伪造 root，这里会是 0 或权限不足
 
 # ③ 能真的挂载（DSHA 做不到）
-su -c "/data/linux/bin/linuxctl exec -- sh -c 'mkdir -p /mnt/t && mount -t tmpfs tmpfs /mnt/t && echo MOUNT_OK && umount /mnt/t'"
+su -c "/data/sunsetlinux/bin/linuxctl exec -- sh -c 'mkdir -p /mnt/t && mount -t tmpfs tmpfs /mnt/t && echo MOUNT_OK && umount /mnt/t'"
 #    期望：打印 MOUNT_OK
 
 # ④ sdcard 绕开 FUSE（DSHA 走 FUSE，慢）
-su -c '/data/linux/bin/linuxctl exec -- findmnt /mnt/sdcard'
+su -c '/data/sunsetlinux/bin/linuxctl exec -- findmnt /mnt/sdcard'
 #    期望：文件系统类型是 f2fs，**不是** fuse
 ```
 
@@ -120,10 +120,10 @@ su -c '/data/linux/bin/linuxctl exec -- findmnt /mnt/sdcard'
 
 ```bash
 # 先手动结束 App 进程
-su -c 'am force-stop io.dshroid'
+su -c 'am force-stop io.github.sunsetrne.sunsetlinux'
 sleep 3
 # 环境应该还在跑
-su -c '/data/linux/bin/linuxctl status'
+su -c '/data/sunsetlinux/bin/linuxctl status'
 #    期望：仍然是 running
 ```
 
@@ -133,13 +133,13 @@ su -c '/data/linux/bin/linuxctl status'
 
 ```bash
 # 只换 dsh 层（应只下约 30 MB，不重下系统）
-su -c '/data/linux/bin/linuxctl update dsh /data/linux/cache/dsh-<ver>.erofs'
-su -c '/data/linux/bin/linuxctl status'
+su -c '/data/sunsetlinux/bin/linuxctl update dsh /data/sunsetlinux/cache/dsh-<ver>.erofs'
+su -c '/data/sunsetlinux/bin/linuxctl status'
 
 # 恢复出厂（清空可写层）
-su -c '/data/linux/bin/linuxctl snapshot before-reset'
-su -c '/data/linux/bin/linuxctl reset'
-su -c '/data/linux/bin/linuxctl start'
+su -c '/data/sunsetlinux/bin/linuxctl snapshot before-reset'
+su -c '/data/sunsetlinux/bin/linuxctl reset'
+su -c '/data/sunsetlinux/bin/linuxctl start'
 ```
 
 ---
@@ -150,11 +150,23 @@ su -c '/data/linux/bin/linuxctl start'
 
 若显示 401：说明 App 加载的不是带令牌地址。把首页状态卡的原始 status JSON 发我。
 
+### 7.1 冷启动与系统栏（用户实测过的问题，改完请重点确认）
+
+| 看什么 | 期望 | 若不对，说明 |
+|---|---|---|
+| **首次安装后第一次打开** | 立刻出现「SunsetLinux / 首次启动：先选运行方式…」这一屏，**不再是一大块纯黑等半天** | 占位屏没生效（`ui/BootPlaceholder.kt`）或引导没被拉起 |
+| 引导过程中按返回键退出，再打开 App | 又回到引导（或占位屏的「打开引导」按钮可点） | `Prefs.onboarded` 没被写 |
+| **键盘**：在「插件」tab 输入包名 / 在设置里输入频道 URL | 输入框**在键盘上方可见**，不被盖住 | `imePadding` / `adjustResize` 没生效（告诉我机型与导航方式） |
+| DSH Web 里的聊天输入框 | 同样不被键盘盖住 | 同上 |
+| **返回键**：切到「更新」或「插件」tab 后按返回 | 回到「启动」tab，**不是直接退出 App** | `BackHandler` 没生效 |
+| 侧边栏打开时按返回 | 关掉侧边栏（而不是切 tab、也不是退出） | 抽屉的返回回调被抢 |
+| 底部胶囊底栏 | 完整可见、不被系统导航栏压住；三键导航下也不重叠 | 导航栏 inset 没消费 —— **请把这张情况单独告诉我** |
+
 ---
 
 ## 8. 模块 WebUI（不用打开 App 也能管理）
 
-在 **KernelSU 管理器 → 模块 → DSHroid** 里应该有 WebUI 入口（本机 KernelSU 支持 `webroot/`）。
+在 **KernelSU 管理器 → 模块 → SunsetLinux** 里应该有 WebUI 入口（本机 KernelSU 支持 `webroot/`）。
 Magisk 没有原生 WebUI —— 需要 MMRL / KsuWebUI 之类的宿主；**没有也不影响**，App 能做同样的事。
 
 **请确认这几点**（我没法在真机渲染，只能靠你）：
@@ -178,7 +190,7 @@ Magisk 没有原生 WebUI —— 需要 MMRL / KsuWebUI 之类的宿主；**没�
 |---|---|---|
 | ★★★ | §1 `doctor` 完整输出（含 §1b / §1c） | 决定挂载树能否工作的头号未知项 + 挂载实现探测 |
 | ★★★ | §3 的 status JSON + `run/linux.log` 尾部 | 令牌链路是否真的通 |
-| ★★☆ | §2 的 `ls -la /data/linux/layers/` | 分层构建是否成功 |
+| ★★☆ | §2 的 `ls -la /data/sunsetlinux/layers/` | 分层构建是否成功 |
 | ★★☆ | §4 的 ①②③④ 输出 | 方案核心价值的证据 |
 | ★☆☆ | §5、§6 结果 | 生命周期与更新语义 |
 
@@ -189,7 +201,7 @@ Magisk 没有原生 WebUI —— 需要 MMRL / KsuWebUI 之类的宿主；**没�
 1. **`mount`/`unshare` 是 toybox 版**：`/system/bin/mount` 等都是 toybox 软链，而挂载树用了
    util-linux 风格的长选项（`--rbind` / `--make-rslave`）。运行时已实现**能力探测 + 三级降级**，
    但真实支持面未知 → `doctor` 的 §1b 表会给答案。
-   探测结果缓存在 `/data/linux/run/cmdprobe`，可 `cat` 出来发我。
+   探测结果缓存在 `/data/sunsetlinux/run/cmdprobe`，可 `cat` 出来发我。
 2. **Android 版 `mkfs.erofs` 的参数兼容性**：已做 5 级降级，实际用了哪一级见 `cache/.erofs-args`。
 3. **erofs 作为 overlay lowerdir**：本机确认了内核有现成实例（`/product/overlay`），
    但没实际挂过我们的层。

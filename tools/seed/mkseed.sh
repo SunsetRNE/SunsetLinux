@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # ============================================================================
-# tools/seed/mkseed.sh —— 制作 dshroid **离线种子包**
+# tools/seed/mkseed.sh —— 制作 sunsetlinux **离线种子包**
 # ============================================================================
 # 目的（对应用户痛点"首次部署慢"）：把首次部署必须联网下载的大件一次性打包，
 # 新设备拿到一个 .tar.zst 就能离线起步，不必在手机上等慢速网络。
 #
-# 种子包内容（顶层目录 dshroid-seed-<日期>/）：
+# 种子包内容（顶层目录 sunsetlinux-seed-<日期>/）：
 #   ubuntu-base-24.04.3-base-arm64.tar.gz   # Ubuntu 24.04.3 base rootfs（官方）
 #   node-v<ver>-linux-arm64.tar.xz          # Node 24 LTS 官方 arm64 静态包
 #   debs/*.deb                              # 可选：apt 包缓存（--deb-dir）
@@ -64,8 +64,8 @@ usage() {
   cat <<'EOF'
 用法：tools/seed/mkseed.sh [选项]
 
-制作 dshroid 离线种子包（ubuntu-base rootfs + Node 24 arm64 静态包 [+ deb 缓存]），
-输出 dist/dshroid-seed-<日期>.tar.zst 与同名 .sha256。
+制作 sunsetlinux 离线种子包（ubuntu-base rootfs + Node 24 arm64 静态包 [+ deb 缓存]），
+输出 dist/sunsetlinux-seed-<日期>.tar.zst 与同名 .sha256。
 
 选项：
   --out-dir <目录>       产物目录（默认：<仓库>/dist）
@@ -228,7 +228,7 @@ UB_EXPECT=""
 NODE_EXPECT=""
 
 # ------------------------------------------------------ 3. 准备大文件 ----
-WORK_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/dshroid-seed.XXXXXX")"
+WORK_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/sunsetlinux-seed.XXXXXX")"
 cleanup() {
   if [ "$KEEP_WORK" -eq 1 ]; then
     warn "保留工作目录：$WORK_ROOT"
@@ -238,7 +238,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-SEED_DIR_NAME="dshroid-seed-${DATE_TAG}"
+SEED_DIR_NAME="sunsetlinux-seed-${DATE_TAG}"
 STAGE="$WORK_ROOT/stage"
 SEED_ROOT="$STAGE/$SEED_DIR_NAME"
 mkdir -p "$SEED_ROOT/debs"
@@ -327,7 +327,7 @@ step "生成 MANIFEST 与说明文件"
 printf '%s\n' "$NODE_VERSION" > "$SEED_ROOT/node-version.txt"
 
 cat > "$SEED_ROOT/README.md" <<EOF
-# dshroid 离线种子包（${DATE_TAG}）
+# sunsetlinux 离线种子包（${DATE_TAG}）
 
 给**新设备首次部署**用：不需要在手机上等慢速网络下载这几百 MB 的底座。
 
@@ -346,14 +346,14 @@ cat > "$SEED_ROOT/README.md" <<EOF
 
 \`\`\`bash
 # 1) 校验完整性（务必先做）
-tools/seed/verify-seed.sh dshroid-seed-${DATE_TAG}.tar.zst
+tools/seed/verify-seed.sh sunsetlinux-seed-${DATE_TAG}.tar.zst
 
 # 2) 解到设备的种子目录
-mkdir -p /data/linux/seeds
-tar --zstd -xf dshroid-seed-${DATE_TAG}.tar.zst -C /data/linux/seeds --strip-components=1
+mkdir -p /data/sunsetlinux/seeds
+tar --zstd -xf sunsetlinux-seed-${DATE_TAG}.tar.zst -C /data/sunsetlinux/seeds --strip-components=1
 
 # 3) 首次部署时带上种子目录（linuxctl 会优先用本地文件，不再联网）
-/data/linux/bin/linuxctl provision --seed /data/linux/seeds
+/data/sunsetlinux/bin/linuxctl provision --seed /data/sunsetlinux/seeds
 \`\`\`
 
 > 设备上没有 \`zstd\` 命令时，可先在电脑上解开，或用本仓库的
@@ -366,7 +366,7 @@ tar --zstd -xf dshroid-seed-${DATE_TAG}.tar.zst -C /data/linux/seeds --strip-com
 EOF
 
 cat > "$SEED_ROOT/SOURCES.txt" <<EOF
-dshroid 离线种子包 ${DATE_TAG}
+sunsetlinux 离线种子包 ${DATE_TAG}
 生成时间（UTC）：$(date -u +%Y-%m-%dT%H:%M:%SZ)
 生成脚本：tools/seed/mkseed.sh
 
@@ -422,7 +422,7 @@ function walk(dir, rel = '') {
 walk(root);
 process.stdout.write(JSON.stringify({
   schema: 1,
-  kind: 'dshroid-seed',
+  kind: 'sunsetlinux-seed',
   date: dateTag,
   node_version: nodeVersion,
   arch: 'arm64',
@@ -435,7 +435,7 @@ ok "MANIFEST 收录 $(wc -l < "$SEED_ROOT/MANIFEST") 个文件"
 
 # ------------------------------------------------------------ 6. 打包 ----
 step "打包为 .tar.zst（级别 ${ZSTD_LEVEL}）"
-OUT_FILE="$OUT_DIR/dshroid-seed-${DATE_TAG}.tar.zst"
+OUT_FILE="$OUT_DIR/sunsetlinux-seed-${DATE_TAG}.tar.zst"
 tar -C "$STAGE" -cf - "$SEED_DIR_NAME" | $ZSTD_CMD > "$OUT_FILE.part" \
   || die "打包失败（tar/zstd 出错）"
 mv "$OUT_FILE.part" "$OUT_FILE"

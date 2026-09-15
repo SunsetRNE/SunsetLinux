@@ -1,6 +1,6 @@
-#!/usr/bin/env bash
+#!/system/bin/sh
 # =============================================================================
-# dshroid · runtime/common/status_json.sh
+# sunsetlinux · runtime/common/status_json.sh
 #
 # 生成 architecture.md §3.1 里**冻结的** status JSON。root 与 proot 两套实现共用。
 #
@@ -46,8 +46,8 @@
 #   dsh_read_port_file <file>     读 1..65535 的端口
 # =============================================================================
 
-[ -n "${DSHROID_STATUS_JSON_SH:-}" ] && return 0 2>/dev/null || true
-DSHROID_STATUS_JSON_SH=1
+[ -n "${SUNSETLINUX_STATUS_JSON_SH:-}" ] && return 0 2>/dev/null || true
+SUNSETLINUX_STATUS_JSON_SH=1
 
 # ---------------------------------------------------------------------------
 # JSON 字符串转义（纯 bash）。只处理 JSON 必须转义的字符：
@@ -56,32 +56,29 @@ DSHROID_STATUS_JSON_SH=1
 # 字节 < 0x20 做替换，UTF-8 的后续字节都 >= 0x80，不会被误伤。
 # ---------------------------------------------------------------------------
 dsh_json_escape() {
-    local s="$1" out="" i ch
-    # 先转义反斜杠和引号（顺序不能反：先反斜杠）
-    s="${s//\\/\\\\}"
-    s="${s//\"/\\\"}"
-    local n=${#s}
-    for (( i = 0; i < n; i++ )); do
-        ch="${s:i:1}"
-        # 用 printf 把该字符按 C locale 打成字节值
-        case "$ch" in
-            $'\n') out+='\n' ;;
-            $'\r') out+='\r' ;;
-            $'\t') out+='\t' ;;
-            $'\b') out+='\b' ;;
-            $'\f') out+='\f' ;;
-            *)
-                # 其余 <0x20 的 ASCII 控制符（bash $'..' 里含 0x01..0x1f 的少数）
-                local b
-                b="$(LC_ALL=C printf '%d' "'$ch" 2>/dev/null || echo 32)"
-                if [ "$b" -ge 0 ] 2>/dev/null && [ "$b" -lt 32 ]; then
-                    printf -v ch '\\u%04x' "$b"
-                fi
-                out+="$ch"
-                ;;
-        esac
-    done
-    printf '%s' "$out"
+    # JSON 字符串转义。
+    #
+    # ⚠️ 原先的写法是 bash 专有：C 式 `for (( i… ))` + 逐字符 `${s:i:1}`。
+    #    本文件被 `runtime/root/linuxctl.sh` **整份 source**，而设备侧只有 mksh
+    #    → 一个语法错就让整个 linuxctl 报废（实测：`linuxctl status` 退出码 0
+    #    但 stdout 空空，App 只能报"环境尚未部署"）。改写成 awk 的 gsub：
+    #    awk 在 Android（toybox）、Ubuntu、CI 上都有，且行为一致。
+    #
+    # 行为差异（有意）：0x01–0x1f 里除 \b\f\n\r\t 之外的裸控制字符**直接丢弃**
+    # （旧实现转成 \u00XX）。这类字符出现在版本号/错误信息里没有意义，
+    # 丢掉更短也不会产生非法 JSON；顺手和 doctor.sh 的 jesc 口径对齐。
+    printf '%s' "$1" | LC_ALL=C awk '
+        BEGIN { RS = "\1" }   # 整个输入当成一条记录，否则内嵌换行会被拆成多行
+        {
+            s = $0
+            gsub(/\\/, "\\\\", s)
+            gsub(/"/, "\\\"", s)
+            gsub(/\t/, "\\t", s)
+            gsub(/\r/, "\\r", s)
+            gsub(/\n/, "\\n", s)
+            gsub(/[\001-\010\013\014\016-\037]/, "", s)
+            printf "%s", s
+        }'
 }
 
 # ---------------------------------------------------------------------------
@@ -407,9 +404,23 @@ dsh_status_json() {
     printf '}\n'
 }
 
-# 直接执行：打印一份 demoted 样例（便于离线校验 schema 完整性）
-if [ "${BASH_SOURCE[0]:-$0}" = "$0" ]; then
+# 直接执行：打印一份 demoted 样例（便于离线校验 schema 完整性）；
+# 被 source 时必须什么都不做。
+#
+# ⚠️ 不要用 `[ "${BASH_SOURCE[0]:-$0}" = "$0" ]` 这种经典写法：在 mksh
+#    （Android /system/bin/sh）里 BASH_SOURCE 未定义，`${...:-$0}` 退化成 `$0`，
+#    判定**永远为真** → linuxctl source 本文件时会当场多吐一段 JSON，
+#    污染给 App 解析的 stdout（App/契约检查都按"第一个 { 到最后一个 }"取值）。
+#    改成由 source 方显式打标记：source 前设 `SUNSETLINUX_SOURCED=1`
+#    （见 runtime/root/linuxctl.sh、runtime/root/selftest.sh）。
+_sl_sourced=0
+[ "${SUNSETLINUX_SOURCED:-0}" = "1" ] && _sl_sourced=1
+if [ "${BASH_SOURCE+set}" = "set" ] && [ "${BASH_SOURCE[0]}" != "$0" ]; then
+    _sl_sourced=1
+fi
+if [ "$_sl_sourced" = "0" ]; then
     DSH_ST_MODE="${1:-root}"
     DSH_ST_STATE="stopped"
     dsh_status_json
 fi
+unset _sl_sourced

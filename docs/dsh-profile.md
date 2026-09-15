@@ -107,8 +107,8 @@
 
 ### 3.3 后续可选
 
-- 自研 `dshroid-device-shell`（设备能力插件）：需要与 App 的 `/app/*` 桥接能力对接时再写。
-- 自研 `dshroid-status-overlay`：如果确实需要"锁屏/悬浮条式"状态展示。
+- 自研 `sunsetlinux-device-shell`（设备能力插件）：需要与 App 的 `/app/*` 桥接能力对接时再写。
+- 自研 `sunsetlinux-status-overlay`：如果确实需要"锁屏/悬浮条式"状态展示。
 - 若想复用 MIT 的 `dsh-device-shell-guide` / `dsh-status-overlay`，**必须**：
   随附 MIT 许可文本、注明原作者与来源、并保留版权声明。**这是可选项，不是默认。**
 

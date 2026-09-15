@@ -53,7 +53,7 @@ const spec = {
 
 async function main() {
   const argv = process.argv.slice(2);
-  if (wantsHelp(argv)) return printHelp('dshroid 频道签名（sign）', HELP);
+  if (wantsHelp(argv)) return printHelp('sunsetlinux 频道签名（sign）', HELP);
   const { values } = parseArgs(argv, spec);
 
   if (!values.key) die('缺少 --key <私钥文件>（keygen.mjs 产出的 channel.key）');

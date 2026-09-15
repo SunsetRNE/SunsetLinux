@@ -1,6 +1,6 @@
-#!/usr/bin/env bash
+#!/system/bin/sh
 # =============================================================================
-# dshroid · runtime/root/status.sh
+# sunsetlinux · runtime/root/status.sh
 #
 # 薄封装：只输出 architecture.md §3.1 的 status JSON（stdout），供需要"只取状态"
 # 的调用方（App、脚本、监控）使用，语义与 `linuxctl.sh status` 完全一致。
@@ -14,9 +14,10 @@
 # =============================================================================
 set -uo pipefail
 
-SELF_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+SELF_PATH="${BASH_SOURCE[0]:-$0}"   # mksh 下 BASH_SOURCE 未定义 → 退回 $0
+SELF_DIR="$(cd -- "$(dirname -- "$SELF_PATH")" && pwd -P)"
 
-LINUX_HOME="${LINUX_HOME:-/data/linux}"
+LINUX_HOME="${LINUX_HOME:-/data/sunsetlinux}"
 export LINUX_HOME
 
 CTL=""

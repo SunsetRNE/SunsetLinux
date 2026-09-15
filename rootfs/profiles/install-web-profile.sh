@@ -4,7 +4,7 @@
 # 用法（在目标 rootfs 的 chroot 内执行）：
 #   install-web-profile.sh <模板目录> <目标 profile 目录>
 # 例：
-#   install-web-profile.sh /opt/dshroid/web-profile /root/.dsh/profiles/web
+#   install-web-profile.sh /opt/sunsetlinux/web-profile /root/.dsh/profiles/web
 #
 # 背景与原理见 docs/dsh-profile.md（§5 是已实测跑通的配方）。
 #

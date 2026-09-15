@@ -1,8 +1,8 @@
 #!/bin/bash
 # =============================================================================
-# DSHroid — rootfs 内的环境入口 + supervisor（entry.sh）        v1.1.0
+# SunsetLinux — rootfs 内的环境入口 + supervisor（entry.sh）        v1.1.0
 #
-# 由 proot 启动：proot ... /opt/dshroid/entry.sh
+# 由 proot 启动：proot ... /opt/sunsetlinux/entry.sh
 #
 # 职责：
 #   A. 环境准备（architecture.md §3.2）：
@@ -16,7 +16,7 @@
 #        所以必须「后台启动 + 截获 stdout/stderr + 解析带令牌 URL + 落盘 +
 #        前台等待 + SIGTERM 透传」。
 #
-#   C. 落盘（宿主 $LINUX_HOME/run 经 bind 出现在本环境内 /run/dshroid，
+#   C. 落盘（宿主 $LINUX_HOME/run 经 bind 出现在本环境内 /run/sunsetlinux，
 #      两边是同一批 inode，所以这里写 = 宿主侧写）：
 #        run/dsh.url   0600  带令牌 URL（App 用它登录；进程退出即失效）
 #        run/dsh.port         实际生效端口（以 URL 里的端口为准）
@@ -35,7 +35,7 @@
 # =============================================================================
 set -uo pipefail
 
-RUNDIR=${DSHROID_RUN_DIR:-/run/dshroid}
+RUNDIR=${SUNSETLINUX_RUN_DIR:-/run/sunsetlinux}
 LOGFILE="$RUNDIR/linux.log"
 URLFILE="$RUNDIR/dsh.url"
 PIDFILE="$RUNDIR/dsh.pid"
@@ -50,7 +50,7 @@ warn() { printf '[entry 警告] %s\n' "$*" >&2; }
 err()  { printf '[entry 错误] %s\n' "$*" >&2; }
 
 # =============================================================================
-# 函数区（放在主流程之前：DSHROID_ENTRY_LIB=1 时可以只加载函数做自测）
+# 函数区（放在主流程之前：SUNSETLINUX_ENTRY_LIB=1 时可以只加载函数做自测）
 # =============================================================================
 write_atomic() { # write_atomic <file> <content> [mode]：先写临时文件再 mv，避免读到半截
   local f=$1 c=$2 m=${3:-0600} t
@@ -179,11 +179,11 @@ shutdown() {
 }
 
 # =============================================================================
-# 自测钩子：DSHROID_ENTRY_LIB=1 时只加载上面的函数，不碰系统文件、不启动任何东西。
+# 自测钩子：SUNSETLINUX_ENTRY_LIB=1 时只加载上面的函数，不碰系统文件、不启动任何东西。
 # （entry.sh 会写 /etc/hosts、/etc/localtime、/etc/resolv.conf，在开发机上直接跑很危险，
 #   所以留下这个钩子，让解析器/落盘逻辑可以在宿主上被真实测试。）
 # =============================================================================
-if [ "${DSHROID_ENTRY_LIB:-0}" = "1" ]; then
+if [ "${SUNSETLINUX_ENTRY_LIB:-0}" = "1" ]; then
   return 0 2>/dev/null || exit 0
 fi
 
@@ -204,11 +204,11 @@ rm -f -- "$ERRFILE" 2>/dev/null || true
 # 启动先清掉上一轮的令牌/端口（进程被 kill -9 时没机会清理，这里双保险）
 cleanup_run_files
 
-PORT=${DSHROID_PORT:-}
+PORT=${SUNSETLINUX_PORT:-}
 case "$PORT" in ''|*[!0-9]*) PORT=3080 ;; esac
 if [ "$PORT" -lt 1 ] || [ "$PORT" -gt 65535 ]; then PORT=3080; fi
-HOST=${DSHROID_HOST:-127.0.0.1}
-GUEST_NAME=${DSHROID_HOSTNAME:-dshroid}
+HOST=${SUNSETLINUX_HOST:-127.0.0.1}
+GUEST_NAME=${SUNSETLINUX_HOSTNAME:-sunsetlinux}
 
 export HOME=/root
 export DSH_HOME=/root/.dsh
@@ -217,12 +217,12 @@ export LANG=${LANG:-C.UTF-8}
 export TMPDIR=${TMPDIR:-/tmp}
 export SHELL=/bin/bash
 # proot 模式下没有真实 root：明确告诉环境内的程序「别指望 mount/chown」。
-export DSHROID_MODE=proot
-export DSHROID_FAKE_ROOT=${DSHROID_FAKE_ROOT:-0}
+export SUNSETLINUX_MODE=proot
+export SUNSETLINUX_FAKE_ROOT=${SUNSETLINUX_FAKE_ROOT:-0}
 
-# 拒绝注入式补丁：DSHroid 不做 NODE_OPTIONS --import 那一套。
+# 拒绝注入式补丁：SunsetLinux 不做 NODE_OPTIONS --import 那一套。
 if [ -n "${NODE_OPTIONS:-}" ]; then
-  warn "清除继承来的 NODE_OPTIONS（DSHroid 不使用注入式启动补丁）：$NODE_OPTIONS"
+  warn "清除继承来的 NODE_OPTIONS（SunsetLinux 不使用注入式启动补丁）：$NODE_OPTIONS"
   unset NODE_OPTIONS
 fi
 
@@ -232,7 +232,7 @@ mkdir -p -- /tmp 2>/dev/null || true
 chmod 1777 /tmp 2>/dev/null || true
 
 log "proot 环境入口启动：pid=$$ uid=$(id -u 2>/dev/null || printf '?')/gid=$(id -g 2>/dev/null || printf '?')"
-if [ "$DSHROID_FAKE_ROOT" = "1" ]; then
+if [ "$SUNSETLINUX_FAKE_ROOT" = "1" ]; then
   warn "当前为伪造 root（proot -0）：id 显示 uid=0 但没有真实 capabilities，"
   warn "  mount/chown/mknod 等操作依旧失败；这不是真 root。"
 fi
@@ -242,7 +242,7 @@ fi
 # -----------------------------------------------------------------------------
 if [ -w /etc ] || [ -w /etc/hosts ]; then
   cat >/etc/hosts <<EOF
-# 由 DSHroid entry.sh 写入 $(date -u '+%Y-%m-%dT%H:%M:%SZ')
+# 由 SunsetLinux entry.sh 写入 $(date -u '+%Y-%m-%dT%H:%M:%SZ')
 127.0.0.1        localhost
 127.0.0.1        $GUEST_NAME
 ::1              localhost ip6-localhost ip6-loopback
@@ -255,8 +255,8 @@ fi
 # -----------------------------------------------------------------------------
 # A2. 时区
 # -----------------------------------------------------------------------------
-TZ_WANT=${DSHROID_TZ:-}
-[ -n "$TZ_WANT" ] || TZ_WANT=$(cat /etc/dshroid-tz 2>/dev/null | tr -d '[:space:]' || true)
+TZ_WANT=${SUNSETLINUX_TZ:-}
+[ -n "$TZ_WANT" ] || TZ_WANT=$(cat /etc/sunsetlinux-tz 2>/dev/null | tr -d '[:space:]' || true)
 [ -n "$TZ_WANT" ] || TZ_WANT=UTC
 if [ -f "/usr/share/zoneinfo/$TZ_WANT" ]; then
   if ln -sfn "/usr/share/zoneinfo/$TZ_WANT" /etc/localtime 2>/dev/null; then
@@ -284,7 +284,7 @@ if [ ! -s /etc/resolv.conf ] || ! grep -q '^nameserver' /etc/resolv.conf 2>/dev/
     warn "仍拿不到 DNS，已写入公共 DNS 兜底（1.1.1.1 / 8.8.8.8）"
   fi
 else
-  log "DNS：$(grep -c '^nameserver' /etc/resolv.conf 2>/dev/null || printf '?') 条 nameserver（来源：${DSHROID_DNS_SOURCE:-宿主 start.sh}）"
+  log "DNS：$(grep -c '^nameserver' /etc/resolv.conf 2>/dev/null || printf '?') 条 nameserver（来源：${SUNSETLINUX_DNS_SOURCE:-宿主 start.sh}）"
 fi
 
 # -----------------------------------------------------------------------------
@@ -309,14 +309,14 @@ fi
 # B0. supervisor 前置：找到 node 与 dsh 入口
 # -----------------------------------------------------------------------------
 NODE_BIN=""
-for c in "${DSHROID_NODE_BIN:-}" /usr/local/bin/node /usr/bin/node; do
+for c in "${SUNSETLINUX_NODE_BIN:-}" /usr/local/bin/node /usr/bin/node; do
   [ -n "$c" ] && [ -x "$c" ] && { NODE_BIN=$c; break; }
 done
 [ -n "$NODE_BIN" ] || NODE_BIN=$(command -v node 2>/dev/null || true)
 [ -n "$NODE_BIN" ] && [ -x "$NODE_BIN" ] || die "环境内找不到 node。rootfs 的 runtime 层不完整：请 linuxctl update runtime <file> 或 provision --seed 重新部署。"
 
 DSH_BIN=""
-for c in "${DSHROID_DSH_BIN:-}" /usr/local/bin/dsh \
+for c in "${SUNSETLINUX_DSH_BIN:-}" /usr/local/bin/dsh \
          /usr/local/lib/node_modules/@deepseek-ai/dsh/lib/bin.js; do
   [ -n "$c" ] && [ -f "$c" ] && { DSH_BIN=$c; break; }
 done

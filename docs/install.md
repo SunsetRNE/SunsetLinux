@@ -1,6 +1,6 @@
 # 部署指南
 
-本文件说明如何把 DSHroid 装到设备上并跑起来。
+本文件说明如何把 SunsetLinux 装到设备上并跑起来。
 
 > **关于本项目的开发方式，需要如实说明一件事**
 >
@@ -22,21 +22,21 @@
 | Root | root 模式需真 root（**KernelSU** 已验证；Magisk/APatch 理论可行但未验证） |
 | 存储 | 建议预留 **1.5 GB**（三层 erofs 解压后约 500 MB + 可写层默认 8 GiB 稀疏；**实际下载只约 95–100 MB**） |
 | 网络 | 首次部署需要；使用离线种子则不需要 |
-| 其它 | 关闭对 DSHroid 的电池优化；把 DSHroid 加入冻结/省电类模块的**豁免名单** |
+| 其它 | 关闭对 SunsetLinux 的电池优化；把 SunsetLinux 加入冻结/省电类模块的**豁免名单** |
 
 > **冻结豁免很重要**：设备上那类"墓碑调度 / 冻结"模块（按 App 分级 + cgroup freezer）会按 per-app 策略用
 > cgroup freezer 冻进程。root 模式下环境本体虽不依赖 App 进程，但 App 被冻会导致状态卡与
-> WebView 无法刷新，所以仍应把 DSHroid 加入豁免。
+> WebView 无法刷新，所以仍应把 SunsetLinux 加入豁免。
 
 ---
 
 ## 1. 安装 APK
 
-产物：`dist/dshroid-launcher-debug.apk`
+产物：`dist/sunsetlinux-launcher-debug.apk`
 
 ```bash
 # 在电脑上（已配置 adb）
-adb install -r dist/dshroid-launcher-debug.apk
+adb install -r dist/sunsetlinux-launcher-debug.apk
 ```
 
 或直接把 APK 传到手机点击安装。
@@ -69,20 +69,20 @@ App 会通过 `su -c` 调用 `linuxctl provision` 并显示进度。
 
 ```bash
 # 1) 铺基础目录
-mkdir -p /data/linux/{layers,seeds,cache,etc,bin,run,snapshots,work,rootfs,upper}
+mkdir -p /data/sunsetlinux/{layers,seeds,cache,etc,bin,run,snapshots,work,rootfs,upper}
 
 # 2) 放置离线种子（可选，能显著加速且不依赖网络）
-#    把 dist/dshroid-seed-*.tar.zst 解开到 /data/linux/seeds/
+#    把 dist/sunsetlinux-seed-*.tar.zst 解开到 /data/sunsetlinux/seeds/
 #    （至少包含 ubuntu-base-24.04.3-base-arm64.tar.gz 与 node 官方 arm64 包）
 
 # 3) 执行 provisioning（内部用真 chroot，产出三层 erofs）
-/data/linux/bin/linuxctl provision --seed /data/linux/seeds
+/data/sunsetlinux/bin/linuxctl provision --seed /data/sunsetlinux/seeds
 
 # 4) 启动
-/data/linux/bin/linuxctl start
+/data/sunsetlinux/bin/linuxctl start
 
 # 5) 看状态（stdout 是 JSON）
-/data/linux/bin/linuxctl status
+/data/sunsetlinux/bin/linuxctl status
 ```
 
 ### 方式 C：从已发布的层安装（最快）
@@ -90,9 +90,9 @@ mkdir -p /data/linux/{layers,seeds,cache,etc,bin,run,snapshots,work,rootfs,upper
 如果频道里已有构建好的层，可以直接下载安装，跳过在设备上跑 apt：
 
 ```bash
-/data/linux/bin/linuxctl update base    /data/linux/cache/base-<ver>.erofs
-/data/linux/bin/linuxctl update runtime /data/linux/cache/runtime-<ver>.erofs
-/data/linux/bin/linuxctl update dsh     /data/linux/cache/dsh-<ver>.erofs
+/data/sunsetlinux/bin/linuxctl update base    /data/sunsetlinux/cache/base-<ver>.erofs
+/data/sunsetlinux/bin/linuxctl update runtime /data/sunsetlinux/cache/runtime-<ver>.erofs
+/data/sunsetlinux/bin/linuxctl update dsh     /data/sunsetlinux/cache/dsh-<ver>.erofs
 ```
 
 ---
@@ -104,29 +104,29 @@ mkdir -p /data/linux/{layers,seeds,cache,etc,bin,run,snapshots,work,rootfs,upper
 
 1. 用**打包脚本**生成模块 zip（**不要**自己 `cd module && zip` —— 那样打出来的模块没有
    `bin/`、`lib/`、`webroot/`，装上去是残的：`post-fs-data.sh` 无事可做、
-   `/data/linux/bin/linuxctl` 永远不会出现、App 也就无法控制环境）：
+   `/data/sunsetlinux/bin/linuxctl` 永远不会出现、App 也就无法控制环境）：
 
    ```bash
    bash module/mkmodule.sh --version 0.1.0
-   # 产物：dist/dshroid-module-0.1.0.zip（+ .sha256）
+   # 产物：dist/sunsetlinux-module-0.1.0.zip（+ .sha256）
    ```
 
    脚本会铺 `bin/`（运行时脚本 + `layer-spec.sh` + `selftest.sh` + 夹具）、
    `lib/`（`detect-mount.sh`）、`webroot/`（模块 WebUI），并在缺失关键项时**拒绝打包**。
 
-2. 在 KernelSU 管理器里「安装模块」→ 选 `dist/dshroid-module-<ver>.zip` → 重启。
+2. 在 KernelSU 管理器里「安装模块」→ 选 `dist/sunsetlinux-module-<ver>.zip` → 重启。
 
 3. 重启后验证：
 
    ```bash
-   su -c '/data/linux/bin/linuxctl status'
+   su -c '/data/sunsetlinux/bin/linuxctl status'
    ```
 
-> 模块的 `uninstall.sh` **默认保留 `/data/linux`**（不删你的数据和会话），只清理模块自身文件。
+> 模块的 `uninstall.sh` **默认保留 `/data/sunsetlinux`**（不删你的数据和会话），只清理模块自身文件。
 
 ### 3.1 模块 WebUI（不用打开 App 也能管理）
 
-- 形态：KernelSU 的**模块 WebUI**。在 **KernelSU 管理器 → 模块 → DSHroid** 里打开。
+- 形态：KernelSU 的**模块 WebUI**。在 **KernelSU 管理器 → 模块 → SunsetLinux** 里打开。
 - **Magisk 没有原生 WebUI**，需要第三方宿主（**MMRL** / KsuWebUI）才能显示；
   **没有也不影响使用**——App 能做同样的事，两边读写同一份配置。
 - 能做的事：看状态 / 启动·停止·重启 / **开机自启开关** / 日志尾部 / **一键诊断** / **检查并应用更新** / 回滚。
@@ -190,12 +190,12 @@ A: 环境刚启动、`dsh web` 还没打印 URL。等 2–5 秒重试；仍不�
 里有没有 `dsh web: http://...` 那一行。
 
 **Q: `linuxctl start` 报挂载失败**
-A: 跑 `/data/linux/bin/linuxctl doctor`。常见原因：上次异常退出留下半挂载状态
+A: 跑 `/data/sunsetlinux/bin/linuxctl doctor`。常见原因：上次异常退出留下半挂载状态
 （`stop` 会尽量清理）、`upper.img` 损坏、或内核不支持某个挂载选项。
 把 `doctor` 输出和 `linuxctl logs` 一起看。
 
 **Q: 环境起来一会就没了 / 被冻**
-A: 先把 DSHroid 加入**后台冻结类模块**的豁免名单，并关闭电池优化（见 §0）。
+A: 先把 SunsetLinux 加入**后台冻结类模块**的豁免名单，并关闭电池优化（见 §0）。
 root 模式下环境本体不依附 App 进程，但**系统级的冻结仍可能影响 App 的状态显示与通知**。
 
 **Q: 手机很烫之后，环境/进程直接被系统杀掉了 —— 有办法避免吗？**
@@ -212,7 +212,7 @@ A: **没有彻底的办法，这是 Android 系统级行为**（热降频 + 低�
 - 若确实要长时间跑，注意散热（别放被子里/口袋里充电运行），并关闭不必要的前台应用。
 
 **Q: root 模式不可用，只能 proot**
-A: 先确认 `su` 可用；KernelSU 下需要在管理器里给 DSHroid 授权 root。
+A: 先确认 `su` 可用；KernelSU 下需要在管理器里给 SunsetLinux 授权 root。
 proot 模式是降级方案，能力差距见 [`../runtime/proot/README.md`](../runtime/proot/README.md)。
 
 ---
@@ -221,9 +221,9 @@ proot 模式是降级方案，能力差距见 [`../runtime/proot/README.md`](../
 
 | 目标 | 操作 |
 |---|---|
-| 只卸 App | 直接卸载。**环境与数据保留**（在 `/data/linux`） |
-| 卸模块、保留数据 | 在 KernelSU 管理器卸载模块。`/data/linux` **保留** |
-| 完全清除 | 手工 `rm -rf /data/linux`（**会删除所有会话与配置，不可恢复**） |
+| 只卸 App | 直接卸载。**环境与数据保留**（在 `/data/sunsetlinux`） |
+| 卸模块、保留数据 | 在 KernelSU 管理器卸载模块。`/data/sunsetlinux` **保留** |
+| 完全清除 | 手工 `rm -rf /data/sunsetlinux`（**会删除所有会话与配置，不可恢复**） |
 
 > 对数据安全的承诺：升级只替换**只读层**，可写层（你的会话、配置、密钥）在 `upper.img` 里，
 > **不会**因为升级或换频道而丢失。上线前建议 `linuxctl snapshot <name>` 备份可写层。
