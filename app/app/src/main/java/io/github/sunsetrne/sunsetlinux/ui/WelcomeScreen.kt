@@ -123,15 +123,25 @@ fun WelcomeScreen(
                     Spacer(Modifier.height(6.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         Pill(
-                            text = when (su) {
+                            text = state.rootProbe?.label ?: when (su) {
                                 true -> "su 可用"
                                 false -> "无 su"
                                 null -> "检测中…"
                             },
-                            color = when (su) {
-                                true -> StateRunning
-                                false -> WarnTone
-                                null -> TextMuted
+                            color = when {
+                                state.rootProbe?.granted == true -> StateRunning
+                                su == false -> WarnTone
+                                else -> TextMuted
+                            },
+                            filled = true,
+                        )
+                        Pill(
+                            text = state.module?.label ?: "模块检测中…",
+                            color = when {
+                                state.module == null -> TextMuted
+                                !state.module!!.installed -> Danger
+                                state.module!!.disabled || state.module!!.pendingReboot -> WarnTone
+                                else -> StateRunning
                             },
                             filled = true,
                         )
@@ -147,6 +157,15 @@ fun WelcomeScreen(
                                 null -> TextMuted
                             },
                             filled = true,
+                        )
+                    }
+                    // ★ 状态后面跟"下一步做什么"：root 与模块各自的建议
+                    listOfNotNull(state.rootProbe?.hint, state.module?.hint).forEach { hint ->
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            text = "→ $hint",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = WarnTone,
                         )
                     }
                     Spacer(Modifier.height(10.dp))

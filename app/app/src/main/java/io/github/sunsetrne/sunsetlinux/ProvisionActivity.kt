@@ -50,7 +50,10 @@ import io.github.sunsetrne.sunsetlinux.core.Channel
 import io.github.sunsetrne.sunsetlinux.core.DshRuntime
 import io.github.sunsetrne.sunsetlinux.core.EnvMode
 import io.github.sunsetrne.sunsetlinux.core.LinuxCtl
+import io.github.sunsetrne.sunsetlinux.core.DeviceStatus
+import io.github.sunsetrne.sunsetlinux.core.ModuleStatus
 import io.github.sunsetrne.sunsetlinux.core.Prefs
+import io.github.sunsetrne.sunsetlinux.core.RootProbe
 import io.github.sunsetrne.sunsetlinux.core.ProvisionPlan
 import io.github.sunsetrne.sunsetlinux.ui.components.DshCard
 import io.github.sunsetrne.sunsetlinux.ui.components.Pill
@@ -80,6 +83,9 @@ class ProvisionActivity : ComponentActivity() {
     private val mode = mutableStateOf(EnvMode.ROOT)
     private val suAvailable = mutableStateOf<Boolean?>(null)
     private val ctlReady = mutableStateOf<Boolean?>(null)
+    // root / 模块的**可解释**状态（用户要的"检测"）：不再只显示一个"su 不可用"
+    private val rootProbe = mutableStateOf<RootProbe?>(null)
+    private val moduleStatus = mutableStateOf<ModuleStatus?>(null)
     private val channels = mutableStateListOf<Channel>()
     private val selectedChannelId = mutableStateOf<String?>(null)
     private val seedDir = mutableStateOf("")
@@ -105,6 +111,8 @@ class ProvisionActivity : ComponentActivity() {
                     mode = mode.value,
                     suAvailable = suAvailable.value,
                     ctlReady = ctlReady.value,
+                    rootProbe = rootProbe.value,
+                    moduleStatus = moduleStatus.value,
                     channels = channels,
                     selectedChannelId = selectedChannelId.value,
                     seedDir = seedDir.value,
@@ -146,9 +154,17 @@ class ProvisionActivity : ComponentActivity() {
     /** 自检：su 是否可用、当前模式下 linuxctl 是否就位。 */
     private fun probe() {
         lifecycleScope.launch(Dispatchers.IO) {
-            val su = DshRuntime.suAvailable(force = true)
-            
-            withMain { suAvailable.value = su }
+            // ① root：拿到**状态**（没有 su / 被拒 / 超时 / 已授权），不只是布尔
+            val probe = DeviceStatus.root(force = true)
+            val su = probe.granted
+            // ② 模块：装没装、版本、是否停用、是否"装了没重启"
+            val module = DeviceStatus.module(force = true)
+
+            withMain {
+                rootProbe.value = probe
+                moduleStatus.value = module
+                suAvailable.value = su
+            }
             val effective = when {
                 mode.value == EnvMode.ROOT && !su -> EnvMode.PROOT
                 else -> mode.value
@@ -156,8 +172,12 @@ class ProvisionActivity : ComponentActivity() {
             val ready = LinuxCtl(this@ProvisionActivity, effective).exists()
             withMain {
                 ctlReady.value = ready
+                appendLog("环境检测：${probe.label}（${probe.detail}）")
+                appendLog("环境检测：${module.label}")
+                probe.hint?.let { appendLog("→ $it") }
+                module.hint?.let { appendLog("→ $it") }
                 if (mode.value == EnvMode.ROOT && !su) {
-                    appendLog("提示：本机没有可用的 su，root 模式不可选。")
+                    appendLog("提示：当前拿不到 root，本次会按 proot 模式走。")
                 }
             }
         }
@@ -283,6 +303,8 @@ private fun ProvisionScreen(
     mode: EnvMode,
     suAvailable: Boolean?,
     ctlReady: Boolean?,
+    rootProbe: RootProbe?,
+    moduleStatus: ModuleStatus?,
     channels: List<Channel>,
     selectedChannelId: String?,
     seedDir: String,
@@ -423,8 +445,32 @@ private fun ProvisionScreen(
                     )
                     Spacer(Modifier.width(8.dp))
                     Pill(
-                        text = if (suAvailable == true) "su 可用" else "su 不可用",
-                        color = if (suAvailable == true) Accent else WarnTone,
+                        text = rootProbe?.label ?: if (suAvailable == true) "su 可用" else "su 不可用",
+                        color = when {
+                            rootProbe == null -> TextMuted
+                            rootProbe.granted -> StateRunning
+                            rootProbe.state == io.github.sunsetrne.sunsetlinux.core.RootState.UNKNOWN -> TextMuted
+                            else -> Danger
+                        },
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Pill(
+                        text = moduleStatus?.label ?: "模块检测中…",
+                        color = when {
+                            moduleStatus == null -> TextMuted
+                            !moduleStatus.installed || moduleStatus.disabled -> WarnTone
+                            moduleStatus.pendingReboot -> WarnTone
+                            else -> StateRunning
+                        },
+                    )
+                }
+                // 说不清就没意义 —— 状态后面必须跟"下一步做什么"
+                listOfNotNull(rootProbe?.hint, moduleStatus?.hint).forEach { hint ->
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        text = "→ $hint",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = WarnTone,
                     )
                 }
                 Spacer(Modifier.height(12.dp))

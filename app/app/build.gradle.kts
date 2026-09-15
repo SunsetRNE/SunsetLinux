@@ -21,8 +21,10 @@ android {
         //        mksh 没有 printf %q、profiles/ 没随包）。
         // 0.2.3：修**一打开就闪退**：zstd 能力探测走 aircompressor 的 direct-ByteBuffer/Unsafe
         //        快路径，在 Android 上 SIGSEGV（进程直接死，catch 不住）。改成流式解码。
-        versionCode = 5
-        versionName = "0.2.3"
+        // 0.2.4：root / 模块检测从"布尔"升级成"可解释状态 + 下一步"（首启引导与部署向导都显示）；
+        //        「更新」页修好了"本地版本读不出来 ⇒ 永远看不到可更新层"这个坑。
+        versionCode = 6
+        versionName = "0.2.4"
     }
 
     // ────────────────────────────────────────────────────────────────────────

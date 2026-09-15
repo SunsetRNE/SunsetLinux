@@ -15,6 +15,12 @@ data class CtlResult(
     val stdout: String,
     val stderr: String,
     val error: String? = null,
+    /**
+     * **失败的种类**（机器可读）。为什么不能只看 `error` 字符串：
+     * 「没有 su」和「su 授权超时」都要给用户不同的下一步，靠中文串去 contains 太脆。
+     * 目前只有 [Proc.exec] 会填；其它构造点默认 [FailKind.NONE]（= 没失败）。
+     */
+    val fail: FailKind = FailKind.NONE,
 ) {
     val ok: Boolean get() = error == null && exitCode == 0
 
@@ -26,8 +32,24 @@ data class CtlResult(
             ?: "命令退出码 $exitCode"
 
     companion object {
-        fun fail(message: String, exitCode: Int = -1): CtlResult = CtlResult(exitCode, "", "", message)
+        fun fail(message: String, exitCode: Int = -1, kind: FailKind = FailKind.OTHER): CtlResult =
+            CtlResult(exitCode, "", "", message, kind)
     }
+}
+
+/** [CtlResult.fail] 的种类。 */
+enum class FailKind {
+    /** 没有失败（正常返回）。 */
+    NONE,
+
+    /** 进程根本没起来：可执行文件不存在 / 没有执行权限（例：设备上没有 su）。 */
+    START_FAILED,
+
+    /** 超时被杀：最常见的原因是**卡在 root 授权弹窗**上。 */
+    TIMEOUT,
+
+    /** 别的失败（退出码非 0、内部错误…）。 */
+    OTHER,
 }
 
 /**
@@ -54,7 +76,7 @@ internal object Proc {
                 }
                 .start()
         } catch (e: IOException) {
-            return CtlResult.fail(friendlyStartFailure(cmd.first(), e))
+            return CtlResult.fail(friendlyStartFailure(cmd.first(), e), kind = FailKind.START_FAILED)
         }
 
         val stdout = StringBuilder()
@@ -70,7 +92,7 @@ internal object Proc {
         } catch (e: InterruptedException) {
             Thread.currentThread().interrupt()
             process.destroy()
-            return CtlResult.fail("命令被取消")
+            return CtlResult.fail("命令被取消", kind = FailKind.OTHER)
         }
 
         if (!finished) {
@@ -78,7 +100,8 @@ internal object Proc {
             if (!process.waitFor(2, TimeUnit.SECONDS)) process.destroyForcibly()
             return CtlResult.fail(
                 "命令超时（${timeoutMs / 1000} 秒未返回）：${cmd.joinToString(" ")}。" +
-                    "如果设备刚弹出 root 授权请求，请先允许本应用使用 root 再重试。"
+                    "如果设备刚弹出 root 授权请求，请先允许本应用使用 root 再重试。",
+                kind = FailKind.TIMEOUT,
             )
         }
 
@@ -101,7 +124,7 @@ internal object Proc {
         val process = try {
             ProcessBuilder(cmd).start()
         } catch (e: IOException) {
-            return CtlResult.fail(friendlyStartFailure(cmd.first(), e))
+            return CtlResult.fail(friendlyStartFailure(cmd.first(), e), kind = FailKind.START_FAILED)
         }
 
         val stdout = StringBuilder()
@@ -122,7 +145,7 @@ internal object Proc {
         } catch (e: InterruptedException) {
             Thread.currentThread().interrupt()
             process.destroy()
-            return CtlResult.fail("命令被取消")
+            return CtlResult.fail("命令被取消", kind = FailKind.OTHER)
         }
 
         if (!finished) {
@@ -156,7 +179,7 @@ internal object Proc {
                 }
                 .start()
         } catch (e: IOException) {
-            return CtlResult.fail(friendlyStartFailure(cmd.first(), e))
+            return CtlResult.fail(friendlyStartFailure(cmd.first(), e), kind = FailKind.START_FAILED)
         }
 
         val stdout = StringBuilder()
@@ -237,11 +260,24 @@ internal object SuShell {
         null
     }
 
-    /** 探测设备是否具备可用的 su（proot 模式的判定依据）。 */
-    fun probe(timeoutMs: Long = 6000L): Boolean {
-        if (libsuGranted() == true) return true
-        val r = execViaProcessBuilder("id", timeoutMs)
-        return r.exitCode == 0 && r.stdout.contains("uid=0")
+    /** 探测设备是否具备可用的 su（proot 模式的判定依据，保留布尔接口）。 */
+    fun probe(timeoutMs: Long = 6000L): Boolean = probeState(timeoutMs).granted
+
+    /**
+     * 探测 root 的**状态**（不只是"有没有"）。
+     *
+     * 为什么必须细分 —— 这三种情况的下一步完全不同，以前一律显示"su 不可用"，
+     * 用户根本不知道是"没刷模块"还是"没点允许"还是"弹窗超时了"：
+     *   · [RootState.NO_SU]   ：设备没有 su 二进制 → 只能走 proot，或先刷 KernelSU
+     *   · [RootState.DENIED]  ：su 在，但被拒绝 → 去 KernelSU 里给本应用授权
+     *   · [RootState.TIMEOUT] ：卡在授权弹窗 → 屏幕上看一眼有没有弹窗
+     *   · [RootState.GRANTED] ：真拿到了 uid=0
+     */
+    fun probeState(timeoutMs: Long = 6000L): RootProbe {
+        libsuGranted()?.let { granted ->
+            if (granted) return RootProbe(RootState.GRANTED, "KernelSU 已授权本应用（libsu）")
+        }
+        return RootProbe.from(exec("id", timeoutMs))
     }
 
     fun exec(command: String, timeoutMs: Long): CtlResult =

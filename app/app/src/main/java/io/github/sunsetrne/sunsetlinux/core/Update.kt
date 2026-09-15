@@ -40,6 +40,7 @@ data class LayerUpdate(
 ) {
     val key: String get() = "$id:${toVersion ?: sha256Raw ?: primary?.url ?: fallback?.url ?: "?"}"
 
+
     /**
      * §5.2 消费方规则 1：**支持 zstd 就取 `url`，否则取 `url_gz`**。
      * 两者都不可得 → null，由调用方明确报错（绝不静默跳过）。
@@ -99,6 +100,20 @@ object UpdateChecker {
             }
         }
 
+    /**
+     * 这一层到底要不要装？**纯函数**，便于单测（真机上这个判断错一次就是"看起来没更新"）。
+     *
+     * 规则（每条都有真机依据）：
+     *   · 远端没有版本号 → 不装（清单里缺版本说明它自己就没准备好）
+     *   · 本地**没有**这层（本地版本为 null 且 `status` 里也没有这条）→ 装
+     *   · ★ 本地**有**这层但**版本号读不出来**（例：老版本 `linuxctl provision` 写的
+     *     `state.json` 里三个层都是 `"version": null`）→ **也要装**。
+     *     以前这里返回 false（"无需更新"），结果是：一个"文件在、但元数据是空的"环境
+     *     永远等不到修复 —— 用户在「更新」页看不到任何可装的层，只能靠自己发现。
+     *     装完 `linuxctl update … --version X` 会把版本号写进 state.json，下一次就正常比较了，
+     *     所以这条**不会**变成"永远提示有更新"。
+     *   · 两边都有版本 → 不同才装。
+     */
     private fun checkOne(channel: Channel, current: DshStatus): ChannelReport {
         return try {
             val body = Http.getBytes(channel.url)
@@ -163,12 +178,7 @@ object UpdateChecker {
 
             val updates = remote.mapNotNull { layer ->
                 val local = current.layer(layer.id)
-                val changed = when {
-                    local == null -> true // 本地没有这层 → 需要安装
-                    local.version == null || layer.version == null -> false
-                    local.version != layer.version -> true
-                    else -> false
-                }
+                val changed = needsInstallDecision(local?.version, layer.version)
                 if (!changed) {
                     null
                 } else {
@@ -467,4 +477,26 @@ object UpdateApplier {
             runCatching { rawImage.delete() }
         }
     }
+}
+
+/**
+ * 这一层到底要不要装？**纯函数**，便于单测（真机上这个判断错一次就是"看起来没更新"）。
+ *
+ * 规则（每条都有真机依据）：
+ *   · 远端没有版本号 → 不装（清单里缺版本说明它自己就没准备好）
+ *   · 本地**没有**这层的记录（版本为 null）→ 装
+ *   · ★ 本地**有**层、但**版本号读不出来**（例：老版本 `linuxctl provision` 写的
+ *     `state.json` 里三个层都是 `"version": null`）→ **也要装**。
+ *     以前这里返回 false（= "无需更新"），结果是：一个"文件在、元数据是空的"环境
+ *     **永远等不到修复** —— 用户在「更新」页看不到任何可装的层，只能自己发现要先删层。
+ *   · 两边都有版本 → 不同才装。
+ *
+ * 不会变成"永远提示有更新"：装完 `linuxctl update … --version X` 会把版本号写进
+ * `state.json`，下一次就是正常的版本比较。
+ */
+internal fun needsInstallDecision(localVersion: String?, remoteVersion: String?): Boolean = when {
+    remoteVersion == null -> false
+    localVersion == null -> true
+    localVersion != remoteVersion -> true
+    else -> false
 }

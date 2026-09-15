@@ -66,4 +66,18 @@ class ProvisionWiringTest {
             proc.contains("stdout.append(line)"),
         )
     }
+
+    @Test
+    fun `两个向导都要显示 root 与模块的可解释状态`() {
+        for (rel in listOf("ProvisionActivity.kt", "ui/WelcomeState.kt")) {
+            val text = read(rel)
+            assertTrue("$rel 没读 root 状态（DeviceStatus.root）", text.contains("DeviceStatus.root("))
+            assertTrue("$rel 没读模块状态（DeviceStatus.module）", text.contains("DeviceStatus.module("))
+        }
+        val provision = read("ProvisionActivity.kt")
+        val welcome = read("ui/WelcomeScreen.kt")
+        for ((name, text) in listOf("ProvisionActivity.kt" to provision, "ui/WelcomeScreen.kt" to welcome)) {
+            assertTrue("$name 没有把「下一步」提示渲染出来（hint）", text.contains(".hint"))
+        }
+    }
 }
