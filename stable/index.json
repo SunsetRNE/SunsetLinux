@@ -1,10 +1,10 @@
 {
   "schema": 1,
   "channel": "stable",
-  "built_at": "2026-09-15T20:07:55Z",
-  "commit": "cd054a13b9f819642e6e73bab1b2b1c210718ef6",
-  "run_number": 31,
-  "module_version": "1.0.2",
+  "built_at": "2026-09-15T20:17:04Z",
+  "commit": "8a88dddccb19c80b0b9ed5451c6909d9701d6d3c",
+  "run_number": 33,
+  "module_version": "1.0.3",
   "files": [
     {
       "name": "sunsetlinux-launcher-debug.apk",
@@ -12,14 +12,14 @@
       "sha256": "65276e334e5e719dd868679f66cf971d469dea64cc69f2f6db024ff50d24dbfb"
     },
     {
-      "name": "sunsetlinux-module-1.0.2.zip",
-      "size": 168359,
-      "sha256": "479be20a6f9fb507f1980f67dafef61bd30de136386211f98e42fa5ac599b287"
+      "name": "sunsetlinux-module-1.0.3.zip",
+      "size": 169060,
+      "sha256": "5de9674381fb8f43cd761cf0e9a76d47efec8a4598b978ab8a0ff557007be53b"
     },
     {
-      "name": "sunsetlinux-module-1.0.2.zip.sha256",
+      "name": "sunsetlinux-module-1.0.3.zip.sha256",
       "size": 142,
-      "sha256": "fe10cdaf6437028a29a770c349532c07fc090f1a9f6109befd8e3477978e10c8"
+      "sha256": "af349e42c8a2c671772b8958de8c7532e5ccc3b7e00952f08dcc61b5b7df49d8"
     }
   ]
 }
