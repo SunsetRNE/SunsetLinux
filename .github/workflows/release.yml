@@ -239,6 +239,8 @@ jobs:
                       "它们走频道分发：App 的「内置官方频道」，或终端里 <code>linuxctl update</code>。</p>\n"
                       "<p class=\"note\"><a href=\"https://github.com/"
                       + os.environ.get("GITHUB_REPOSITORY", "") + "\">仓库</a> · "
+                      "<a href=\"https://github.com/" + os.environ.get("GITHUB_REPOSITORY", "")
+                      + "/releases\">Releases 发布页</a>（同一份产物 + 发布说明） · "
                       "本页由 CI 生成（每次发布重写），别手工改 gh-pages。</p>\n"
                       "</main></body></html>\n")
 
@@ -260,6 +262,9 @@ jobs:
               dl.append(f'<a class="btn" href="{html.escape(seed["name"])}">下载离线种子'
                         f'<small>{human(seed["size"])} · 解到 /data/sunsetlinux/seeds（别放子目录）</small></a>')
           dl.append('<a class="btn ghost" href="index.json">index.json（给脚本/机器读）</a>')
+          dl.append('<a class="btn ghost" href="https://github.com/'
+                    + os.environ.get("GITHUB_REPOSITORY", "")
+                    + '/releases">GitHub Releases 发布页（同一份产物 + 发布说明）</a>')
 
           steps = ("<ol><li>装上面的 APK（App）。</li>"
                    "<li>在 KernelSU 管理器里装模块 zip，然后<b>重启一次</b>（让模块把脚本铺到 /data/sunsetlinux）。</li>"
@@ -320,6 +325,76 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: dist/_root
           keep_files: true
+
+      # ── GitHub Releases：给"人看的发布页"（与 gh-pages 双发布，产物是同一份）────
+      #   ★ 两类 tag 分工不同，别混：
+      #     · `v<App 版本>`（例 v0.2.4）= **产品发布**（本步骤），资产 = APK / 模块 zip / index.json
+      #     · `layers-<日期>`            = **层的纯存储**（layers-release.yml），资产 = .erofs.zst/.gz
+      #   同一版本重复发布是**幂等**的（Release 在就覆盖资产 + 刷新说明），
+      #   所以"只升模块版本"的推送不会把 Releases 页刷成一堆重复条目。
+      #   只在 stable 跑：beta 是"下一版候选"，看 /beta/ 就够，不该往 Releases 页塞预发布。
+      - name: 发布到 GitHub Releases（仅 stable）
+        if: steps.ch.outputs.dir == 'stable'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          OUT="dist/_publish"
+          # App 版本从 build.gradle.kts 读（唯一事实源，不在这里另写一份版本号）
+          APP_VER="$(sed -n 's/^[[:space:]]*versionName[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' app/app/build.gradle.kts | head -n1)"
+          [ -n "$APP_VER" ] || { echo "::error::读不出 app/app/build.gradle.kts 的 versionName（发布中止）"; exit 1; }
+          TAG="v$APP_VER"
+          TITLE="SunsetLinux $APP_VER（模块 $MODULE_VERSION）"
+          REPO="${{ github.repository }}"
+          SITE="https://${{ github.repository_owner }}.github.io/${{ github.repository }}"
+
+          {
+            echo "Android 上的原生 DSH 运行环境：真 chroot + overlayfs 的 Ubuntu 24.04，跑原生 DSH。"
+            echo ""
+            echo "| 组件 | 版本 | 说明 |"
+            echo "|---|---|---|"
+            echo "| App（APK） | \`$APP_VER\` | 覆盖安装即可，数据不丢；签名固定（debug 密钥随仓库提交） |"
+            echo "| KernelSU 模块 | \`$MODULE_VERSION\` | 用 KernelSU 管理器安装，装完**重启一次** |"
+            echo ""
+            echo "### 安装顺序"
+            echo ""
+            echo "1. 装 \`sunsetlinux-launcher-debug.apk\`（App）。"
+            echo "2. KernelSU 管理器里装 \`sunsetlinux-module-$MODULE_VERSION.zip\`，然后**重启一次**。"
+            echo "3. **层镜像**（base / runtime / dsh）不用自己构建："
+            echo "   打开 App →「更新」页 → 官方频道 → 一键安装（App 自己解 zstd，约 96 MB，几分钟）；"
+            echo "   或从终端按 [Releases \`layers-*\`](https://github.com/$REPO/releases) 里的 gzip 产物手装。"
+            echo "4. 启动环境：App 首页点「启动环境」，或 \`/data/sunsetlinux/bin/linuxctl start\`。"
+            echo ""
+            echo "### 产物与校验"
+            echo ""
+            echo "| 文件 | 大小 | sha256 |"
+            echo "|---|---|---|"
+            for f in "$OUT"/*; do
+              [ -f "$f" ] || continue
+              n="$(basename "$f")"
+              sz="$(stat -c '%s' "$f" 2>/dev/null || echo 0)"
+              sha="$(sha256sum "$f" | awk '{print $1}')"
+              echo "| \`$n\` | $sz | \`$sha\` |"
+            done
+            echo ""
+            echo "### 其他入口"
+            echo ""
+            echo "- 下载页（同一条通道，含历史说明）：$SITE/stable/"
+            echo "- 签名频道清单（App 内置频道读它）：$SITE/channel/channel.json"
+            echo "- 层镜像存储（\`layers-*\` tag）：https://github.com/$REPO/releases"
+            echo ""
+            echo "_本说明由 CI 生成（每次发布重写）；commit \`${{ github.sha }}\`，run #${{ github.run_number }}。_"
+          } > dist/_release-notes.md
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG 已存在 → 覆盖资产 + 刷新说明（幂等，不新建条目）"
+            gh release upload "$TAG" "$OUT"/* --clobber
+            gh release edit "$TAG" --title "$TITLE" --notes-file dist/_release-notes.md
+          else
+            echo "新建 Release $TAG"
+            gh release create "$TAG" --title "$TITLE" --notes-file dist/_release-notes.md "$OUT"/*
+          fi
+          echo "- Release：https://github.com/$REPO/releases/tag/$TAG" >> "$GITHUB_STEP_SUMMARY"
 
       - name: 输出下载地址
         run: |

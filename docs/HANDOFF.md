@@ -13,7 +13,7 @@
   再往前一格 `abb321f` 是 run 42/43（模块 1.0.5 + App 0.2.0）。
   **真机第一跑（05:36）→ run 46/47（`327001c`）：模块 `1.0.6` + App `0.2.2`**（两个坑，见 §一 第 14 条）。
   **真机第二跑（05:52）→ run 48（`60c4206`）/ 49·50（`c8c84e7`）：模块 `1.0.7`**（空数组那个坑 + 删除误报，见 §一 第 15 条）。
-- **下载页（别点 GitHub Releases，那里永远是空的）**：
+- **下载页**（与 Releases 页**双发布**，产物是同一份）：
   <https://sunsetrne.github.io/SunsetLinux/> → `/stable/`（正式）· `/beta/`（预发布）。
 - **内置官方频道的公开指纹**（与 `core/Prefs.kt` 里写死的那把是同一把，App 自带的
   `OfficialChannelContractTest` 会**逐字比对**这段文本，改这里必须同步改代码）：
@@ -338,7 +338,7 @@ curl -s https://sunsetrne.github.io/SunsetLinux/stable/index.json
   `local files="a b c"` 切成 `local files="a b="" c"` —— 引号内的空格必须按 token 处理；
   改完一定要 `git diff` 逐行看一遍（本次差点把这个残次品提交上去）。
 - **GitHub Release 资产地址会 302**：任何"能不能下载"的预检都要 `curl -L`（`channel.yml` 已修）。
-- **Releases 页面永远是空的**（刻意不用 tag）；下载页在 gh-pages，见 §〇。
+- **Releases 页现在有两类 tag，别混**：`v<App 版本>`（例 `v0.2.4`）= **产品发布**（APK / 模块 zip / index.json，由 `release.yml` 在 stable 上幂等创建或刷新）；`layers-<日期>` = **层文件的纯存储**（由 `layers-release.yml` 收集）。下载页仍在 gh-pages（`/stable/`、`/beta/`），两边指向同一份产物。
 - **签名必须固定**：授权按【包名+签名】记（KernelSU），换 key 会让已授的 root 全失效。
 - **`--link2symlink` 只有 proot ≥5.3 有**，喂给老 proot 会 fatal；启用后注意
   `NARB_DISABLE_NATIVE_CACHE=1` 那类缓存悬空问题（上游踩过）。
