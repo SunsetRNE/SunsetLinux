@@ -30,12 +30,10 @@ on:
       - '.github/workflows/channel.yml'   # 频道工作流自身由 channel 分支触发
   workflow_dispatch:
 
-concurrency:
-  # ★ 与 channel.yml **共用同一个组**：两个工作流都会写 gh-pages。
-  #   各用各的组名时，两者可能同时在 checkout→写→force push，后到者会覆盖先到者的目录
-  #   （keep_files 也救不了：它保护的是"运行开始时已经存在的文件"）。
-  group: gh-pages
-  cancel-in-progress: false      # 发布不并发跑，避免两个运行同时写 gh-pages
+# ⚠️ 并发只锁在**写 gh-pages 的那一个 job** 上（见下面 publish 的 concurrency），
+#    工作流级别**不设** —— 否则 beta 与 main 的门禁（纯验证，不写任何东西）
+#    也会被串行化，白等一轮。同一组里只允许一个 pending：两个分支背靠背推送时
+#    后到者会顶掉先到者，所以**发布请一个通道一个通道来**（实测踩过）。
 
 jobs:
   # ① 发布前必须过全量回归（复用 ci.yml，结构上保证，不靠人记得）
@@ -48,6 +46,11 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write            # 需要推 gh-pages 分支
+    # ★ 与 channel.yml 共用同一个组：都会写 gh-pages。放在 **job 级**，
+    #   这样两个分支的门禁可以并行验证，只有"真正写 gh-pages"这一步需要排队。
+    concurrency:
+      group: gh-pages
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
 
@@ -62,40 +65,19 @@ jobs:
             echo "label=正式（stable）" >> "$GITHUB_OUTPUT"
           fi
 
-      - uses: actions/setup-java@v4
+      # ★ 不再重编 APK：门禁那个 job 已经编过并把产物上传成制品 `apk-debug`。
+      #   这里只下载，省掉一次完整 Gradle 构建（实测约 2m40s）。
+      - name: 取回门禁构建好的 APK（制品）
+        uses: actions/download-artifact@v4
         with:
-          distribution: temurin
-          java-version: '17'
+          name: apk-debug
+          path: apk-artifact
 
-      - uses: android-actions/setup-android@v4
-        with:
-          # ★ 不要用它的默认值（`tools platform-tools`）：`tools` 包**已经从 Google 的
-          #   SDK 仓库移除**，sdkmanager 会报 "Failed to find package 'tools'" 并以 1 退出
-          #   —— 实测就是这样把 CI 卡死的（动作本身没坏，是默认包列表过时了）。
-          #   只装确实需要的：platform-tools + 我们的 compileSdk(35) 平台。
-          #   build-tools 交给 AGP 按需下载（licenses 已由本动作接受）。
-          packages: 'platform-tools platforms;android-35'
-          # 接受许可证但**不要把它们打印出来**：默认会把 6 段许可证全文刷进日志
-          # （实测一次几千行），把真正有用的构建输出淹掉了。
-          accept-android-sdk-licenses: true
-          log-accepted-android-sdk-licenses: false
-
-      - name: 关掉 Gradle 守护进程
-        run: echo "org.gradle.daemon=false" >> app/gradle.properties
-
-      - name: 构建 APK
-        working-directory: app
-        run: ./gradlew --no-daemon :app:assembleDebug
-
-      # ★ 把 APK 收进 dist/ 并用**发布的命名**：下游「收集产物」是按 `dist/*.apk` 找的，
-      #   而 Gradle 的产物在 `app/app/build/outputs/apk/debug/app-debug.apk`。
-      #   本地之所以没暴露这个问题，是因为手工往 dist/ 拷过 —— CI 上没有这一步就直接
-      #   `cp: cannot stat 'dist/*.apk'` 挂掉（实测）。命名与本地/文档保持一致。
-      - name: 收集 APK 到 dist/（统一命名）
+      - name: 把制品 APK 收进 dist/（统一命名）
         run: |
           set -euo pipefail
-          SRC="app/app/build/outputs/apk/debug/app-debug.apk"
-          [ -f "$SRC" ] || { echo "::error::没找到构建产物：$SRC"; exit 1; }
+          SRC="apk-artifact/app-debug.apk"
+          [ -f "$SRC" ] || { echo "::error::没找到门禁上传的 APK 制品：$SRC（制品名/路径改了？同步 ci.yml 的 upload-artifact）"; exit 1; }
           cp -v "$SRC" dist/sunsetlinux-launcher-debug.apk
           ( cd dist && sha256sum sunsetlinux-launcher-debug.apk > sunsetlinux-launcher-debug.apk.sha256 )
 

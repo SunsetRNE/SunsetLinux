@@ -52,20 +52,57 @@ https://<用户名>.github.io/<仓库名>/stable/channel.json
 
 ---
 
+## 二·五、拓扑：**三条线路 + 多节点并行**
+
+```
+线路① 回归门禁 ci.yml          每条推送/PR，三个 job 并行（各占一个 runner）
+      ├─ shell   运行时脚本断言（bash + mksh）＋ 设备侧 mksh 闸门 ＋ .sh 语法
+      ├─ node    WebUI 纯函数 / 版本一致性 / status 契约 / .mjs 语法
+      └─ android App 构建 + 单测  ──上传制品──▶ apk-debug
+                                              │
+线路② 发布 release.yml（beta/main 分支）        │ 下载制品，**不再重编**
+      ├─ gate    复用 ①（workflow_call；任一 job 红 → 发布被挡）
+      └─ publish APK(制品) + 模块 zip + index.json → gh-pages /beta|/stable/
+                                              │
+线路③ 层与频道 layers.yml（手动触发）            │
+      ├─ 跑在**自带 arm64 标签的自建 runner**上（244 MiB、要真 chroot）
+      ├─ 增量：按输入选择 --skip-base/--skip-runtime（日常只重打 dsh 层）
+      └─ gen-manifest →（有私钥时）sign + 独立验签 → 制品/gh-pages /channel/
+```
+
+**为什么要拆**（都是实测数字）：
+
+| 问题 | 原来 | 现在 |
+|---|---|---|
+| 总时长 = 各检查**累加** | 单 job 串行：`apt` + 5 组断言 + 语法 + Android 构建 | 三个 job 并行 → **总时长≈最慢的那个** |
+| APK **编了两遍** | gate 里编一次，publish 里又编一次（每次约 2m40s） | publish 直接下载 `apk-debug` 制品 |
+| Gradle 依赖每次重下 | 无缓存，每次 2m40s 里大半在下 Gradle/依赖 | `actions/cache` 缓存 `~/.gradle/{caches,wrapper}` |
+| 改 App 也要重建 244 MiB 的层 | 层构建塞在同一条线上 | 线路③独立，且支持增量（只重打变化的那层） |
+
+> ⚠️ 拆 job **不等于**放松门禁：三个 job 里任何一个红，`gate` 就红，发布被挡住
+> （`release.yml` 里 `gate` 用 `workflow_call` 复用 `ci.yml`，这是结构保证，不靠人记得）。
+>
+> ⚠️ 制品契约：`ci.yml` 的 `android` job 上传 **`apk-debug`**，`release.yml` 的 `publish`
+> 下载同名制品。改名字/路径时两边必须同步（否则发布会在"找不到 APK 制品"处失败）。
+
+---
+
 ## 三、回归门禁（发布前必过）
 
 无论哪个分支，CI 先跑**同一套全量检查**；**任一失败即中止发布**（不发半成品）。
 
-| 检查 | 命令 | 断言数 |
-|---|---|---|
-| Android 单测（必须两条一起跑） | `./gradlew :app:assembleDebug :app:testDebugUnitTest` | 47 |
-| root 运行时回归（bash） | `bash runtime/root/selftest.sh` | 20 |
-| root 运行时回归（**mksh**，模拟设备侧） | `mksh runtime/root/selftest.sh` | 20 |
-| proot 运行时回归 | `bash runtime/proot/selftest.sh` | 18 |
-| 模块 WebUI 纯函数 | `node module/webroot/selftest.mjs` | 60 |
-| 三方版本比较一致性 | `node tools/cmp-consistency.mjs` | 16 |
-| status JSON 契约 | `node tools/contract-check.mjs` | 冻结 schema |
-| **设备侧 shell 兼容性**（mksh 可解析 + shebang 正确） | `node tools/shell-compat-check.mjs` | 19 个脚本 |
+| job | 检查 | 命令 | 断言数 |
+|---|---|---|---|
+| android | Android 单测（必须两条一起跑） | `./gradlew :app:assembleDebug :app:testDebugUnitTest` | 47 |
+| shell | root 运行时回归（bash） | `bash runtime/root/selftest.sh` | 20 |
+| shell | root 运行时回归（**mksh**，模拟设备侧） | `mksh runtime/root/selftest.sh` | 20 |
+| shell | proot 运行时回归 | `bash runtime/proot/selftest.sh` | 18 |
+| shell | **设备侧 shell 兼容性**（mksh 可解析 + shebang 正确） | `node tools/shell-compat-check.mjs` | 19 个脚本 |
+| shell | `.sh` 语法（全套） | `bash -n` 遍历 | — |
+| node | 模块 WebUI 纯函数 | `node module/webroot/selftest.mjs` | 60 |
+| node | 三方版本比较一致性 | `node tools/cmp-consistency.mjs` | 16 |
+| node | status JSON 契约 | `node tools/contract-check.mjs` | 冻结 schema |
+| node | `.mjs` 语法 | `node --check` 遍历 | — |
 
 > ⚠️ **`assembleDebug` 不编译 test 源集**：只跑它会**静默跳过全部单测**。
 > 这在开发中真实发生过一次（单测引用已删除的符号，APK 照样出得来）。所以这两条永远一起跑。
@@ -77,17 +114,25 @@ https://<用户名>.github.io/<仓库名>/stable/channel.json
 
 ---
 
-## 四、层产物（base/runtime/dsh）：**不要每次推送都重建**
+## 四、层产物（base/runtime/dsh）：走**独立线路**，且支持增量
 
-三层两式合计约 150 MB，而且构建需要 **arm64 + 真 chroot + qemu/binfmt**（GitHub 的 runner 是 x86-64）。
-每次推送都重建会又慢又浪费。所以：
+三层两式合计约 **244 MiB**（实测 base 18.6+26.5 / runtime 46.5+73.5 / dsh 31.2+47.8 MiB），
+构建需要 **arm64 + 真 chroot + mmdebstrap**。所以它既不进 CI 的日常路径，也不和 App 抢时间：
 
 | 产物 | 触发方式 | 说明 |
 |---|---|---|
-| APK / 模块 zip | **每次推送**（beta/main） | 小、快（`app/`、`module/`、`runtime/` 任一变化就该重发） |
-| 三层镜像 | **手动触发**，或**仅当 `rootfs/` 变化时** | 工作流里用 `docker/setup-qemu-action` 提供 arm64 模拟；也可在有 arm64 机器时本地构建后上传 |
+| APK / 模块 zip | 每次推送（beta/main）→ 线路② | 小、快 |
+| 三层镜像 + channel.json | **手动触发** `layers.yml` → 线路③ | 跑在**自建 arm64 runner** 上；可与①②并行 |
 
-> 层的**日常增量**交给频道本身：用户升级只下 `dsh` 层（约 31 MB），不需要 CI 每次重发三份。
+线路③的两个关键设计：
+
+1. **增量重编**：`build-layers.sh` 支持 `--work-dir <保留目录>` + `--skip-base` / `--skip-runtime`。
+   工作流按输入选档：改 DSH 版本选 `dsh`（复用 base/runtime 树，只重打 dsh 层），
+   改基础系统才选 `base`。**默认 `dsh`** —— 因为用户日常升级也只下这一层。
+2. **私钥可选**：配了 Secret `CHANNEL_SIGNING_KEY` 就地签名 + 独立验签；
+   没配就只出清单，打印出"拿到有私钥的机器上怎么签"的命令（默认做法，见 `docs/updates.md` §2.9）。
+
+> 层的**日常增量**交给频道本身：用户升级只下 `dsh` 层（约 31 MB），不需要每次重发三份。
 
 ---
 

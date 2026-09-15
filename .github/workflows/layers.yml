@@ -1,0 +1,191 @@
+# ============================================================================
+# 第三条线路：**层镜像 + 频道发布**（arm64 · 自建 runner · 手动触发）
+#
+# ## 为什么单独一条线路
+#   三层 EROFS 镜像合计约 244 MiB（base 18.6+26.5 / runtime 46.5+73.5 / dsh 31.2+47.8 MiB），
+#   而且构建需要 **arm64 + 真 chroot + mmdebstrap**（GitHub 托管 runner 是 x86-64，
+#   要 qemu/binfmt，慢且容易踩坑）。所以它**不进** app 那条线路：
+#
+#     线路 ①  回归门禁（ci.yml）        —— 每次推送，3 个并行节点
+#     线路 ②  发布 App/模块（release.yml）—— beta/main 分支，复用①的 APK 制品
+#     线路 ③  层 + 频道（本文件）        —— 手动触发，跑在 arm64 自建 runner 上，可与①②并行
+#
+#   三者互不阻塞：改 App 不会重编 244 MiB 的层，改层也不必重编 APK。
+#
+# ## 前置：注册一台 arm64 自建 runner（你自己的机器 / 手机 / 服务器）
+#   仓库 Settings → Actions → Runners → New self-hosted runner，按提示装好并启动后，
+#   用带 `arm64` 标签的 runner 跑本工作流。要求该机器：
+#     · 能 apt 安装 mmdebstrap / rsync / mkfs.erofs（erofs-utils）/ zstd / node ≥ 20
+#     · 能联网（下载 Ubuntu base 与 Node 官方包）
+#     · 有 ~4 GB 空闲磁盘（构建工作目录默认保留，用于下次 `--skip-*` 增量重编）
+#
+# ## 增量重编（这是本线路最省时间的地方）
+#   `build-layers.sh` 支持复用已有树：`--work-dir` + `--skip-base` / `--skip-runtime` / `--skip-dsh`。
+#   日常只改 DSH 版本时选 `dsh` 这一档：复用 base/runtime 树，只重打 dsh 层（用户也只下这一层）。
+#
+# ## 私钥
+#   频道签名用 Secret `CHANNEL_SIGNING_KEY`（Ed25519 私钥全文）。**只在这里用一次**，
+#   用完即从 runner 临时目录删除。若你更愿意在本机签（默认做法），不要设这个 Secret，
+#   用 `sunsetlinux-channel publish-channel` 一条命令即可 —— 见 docs/updates.md §2.9。
+# ============================================================================
+name: 层与频道
+
+on:
+  workflow_dispatch:
+    inputs:
+      layers:
+        description: '要构建哪些层（all / base / runtime / dsh）'
+        required: true
+        default: 'dsh'
+        type: choice
+        options: [all, base, runtime, dsh]
+      base_url:
+        description: '层文件的下载前缀（上传到对象存储/CDN 后的前缀，不要带结尾斜杠）'
+        required: true
+      channel_name:
+        description: '频道名（写进 channel.json）'
+        required: false
+        default: 'SunsetLinux 官方'
+      dsh_dist_tag:
+        description: 'DSH 的 npm dist-tag（next / latest / alpha）'
+        required: false
+        default: 'next'
+      pubkey:
+        description: '频道公钥（base64；留空则用 channel 分支的 channel/channel.pub）'
+        required: false
+        default: ''
+      publish_gh_pages:
+        description: '签名后是否把 channel.json/.sig 发到 gh-pages 的 /channel/'
+        required: false
+        default: 'false'
+        type: choice
+        options: ['false', 'true']
+
+# 与 release.yml / channel.yml 共用：都写 gh-pages 时必须串行
+concurrency:
+  group: gh-pages
+  cancel-in-progress: false
+
+jobs:
+  layers:
+    # ★ 需要一台带 arm64 标签的自建 runner；没有的话本工作流会一直排队
+    #   （所以它是手动触发的，不会拖累日常 CI）。
+    runs-on: [self-hosted, linux, arm64]
+    permissions:
+      contents: write            # 可选：发布到 gh-pages
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 检查宿主依赖
+        run: |
+          set -euo pipefail
+          missing=0
+          for c in mmdebstrap rsync mkfs.erofs zstd node curl tar; do
+            if command -v "$c" >/dev/null 2>&1; then
+              printf '  ✅ %-12s %s\n' "$c" "$(command -v "$c")"
+            else
+              printf '  ❌ %-12s 缺失\n' "$c"; missing=1
+            fi
+          done
+          [ "$missing" -eq 0 ] || {
+            echo "::error::自建 runner 缺少宿主依赖（mmdebstrap / rsync / erofs-utils / zstd / node / curl / tar）"
+            exit 1
+          }
+          [ "$(uname -m)" = "aarch64" ] || { echo "::error::这台 runner 不是 arm64（$(uname -m)）"; exit 1; }
+          echo "arch=arm64 ok"
+
+      - name: 构建层镜像（增量：按输入选择 --skip-*）
+        id: build
+        run: |
+          set -euo pipefail
+          WORK="${RUNNER_WORKSPACE}/sunsetlinux-build"     # ★ 保留工作目录，供下次 --skip-*
+          mkdir -p "$WORK" dist
+          case "${{ inputs.layers }}" in
+            base)    SKIP="" ;;                                        # base 变化会连带重建上层
+            runtime) SKIP="--skip-base" ;;
+            dsh)     SKIP="--skip-base --skip-runtime" ;;
+            all)     SKIP="" ;;
+          esac
+          echo "层次=${{ inputs.layers }}  跳过参数=${SKIP:-（无）}"
+          # --keep-work 必须开：否则下次没有树可复用，每次都要从零重建 244 MiB
+          bash rootfs/build-layers.sh \
+            --out-dir dist \
+            --work-dir "$WORK" --keep-work \
+            --runtime-dir runtime/root \
+            --dsh-dist-tag "${{ inputs.dsh_dist_tag }}" \
+            $SKIP
+          ls -l dist/*.erofs.zst dist/*.erofs.gz || true
+
+      # ⚠️ 这里**不能**用 `if: secrets.CHANNEL_SIGNING_KEY != ''`：GitHub 的
+      #    `secrets` 上下文在步骤 `if` 里不可用（只在 env/with 里可用）。
+      #    所以改成把 Secret 放进本步骤的 env，由脚本自己判断"有没有私钥"。
+      #    这样私钥只在**这一个步骤**存在，构建步骤看不到它。
+      - name: 生成清单（有私钥时顺便签名 + 独立验签）
+        env:
+          CHANNEL_SIGNING_KEY: ${{ secrets.CHANNEL_SIGNING_KEY }}
+          PUBKEY_INPUT: ${{ inputs.pubkey }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist/channel
+
+          # ① 清单一定要生成（sha256_raw/size_raw 必须真解压算，见 docs/updates.md §2.3）
+          node tools/channel/gen-manifest.mjs \
+            --dir dist --out dist/channel/channel.json \
+            --name "${{ inputs.channel_name }}" \
+            --base-url "${{ inputs.base_url }}" \
+            --dsh-dist-tag "${{ inputs.dsh_dist_tag }}" --strict
+
+          # ② 公钥：优先用输入，其次用仓库里（channel 分支）的公钥
+          PUB="${PUBKEY_INPUT}"
+          [ -n "$PUB" ] || { [ -f channel/channel.pub ] && PUB="$(cat channel/channel.pub)" || true; }
+
+          # ③ 没有私钥 → 只出清单，签名留给你在本机做（默认做法）
+          if [ -z "${CHANNEL_SIGNING_KEY:-}" ]; then
+            echo "::notice::未配置 CHANNEL_SIGNING_KEY → 只生成清单；签名请在本机用 publish-channel 做"
+            {
+              echo "### 清单已生成（**未签名**）"
+              echo ""
+              echo "拿到这份 channel.json 后，在有私钥的机器上执行："
+              echo '```'
+              echo 'sunsetlinux-channel sign --in channel.json --key ~/.sunsetlinux-keys/channel.key'
+              echo 'sunsetlinux-channel publish-check --pub ~/.sunsetlinux-keys/channel.pub --dir .'
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          # ④ 有私钥：写成 0600 临时文件，签名后**无论成败都删掉**
+          KEYFILE="$RUNNER_TEMP/channel.key"
+          umask 077
+          printf '%s\n' "$CHANNEL_SIGNING_KEY" > "$KEYFILE"
+          status=0
+          node tools/channel/sign.mjs --in dist/channel/channel.json --key "$KEYFILE" || status=$?
+          if [ "$status" -eq 0 ] && [ -n "$PUB" ]; then
+            # 用公钥走**另一条代码路径**再验一次（sign.mjs 的自验是同一套代码，不算独立）
+            node tools/channel/verify.mjs --pub "$PUB" --in dist/channel/channel.json --no-layers || status=$?
+          elif [ "$status" -eq 0 ]; then
+            echo "::warning::没有可用公钥（pubkey 输入与 channel/channel.pub 都为空）→ 已签名，但没做独立验签"
+          fi
+          rm -f "$KEYFILE"
+          exit "$status"
+
+      - name: 上传层与清单（制品，供你下载后传到 CDN）
+        uses: actions/upload-artifact@v4
+        with:
+          name: layers-and-channel
+          path: |
+            dist/*.erofs.zst
+            dist/*.erofs.gz
+            dist/channel/channel.json
+            dist/channel/channel.json.sig
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: 可选：把清单与签名发到 gh-pages /channel/
+        if: ${{ inputs.publish_gh_pages == 'true' }}
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./dist/channel
+          destination_dir: channel
+          keep_files: true

@@ -1,11 +1,26 @@
 # ============================================================================
 # 回归门禁：任何分支推送 / PR 都必须过这一套，否则不允许发布。
 #
-# 为什么把"全部检查"放在一个工作流里：这些检查之间是**互相补位**的关系，
-# 只跑一部分会让问题潜伏到真机才爆 —— 开发中真实发生过：
-#   · `assembleDebug` **不编译 test 源集**，只跑它 → 40 个单测静默失效；
-#   · 单测引用了已删除的符号（theme 改名），而 APK 照样出得来。
-# 所以下面每条都跑，**任一条失败即失败**。
+# ## 拓扑：**三个并行节点**（不是一条长链）
+#
+#   ┌─ shell   ── 运行时脚本断言（bash + mksh 各跑一遍）＋ 设备侧语法闸门
+#   ├─ node    ── WebUI 纯函数 / 版本比较一致性 / status 契约 / node 语法
+#   └─ android ── App 构建 + 单测（带 Gradle 缓存；**产出 APK 制品**给发布线路用）
+#
+#   三者互相独立、各占一个 runner 并行跑，所以**总时长≈最慢的那个**，而不是各步之和。
+#   以前所有检查串在一个 job 里，总时长是累加；再加上发布线路又重编一次 APK，
+#   一次发布要 6 分钟以上（实测）。
+#
+# ## 为什么"任一条失败即失败"必须保留
+#   这些检查是**互相补位**的关系，只跑一部分会让问题潜伏到真机才爆 —— 开发中真实发生过：
+#     · `assembleDebug` **不编译 test 源集**，只跑它 → 47 个单测静默失效；
+#     · 单测引用了已删除的符号（theme 改名），而 APK 照样出得来。
+#   拆成多 job 只是**并行**，不是"可选"：任何 job 红，整个门禁红，发布就被挡住
+#   （release.yml 里 `gate` 通过 `workflow_call` 复用本文件，结构上保证）。
+#
+# ## 拆 job 带来的一个必须守住的约定
+#   `android` job 会把 APK 作为**制品**上传（名字 `apk-debug`），发布线路直接下载使用，
+#   **不再重编**。改制品名/路径时，release.yml 里的 `download-artifact` 必须同步改。
 # ============================================================================
 name: 回归门禁
 
@@ -18,25 +33,23 @@ on:
   pull_request:
   workflow_dispatch:
   # 允许发布工作流复用本门禁（release.yml 里 `uses: ./.github/workflows/ci.yml`）
-  # —— 这样"发布前必须过全量回归"是**结构上保证**的，不靠人记得跑。
   workflow_call:
 
-# 同一分支的旧运行自动取消，省 runner
+# 同一分支的旧运行排队（不取消）：本门禁会被 release.yml 复用，
+# "取消进行中的运行"分不清"这是新推送的独立跑"还是"发布流程正在等的门禁"。
 concurrency:
   group: ci-${{ github.ref }}
-  # ⚠️ 必须是 false：本门禁会被 release.yml 通过 workflow_call 复用，而"取消进行中的运行"
-  #    分不清"这是新推送的独立跑"还是"发布流程正在等的门禁" —— 实测出现过
-  #    发布 run 的门禁被同分支的新推送取消。宁可排队，也不要误杀发布门禁。
   cancel-in-progress: false
 
 jobs:
-  regression:
-    name: 全量回归
+  # ───────────────────────────────── 节点 1：运行时脚本（设备侧语义）
+  shell:
+    name: 运行时脚本（bash + mksh）
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: 准备工具（proot 供非 root 运行时自测；zstd 供需；mksh 供设备侧语法闸门）
+      - name: 准备工具（proot 供非 root 自测；zstd 供需；mksh 是设备侧真实 shell）
         run: sudo apt-get update -qq && sudo apt-get install -y -qq proot zstd mksh
 
       - name: 脚本断言 — root 运行时
@@ -52,30 +65,49 @@ jobs:
 
       # 设备上只有 /system/bin/sh（mksh），没有 bash：这一关专门防"本地 bash 跑得通、
       # 真机一行都跑不了"的语法漂移（历史上真的发生过，见 tools/shell-compat-check.mjs 注释）
-      - name: 断言 — 设备侧脚本能被 mksh 解析
+      - name: 断言 — 设备侧脚本能被 mksh 解析（含 shebang 与欠债名单）
         run: node tools/shell-compat-check.mjs --verbose
 
-      - name: 断言 — 模块 WebUI 纯函数
-        run: node module/webroot/selftest.mjs
-
-      - name: 断言 — 三方版本比较一致性
-        run: node tools/cmp-consistency.mjs
-
-      - name: 断言 — status JSON 契约（冻结 schema）
-        run: |
-          node tools/contract-check.mjs --cmd 'bash runtime/root/linuxctl.sh status'
-          node tools/contract-check.mjs --cmd 'bash runtime/proot/linuxctl.sh status'
-
-      - name: 断言 — shell/node 语法
+      - name: 断言 — shell 语法（全套 .sh）
         run: |
           fail=0
           while IFS= read -r f; do
             bash -n "$f" 2>/dev/null || { echo "语法错误: $f"; fail=1; }
           done < <(find . -name '*.sh' -not -path './app/*' -not -path './build/*' -not -path './dist/*')
+          exit $fail
+
+  # ───────────────────────────────── 节点 2：JS 纯函数与冻结契约
+  node:
+    name: JS 契约与纯函数
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 断言 — 模块 WebUI 纯函数
+        run: node module/webroot/selftest.mjs
+
+      - name: 断言 — 三方版本比较一致性（WebUI / update.sh / 发布工具）
+        run: node tools/cmp-consistency.mjs
+
+      - name: 断言 — status JSON 契约（冻结 schema §3.1）
+        run: |
+          node tools/contract-check.mjs --cmd 'bash runtime/root/linuxctl.sh status'
+          node tools/contract-check.mjs --cmd 'bash runtime/proot/linuxctl.sh status'
+
+      - name: 断言 — node 语法（tools/ 与 webroot/）
+        run: |
+          fail=0
           for f in $(find tools module/webroot -name '*.mjs'); do
             node --check "$f" 2>/dev/null || { echo "语法错误: $f"; fail=1; }
           done
           exit $fail
+
+  # ───────────────────────────────── 节点 3：App（慢，带缓存，产出制品）
+  android:
+    name: App 构建 + 单测
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
 
       - uses: actions/setup-java@v4
         with:
@@ -91,9 +123,19 @@ jobs:
           #   build-tools 交给 AGP 按需下载（licenses 已由本动作接受）。
           packages: 'platform-tools platforms;android-35'
           # 接受许可证但**不要把它们打印出来**：默认会把 6 段许可证全文刷进日志
-          # （实测一次几千行），把真正有用的构建输出淹掉了。
+          # （实测一次几千行），把真正有用的构建输出淹掉。
           accept-android-sdk-licenses: true
           log-accepted-android-sdk-licenses: false
+
+      # Gradle 缓存：首次跑要下 Gradle 发行包 + 全部依赖（实测 2m40s 里大半花在这），
+      # 缓存后通常 1 分钟内。key 跟着构建脚本/版本目录变，不会用错缓存。
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('app/**/*.gradle*', 'app/gradle/libs.versions.toml', 'app/gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: gradle-${{ runner.os }}-
 
       - name: 关掉 Gradle 守护进程（CI 上没必要常驻）
         run: echo "org.gradle.daemon=false" >> app/gradle.properties
@@ -118,3 +160,13 @@ jobs:
           print(f"单测汇总：tests={t} failures={f} errors={e} skipped={s}")
           raise SystemExit(1 if (f or e or t == 0) else 0)
           PY
+
+      # ★ 制品：发布线路（release.yml）直接下载这个，**不再重编一遍 APK**。
+      #   名字/路径改动必须同步 release.yml 的 download-artifact。
+      - name: 上传 APK 制品（供发布线路复用）
+        if: steps.android.conclusion == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: apk-debug
+          path: app/app/build/outputs/apk/debug/app-debug.apk
+          retention-days: 7
