@@ -1,0 +1,201 @@
+#!/usr/bin/env bash
+# ============================================================================
+# dshroid-channel —— 频道工具链的单一入口（bash 包装）
+# ----------------------------------------------------------------------------
+# 把 tools/channel/ 下的 Node 脚本串成一个命令：
+#   dshroid-channel keygen          → 生成 Ed25519 密钥对（channel.key / channel.pub）
+#   dshroid-channel gen-manifest    → 扫描层文件，生成 channel.json
+#   dshroid-channel sign            → 对 channel.json 原始字节签名 → channel.json.sig
+#   dshroid-channel verify          → 验签 + 校验层文件 sha256（退出码 0/1）
+#   dshroid-channel channels  ...   → 增删改查 channels.json（list/add/remove/set/…）
+#   dshroid-channel npm-resolve ...  → 解析「npm 形态」频道（拉 tarball → 解出 → 验签）
+#   dshroid-channel npm-pack    ...  → 把频道目录打成 npm 包（默认只 pack，不 publish）
+#   dshroid-channel publish-check   → 一键体检：manifest 里每层都在 + 验签通过
+#
+# 约束：只用 Node 内置模块（无 npm 依赖）；Node ≥ 20（Ed25519 + fetch）。
+# 用法见 `dshroid-channel help`，完整文档见 docs/updates.md。
+# ============================================================================
+set -euo pipefail
+
+# 解析脚本自身所在目录（跟随符号链接，允许把本脚本软链到 PATH 里）
+_self="${BASH_SOURCE[0]}"
+while [ -L "$_self" ]; do
+  _target="$(readlink "$_self")"
+  case "$_target" in
+    /*) _self="$_target" ;;
+    *) _self="$(dirname "$_self")/$_target" ;;
+  esac
+done
+SCRIPT_DIR="$(cd "$(dirname "$_self")" && pwd)"
+
+# 中文输出、稳定的排序与错误信息
+export LC_ALL="${LC_ALL:-C.UTF-8}"
+export LANG="${LANG:-C.UTF-8}"
+
+# 非 TTY（被 App/CI 捕获）时不带颜色，避免日志里混入转义序列
+if [ -t 2 ]; then
+  _C_ERR=$'\033[31m'; _C_INF=$'\033[36m'; _C_RST=$'\033[0m'
+else
+  _C_ERR=''; _C_INF=''; _C_RST=''
+fi
+die()  { printf '%s[错误]%s %s\n' "$_C_ERR" "$_C_RST" "$*" >&2; exit 1; }
+info() { printf '%s[信息]%s %s\n' "$_C_INF" "$_C_RST" "$*" >&2; }
+
+usage() {
+  cat <<'EOF'
+dshroid-channel —— dshroid 频道（更新源）工具链
+
+用法：dshroid-channel <子命令> [参数...]
+
+子命令：
+  keygen            生成 Ed25519 频道密钥对：channel.key(0600) + channel.pub(base64)
+  gen-manifest      扫描目录里的 base-*/runtime-*/dsh-*.erofs[.zst|.gz]，生成 channel.json
+  sign              用私钥对 channel.json 原始字节签名，产出 channel.json.sig
+  verify            用公钥验签 + 校验层文件 sha256；退出码 0 通过 / 1 失败
+  channels <动作>   管理 channels.json：list | add | remove | set | enable | disable | check | init
+  npm-resolve       解析 npm 形态的频道：拉 packument → 下载 tarball → 解出 → **验签** → 落盘
+  npm-pack          把频道目录打成符合 npm 规范的包（默认只 pack；--publish 才真发）
+  publish-check     发布前体检：channel.json/.sig 齐备、主产物(.zst)与回退产物(.gz)都在、
+                    验签通过、每层 sha256 与裸镜像 sha256_raw 都对得上
+  help              显示本帮助
+  version           显示版本
+
+常用流程（第三方发布者）：
+  dshroid-channel keygen --out-dir ~/.dshroid-keys
+  dshroid-channel gen-manifest --dir dist/layers --name "我的内测" \
+      --base-url https://example.org/dshroid --dsh-dist-tag next
+  dshroid-channel sign  --in dist/layers/channel.json --key ~/.dshroid-keys/channel.key
+  dshroid-channel verify --pub ~/.dshroid-keys/channel.pub --in dist/layers/channel.json
+  # 上传 channel.json / channel.json.sig / *.erofs.zst / *.erofs.gz
+  # （.zst 给 App，.gz 给设备侧纯 CLI —— 设备上没有 zstd），然后把 URL + 公钥 + 指纹发给用户
+
+第三方发布者用 npm 分发（最省事，不用自己搭静态托管）：
+  dshroid-channel keygen --out-dir ~/.dshroid-keys
+  dshroid-channel gen-manifest --dir dist/layers --name "我的内测" --base-url https://... \
+      --dsh-dist-tag next
+  dshroid-channel sign --in dist/layers/channel.json --key ~/.dshroid-keys/channel.key
+  dshroid-channel npm-pack --dir dist/layers --name dshroid-channel-myname \
+      --pub ~/.dshroid-keys/channel.pub            # 只打包
+  npm publish dshroid-channel-myname-1.0.0.tgz --tag next
+  # 然后把「包名 + 公钥 + 指纹」发给用户
+
+用户侧订阅 npm 频道：
+  dshroid-channel channels add --id myname --type npm --package dshroid-channel-myname \
+      --version next --pub '<base64 公钥>' --priority 50
+  dshroid-channel channels check --id myname
+  dshroid-channel npm-resolve --channels <LINUX_HOME>/etc/channels.json --id myname
+
+用户侧加入频道：
+  dshroid-channel channels add --id mydev --name "某开发者内测" \
+      --url https://example.org/dshroid/channel.json --pub <base64 公钥> --priority 50
+  dshroid-channel channels check --id mydev
+
+每个子命令都支持 --help（例如 `dshroid-channel gen-manifest --help`）。
+EOF
+}
+
+need_node() {
+  command -v node >/dev/null 2>&1 || die "找不到 node。dshroid 频道工具链需要 Node ≥ 20（Ed25519 + fetch）。"
+  local major
+  major="$(node -p 'process.versions.node.split(".")[0]')"
+  [ "$major" -ge 20 ] || die "Node 版本过低（$(node -v)），需要 ≥ 20。"
+}
+
+# publish-check：把 verify 与"层文件是否齐备"两件事绑在一起做
+publish_check() {
+  local dir="." pub="" json_out=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --dir) dir="${2:-}"; shift 2 ;;
+      --pub) pub="${2:-}"; shift 2 ;;
+      --json) json_out=1; shift ;;
+      -h|--help)
+        cat <<'EOF'
+用法：dshroid-channel publish-check --pub <channel.pub> [--dir <层目录>] [--json]
+
+发布前体检：确认目录里 channel.json + channel.json.sig 齐备、清单里声明的每个层文件
+都存在、并且验签与 sha256 全部通过。任一项不过 → 退出码 1。
+
+选项：
+  --pub <文件|base64>  频道公钥（必需）
+  --dir <目录>         层与清单所在目录（默认：当前目录）
+  --json               结果以 JSON 打到 stdout
+EOF
+        return 0 ;;
+      *) die "publish-check 不认识的参数：$1" ;;
+    esac
+  done
+  [ -n "$pub" ] || die "publish-check 需要 --pub <公钥>"
+  [ -d "$dir" ] || die "目录不存在：$dir"
+  [ -f "$dir/channel.json" ] || die "缺少 $dir/channel.json"
+  [ -f "$dir/channel.json.sig" ] || die "缺少 $dir/channel.json.sig（先跑 sign 子命令）"
+
+  # 1) 层文件齐备性：清单里每个相对 url 都要在本地存在（发布了才有意义）
+  node -e '
+    const fs=require("node:fs"),path=require("node:path");
+    const dir=process.argv[1];
+    const j=JSON.parse(fs.readFileSync(path.join(dir,"channel.json"),"utf8"));
+    let bad=0;
+    for(const l of j.layers||[]){
+      // 绝对 URL 也要按文件名去本地目录找：发布前必须确认本地真的有这个层文件。
+      let name=null, remote=false;
+      if(/^[a-z][a-z0-9+.-]*:\/\//i.test(l.url)){remote=true;try{name=path.basename(decodeURIComponent(new URL(l.url).pathname));}catch{name=null;}}
+      else name=decodeURIComponent(l.url);
+      if(!name){console.error(`  [错误] ${l.id} 的 url 无法解析：${l.url}`);bad++;continue;}
+      const okf=fs.existsSync(path.join(dir,name));
+      console.error(`  ${okf?"[存在]":"[缺失]"} ${l.id} → ${l.url}${remote?"  (远程 URL，按文件名核对本地副本)":""}`);
+      if(!okf) bad++;
+    }
+    process.exit(bad?1:0);
+  ' "$dir" || die "清单里有层文件不存在，先把它们放进 $dir 再发布"
+  info "层文件齐备，开始验签与 sha256 校验…"
+  # 发布前体检一律用 --strict：层文件缺失、回退产物缺失、zstd 窗口超 8 MiB、
+  # 版本号不合规 —— 这些在"自己本机核对"时只是警告，但**发布**时必须是硬失败。
+  local vargs=(--strict --pub "$pub" --in "$dir/channel.json" --dir "$dir")
+  [ "$json_out" -eq 1 ] && vargs+=(--json)
+  node "$SCRIPT_DIR/verify.mjs" "${vargs[@]}"
+  info "publish-check 通过：这个频道可以直接发布。"
+}
+
+main() {
+  [ $# -gt 0 ] || { usage; exit 0; }
+  local cmd="$1"; shift
+
+  case "$cmd" in
+    keygen|gen-manifest|manifest|sign|verify|channels|channels-edit|npm-resolve|npm-pack)
+      need_node
+      local script
+      case "$cmd" in
+        keygen)       script="keygen.mjs" ;;
+        gen-manifest|manifest) script="gen-manifest.mjs" ;;
+        sign)         script="sign.mjs" ;;
+        verify)       script="verify.mjs" ;;
+        channels|channels-edit) script="channels-edit.mjs" ;;
+        npm-resolve)  script="npm-resolve.mjs" ;;
+        npm-pack)     script="npm-pack.mjs" ;;
+      esac
+      exec node "$SCRIPT_DIR/$script" "$@"
+      ;;
+    publish-check)
+      need_node
+      publish_check "$@"
+      ;;
+    help|-h|--help)
+      usage
+      ;;
+    version|-V|--version)
+      printf 'dshroid-channel 1.0.0 (schema 1)\n'
+      printf '  脚本目录：%s\n' "$SCRIPT_DIR"
+      if command -v node >/dev/null 2>&1; then
+        printf '  Node：%s\n' "$(node -v)"
+      else
+        printf '  Node：未安装（工具链不可用）\n'
+      fi
+      ;;
+    *)
+      die "未知子命令：$cmd（用 dshroid-channel help 查看用法）"
+      ;;
+  esac
+}
+
+main "$@"

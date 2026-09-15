@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      Android 12+ 的启动画面（SplashScreen）默认底色未必取 windowBackground，
+      这里显式钉成深墨蓝，保证冷启动不会先白一下再变深色。
+    -->
+    <style name="Theme.Dshroid.Splash" parent="Theme.Dshroid">
+        <item name="android:windowSplashScreenBackground">@color/dsh_bg</item>
+        <item name="android:windowSplashScreenAnimatedIcon">@mipmap/ic_launcher</item>
+        <item name="android:windowSplashScreenIconBackgroundColor">@color/ic_launcher_background</item>
+    </style>
+</resources>

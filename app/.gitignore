@@ -1,0 +1,12 @@
+# 构建产物
+build/
+app/build/
+.gradle/
+# 本机 SDK 路径（各人不同，不入库）
+local.properties
+# IDE
+.idea/
+*.iml
+captures/
+.externalNativeBuild/
+.cxx/

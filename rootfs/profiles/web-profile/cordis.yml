@@ -1,0 +1,7 @@
+# dsh profile root — 空入口列表。
+#
+# 整棵插件树由 package.json 的 dsh.profile.bundles 里各 bundle 自带的
+# cordis.patch.yml 以 patch 形式组合而成（每个 bundle 贡献一条 - insert）。
+#
+# 本文件保持为空数组即可，不要在这里直接写插件行。
+[]

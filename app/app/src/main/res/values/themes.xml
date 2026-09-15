@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      深色启动底色（**固定深色**，见 ui/theme/Theme.kt 的说明）。
+      用平台 Material 主题而不是 AppCompat/MDC，避免为了一个 windowBackground
+      引入 appcompat/material 依赖。真正的界面全部由 Compose 绘制。
+
+      windowBackground = #070C16：冷启动第一帧就是深墨蓝，不会先闪一下白。
+    -->
+    <style name="Theme.Dshroid" parent="@android:style/Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/dsh_bg</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:colorAccent">#FFFFFFFF</item>
+    </style>
+
+    <!--
+      LauncherActivity 用这个：API 31+ 在 values-v31 里补上 SplashScreen 相关属性，
+      低版本这里只是一个空继承（避免在 Android 12 上启动画面用系统默认的浅色底）。
+    -->
+    <style name="Theme.Dshroid.Splash" parent="Theme.Dshroid" />
+</resources>

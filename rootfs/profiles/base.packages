@@ -1,0 +1,78 @@
+# ============================================================================
+# dshroid base 层包清单（L0 · Ubuntu 24.04 minimal for arm64）
+# ============================================================================
+# 裁剪目标：只装「让内核能 chroot 进去 + 让 Node/DSH 能跑起来 + 让用户能自救」
+#           的最小集合。预期体积：解包后 ~330–420 MB，mksquashfs 后 ~120–180 MB。
+#
+# 依据（不猜）：docs/findings.md §6.2 实测结论 —— 运行 DSH 的必需系统库只有
+#   libc6 / libstdc++6 / libgcc-s1（ldd 覆盖 7 个原生 .node 模块 + node 二进制，
+#   去重后就是这三个；libdl/libm/libpthread/libutil/libresolv 都属 libc6）。
+#   Node 官方 arm64 构建动态链接的库集合完全相同，所以这三个库是硬依赖。
+#
+# 明确不含（有人会惯性加进来，这里写明为什么不加）：
+#   - systemd        ：内核无 CONFIG_PID_NS（findings §2）→ 不可用；自备 supervisor
+#   - snapd          ：依赖 systemd + 挂载，纯体积负担
+#   - build-essential/gcc：findings §6.1/§6.2 —— 全部原生模块（node-pty、sharp、
+#                      koffi…）都随包带 prebuild，**编译期工具一个都不需要**
+#   - libvips42      ：findings §6.3 —— sharp 自带 libvips（@img/sharp-libvips-linux-arm64
+#                      的 libvips-cpp.so.8.18.6，靠 RPATH $ORIGIN 解析），装了纯属浪费
+#   - man-db / info / 各包文档：运行时无人看，doc 在 build-layers.sh 里按路径剔除
+#
+# 语法：每行一个包名，`#` 起为注释（build-layers.sh 只用第一个字段）。
+# 传给 mmdebstrap/debootstrap 时一律配 --no-install-recommends。
+# ============================================================================
+
+# --- A. DSH/Node 硬依赖（findings §6.2，删任何一个 DSH 都起不来） ------------
+libc6                 # glibc + ld-linux-aarch64.so.1 + nss_dns/nss_files（DNS 解析靠它）；含 libdl/libm/libpthread/libutil/libresolv
+libstdc++6            # node-pty/sharp/koffi 等 C++ 原生模块的 libstdc++.so.6
+libgcc-s1             # 上面两者的 libgcc_s.so.1（异常展开、栈回溯）
+zlib1g                # 部分原生模块运行时 dlopen libz；体积可忽略
+
+# --- B. 基础系统骨架（chroot 进去要有个能用的 shell 和文件工具） --------------
+bash                  # 交互与脚本入口；/opt/dshroid/*.sh 全部 is bash
+coreutils             # ls/cp/mv/rm/sha256sum/stat… 没有它寸步难行
+dash                  # /bin/sh → dash；node-pty 要一个可用的 /bin/sh（findings §6.1）
+sed                   # entry.sh/supervise.sh 里改 /etc/resolv.conf 等
+grep                  # 脚本与用户日常
+findutils             # find/xargs：层内自检与排障
+diffutils             # diff -qr：分层构建与设备侧自检都要用
+tar                   # 用户灌 tar 包、快照恢复
+gzip                  # tar.gz 解压（离线种子就是 .tar.gz）
+hostname              # entry.sh 设 UTS 主机名后 `hostname` 可读回
+util-linux            # mount/findmnt/lsblk/dmesg/flock：验收标准 3、5 要看挂载信息
+mount                 # 显式声明（部分镜像里 util-linux 的 mount 是独立包）
+passwd                # useradd/usermod（建普通用户、改 root 密码）
+login                 # su/login：从 root 会话切普通用户
+adduser               # 交互式建用户脚本（passwd 的补充）
+debianutils           # which/run-parts/savelog：脚本常用，几十 KB
+bsdutils              # script/column：排障时偶尔要用
+# 注：ps/free/top（procps）与 less 故意放在 runtime 层 —— 它们不是 DSH 启动
+# 的硬依赖，属于"工具"，与 git/python3 同组管理，见 runtime.packages 的 B 组。
+
+# --- C. 包管理（保留：可写层是 ext4，用户能 apt 装东西自救） ------------------
+# 取舍说明：apt+dpkg 约 30 MB，但换来「用户能自己在环境里装工具」的能力。
+# 不保留它的话，任何欠账都要等官方重新出 base 层，与"更新又拖又慢"的痛点相悖。
+apt                   # apt-get / apt-cache
+dpkg                  # dpkg -i 离线装 deb（配合 seeds/debs 缓存）
+gpgv                  # apt 校验 Release 签名
+ubuntu-keyring        # 官方源公钥（apt update 必需）
+libapt-pkg6.0t64      # apt 核心库（apt 会拉，显式列出便于审查）
+apt-utils             # apt-extracttemplates 等，debconf 前置
+debconf               # dpkg 配置阶段必需
+init-system-helpers   # debconf/服务脚本的公共 helper（不含 systemd 本体）
+libc-bin              # ldconfig：装完 deb 后重建 so 缓存
+
+# --- D. 证书 / 时区 / 区域设置（HTTPS 与时间正确性） -------------------------
+ca-certificates       # **必须**：npm registry / GitHub / 任何 HTTPS 全靠它；缺了会报
+                      # "unable to get local issuer certificate"，表现为"更新失败"
+openssl               # CA 库 + openssl 命令行（排障证书链，用户手动验签也能用）
+libssl3t64            # curl/openssl 的动态库
+tzdata                # 时区；entry.sh 要按 Android 当前时区写 /etc/localtime
+locales               # locale-gen；**只在 build-layers.sh 里生成 C.UTF-8 + zh_CN.UTF-8**
+                      # （Node 默认 C.UTF-8 即可，locale 数据留多了纯粹费体积）
+netbase               # /etc/services、/etc/protocols（少数脚本会读）
+tzdata-legacy         # 旧时区别名（Android 侧同步过来的名字可能是旧的），很小
+
+# --- E. 补充：让 supervisor 与日志链路能工作 ---------------------------------
+kmod                  # lsmod/modprobe：doctor 检查内核模块时用（可选，约 1 MB）
+squashfs-tools        # 环境内能自查层文件（unsquashfs -l），排障价值高（约 0.5 MB）

@@ -1,0 +1,6 @@
+id=dshroid
+name=DSHroid — 原生 DSH 运行环境
+version=v1.0.0
+versionCode=10000
+author=dshroid
+description=在 /data/linux 建立真 chroot + overlayfs 的 Ubuntu 24.04 环境，原生运行 DSH（Node.js）。开机自启、与 App 生命周期解耦、三层只读镜像（erofs）可增量更新。卸载模块不会删除 /data/linux 用户数据。

@@ -1,0 +1,76 @@
+# ============================================================================
+# dshroid runtime 层包清单（L1 · Node.js + 常用工具）
+# ============================================================================
+# 本层 = base 层 + 下面这些包 + Node 官方 arm64 静态 tarball（解到 /opt/node）。
+# 预期体积：新增解包后 ~180–260 MB，mksquashfs（相对 base 的增量）后 ~60–90 MB。
+#
+# ★ 重要区分（findings §6.2 实测）：下面分成「必需」和「工具」两组。
+#   - 「必需」= 让 Node/DSH 本身跑起来所缺的东西。实际上 base 层已经装齐
+#     libc6/libstdc++6/libgcc-s1 与 ca-certificates，所以本组很小。
+#   - 「工具」= 给 DSH agent 和用户干活用的（git/python3/ripgrep…）。
+#     **不是 DSH 运行的硬依赖**，如果嫌层大，砍这一组不会让 DSH 起不来。
+#
+# 仍然明确不含：
+#   - build-essential / gcc / make / pkg-config：findings §6.2 —— 所有原生模块
+#     都带 prebuild，编译期工具纯属浪费（gcc 全套 +150 MB）
+#   - libvips42 / libvips-cpp：findings §6.3 —— sharp 自带，RPATH 自解析
+#   - git-man / man-db：文档对运行时无用
+#
+# 语法：每行一个包名，`#` 起为注释（build-layers.sh 只用第一个字段）。
+# 传给 apt 时一律配 --no-install-recommends（否则 git 会拖进 git-man 等）。
+# ============================================================================
+
+# --- A. 必需：Node 运行时补足项 ----------------------------------------------
+# Node 官方 arm64 构建是 glibc 动态链接（findings §6.2），核心三个库
+# libc6 / libstdc++6 / libgcc-s1 已在 base 层装齐，本组实际上"无新增硬依赖"。
+# 保留一个空组是为了让审查者一眼看到结论，而不是以为我们漏了。
+#
+# 明确不需要（曾经有人加过，这里写死避免回退）：
+#   libicu*  —— Node 官方构建已静态内建 ICU，装 libicu-dev 是 +30 MB 的纯浪费
+#   tzdata   —— base 层已装，runtime 层是 base 的差分层，不会重复占用
+
+# --- B. 工具：给 DSH agent 与用户用（可按需增删，不影响 DSH 启动） -----------
+git                   # agent 改代码/提交/克隆仓库的刚需（约 25 MB）
+python3-minimal       # Python 脚本类任务；minimal 版本不含完整 stdlib 但够跑多数
+                      # 单文件脚本，想更全就换成 python3（+30 MB）
+curl                  # HTTP 调试、下载（证书链依赖 base 的 ca-certificates）
+less                  # 分页查看（git log / 日常）
+procps                # ps/free/top：agent 与用户看进程
+ripgrep               # rg：agent 检索代码，比 grep 快一个量级
+openssh-client        # git@github.com:… / scp / ssh 隧道（用户可能想远程访问）
+unzip                 # 解 .zip（不少工具链产物是 zip）
+xz-utils              # 解 .tar.xz（Node 官方包就是 xz，构建期与运行期都要）
+zstd                  # 解 .tar.zst（快照与种子包格式）
+file                  # 判断文件类型，排障常用且很小
+tree                  # 列目录树，agent 理解仓库结构时很省 token（约 50 KB）
+jq                    # JSON 处理：读 linuxctl status / channel.json 时非常方便
+which                 # 定位可执行文件（base 的 debianutils 已提供，此处显式声明
+                      # 是因为很多脚本/agent 会直接调用它）
+
+# --- C. Node.js 本体与 Node 生态工具：**不走 apt**，由 build-layers.sh 装 ----------
+# ⚠ 下面这些**不是 Ubuntu 包名**，故意全部写成注释：build-layers.sh 会把本文件里
+#   非注释行的第一个字段直接交给 apt-get install，写在这里会被当成包名去装而失败。
+#
+# Node.js（替代 Ubuntu 仓库里的 nodejs 18.x，太旧）：
+#   官方 arm64 静态构建，Node 24 LTS「Krypton」，形如 v24.21.0
+#   https://nodejs.org/dist/<ver>/node-<ver>-linux-arm64.tar.xz
+#   解到 /opt/node，符号链接：/usr/local/bin/{node,npm,npx} → /opt/node/bin/*
+#   注意（关键，别踩）：npm 全局前缀必须显式指到 /usr/local，
+#     否则 `npm i -g` 会装进 /opt/node/lib/node_modules，dsh 层就分不出来了。
+#     build-layers.sh 用 `npm i -g --prefix /usr/local` + `npm config set prefix /usr/local`。
+#
+# pnpm（**硬依赖，必须装**，见 docs/dsh-profile.md §6）：
+#   `dsh plugin --profile web add <包名>` 内部是 `spawnSync("pnpm", ...)`；
+#   没有 pnpm 会直接报 `pnpm not found on PATH — install pnpm to manage profile plugins`。
+#   这关系到本项目的核心诉求：**用户要能自己装第三方 DSH 插件**（不用等上游发版）。
+#   装法（build-layers.sh 里做）：
+#     npm i -g --prefix /opt/node pnpm     # 落到 /opt/node/bin/pnpm，版本随层锁定
+#     ln -sfn /opt/node/bin/pnpm /usr/bin/pnpm   # 保证任何 PATH 下 command -v pnpm 都有
+#   为什么用 `--prefix /opt/node` 而不是默认全局前缀：pnpm 属于"运行时组件"，
+#   必须落在 runtime 层（/opt/node）；若落到 /usr/local 就会被算进 dsh 层的增量里，
+#   把"Node 工具链"和"DSH 版本"耦合在一起 —— 那正好违背分层的初衷。
+#
+# 运行时行为补充（实测，写文档时用得上）：
+#   pnpm 以 **profile 目录为 cwd** 运行，`dsh plugin add` 会把插件装进
+#   /root/.dsh/profiles/web/node_modules/；该路径来自只读层 → overlayfs 自动 copy-up，
+#   因此 `reset` 后回到出厂 4 个 bundle（语义正确）。

@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 启动图标前景：终端提示符 “>_”，纯灰阶（白 → 浅灰），与 App 单色主题一致 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:pathData="M62,30 L34,54 L62,78 L62,66 L48,54 L62,42 Z">
+        <aapt:attr xmlns:aapt="http://schemas.android.com/aapt" name="android:fillColor">
+            <gradient
+                android:startX="34" android:startY="30"
+                android:endX="62" android:endY="78"
+                android:type="linear">
+                <item android:offset="0" android:color="#FFFFFFFF" />
+                <item android:offset="1" android:color="#FFB0B0B0" />
+            </gradient>
+        </aapt:attr>
+    </path>
+    <path
+        android:pathData="M66,70 h14 v6 h-14 z">
+        <aapt:attr xmlns:aapt="http://schemas.android.com/aapt" name="android:fillColor">
+            <gradient
+                android:startX="66" android:startY="70"
+                android:endX="80" android:endY="76"
+                android:type="linear">
+                <item android:offset="0" android:color="#FFE0E0E0" />
+                <item android:offset="1" android:color="#FF8A8A8A" />
+            </gradient>
+        </aapt:attr>
+    </path>
+</vector>

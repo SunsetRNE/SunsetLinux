@@ -1,0 +1,1169 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>DSHroid 控制台</title>
+<!--
+  dshroid 模块 WebUI（KernelSU 模块 WebUI / Magisk 需 MMRL 等第三方宿主）
+
+  设计约束（见 docs/ksu-webui-api.md）：
+  1. **单文件、零外部依赖**：WebUI 宿主不保证有网络，禁止 CDN / npm 资源。
+  2. **`ksu.exec` 不是 Promise**：真实签名是 ksu.exec(command, optionsJsonString, callbackNameString)，
+     第三个参数是"全局函数名的字符串"，回调签名 (errno, stdout, stderr)。
+     这段桥是从设备上正在运行的模块 WebUI 里实测提取的，不要改成 await ksu.exec()。
+  3. **ksu 不存在时降级为预览模式**（横幅提示"命令未真正执行"），
+     这让界面能在普通桌面浏览器里离线自测 —— 也是本机唯一可行的验证手段。
+  4. 与 App **共用同一份状态**：config.json / channels.json / state.json。
+     **本页面不存任何自己的状态**（不写 localStorage 持久配置）。
+  5. 所有命令输出**必须 HTML 转义**后插入 DOM，否则日志里的 < 会破坏页面。
+  6. 更新走 **.gz** 产物（设备无 zstd）；App 走 .zst（小约 35%）。
+-->
+<style>
+  /* 配色 token —— **黑白单色板**（与 App 侧同一套，architecture.md §6.4）
+     硬要求：所有颜色必须是**灰阶**（R=G=B）。状态**不用颜色**区分，改用
+     「图标 + 文案 + 明度/描边/字重」，因为单色板里绿/黄/红都没有了。
+       · 运行     ：实心圆点 ● + 白色（最亮）
+       · 过渡中   ：空心圆点 ○ + 中灰（starting/stopping）
+       · 停止     ：暗灰
+       · 错误     ：✕ / ! 图标 + **白色粗描边 + 加粗文案**（单色下靠"重"取胜）
+     取舍：错误态失去红色后**显眼度下降**，这是单色的代价；用图标+粗描边+加粗补回一部分。 */
+  :root{
+    --bg:#000000;        /* 页面底 */
+    --card:#0A0A0A;      /* 卡片 */
+    --card2:#141414;     /* 次级面 */
+    --hi:#1F1F1F;        /* 高亮面 */
+    --line:#2A2A2A;      /* 描边 */
+    --line2:#3D3D3D;     /* 强描边 */
+    --accent:#FFFFFF;    /* 主色（强调/按钮/选中） */
+    --on-accent:#000000; /* 主色上的前景 */
+    --fg:#F5F5F5;        /* 正文 */
+    --dim:#A3A3A3;       /* 次要 */
+    --faint:#6E6E6E;     /* 弱化 */
+    /* 状态色全部落到灰阶，仅用于"明度"分层 */
+    --st-run:#FFFFFF;
+    --st-transit:#A3A3A3;
+    --st-warn:#A3A3A3;
+    --st-bad:#FFFFFF;    /* 错误靠描边与字重突出，不靠颜色 */
+    --st-stopped:#6E6E6E;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0;background:var(--bg);color:var(--fg);
+    font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,"PingFang SC","Microsoft YaHei",sans-serif;}
+  body{padding-bottom:72px;-webkit-text-size-adjust:100%}
+  header{padding:14px 16px 10px;background:linear-gradient(180deg,#0A0A0A,#000000);
+    border-bottom:1px solid var(--line);position:sticky;top:0;z-index:5}
+  header h1{margin:0;font-size:17px;letter-spacing:.5px}
+  header .sub{color:var(--dim);font-size:12px;margin-top:2px}
+  .banner{padding:10px 16px;font-size:13px;border-bottom:1px solid var(--line);
+    background:rgba(255,255,255,.08);color:var(--warn);display:none}
+  .banner.show{display:block}
+  main{padding:14px 14px 0}
+  .page{display:none}
+  .page.active{display:block}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px;margin-bottom:12px}
+  .card h2{margin:0 0 10px;font-size:14px;color:var(--accent2);font-weight:600}
+  .row{display:flex;justify-content:space-between;gap:10px;padding:5px 0;
+    border-bottom:1px dashed rgba(255,255,255,.06);font-size:13px}
+  .row:last-child{border-bottom:none}
+  .row .k{color:var(--dim);flex:0 0 auto}
+  .row .v{text-align:right;word-break:break-all;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+  /* 状态胶囊：单色下靠「图标 + 明度 + 描边 + 字重」区分，不靠颜色 */
+  .pill{display:inline-block;padding:1px 9px;border-radius:999px;font-size:12px;font-weight:600;
+    border:1px solid var(--line)}
+  .pill.running{background:rgba(255,255,255,.14);color:var(--st-run);border-color:var(--line2)}
+  .pill.stopped{background:transparent;color:var(--st-stopped);border-color:var(--line)}
+  .pill.starting,.pill.stopping{background:transparent;color:var(--st-transit);border-style:dashed;border-color:var(--line2)}
+  /* 错误态：**白色粗描边 + 加粗**（单色下最"重"的表达） */
+  .pill.error{background:#FFFFFF;color:#000000;border:2px solid #FFFFFF;font-weight:800;letter-spacing:.3px}
+  .row.err .v{font-weight:700;color:var(--fg)}
+  .card.err{border:2px solid var(--line2)}
+  .mark{display:inline-block;min-width:1.1em}
+  button{font:inherit;color:var(--fg);background:var(--card2);border:1px solid var(--line);
+    border-radius:9px;padding:9px 14px;cursor:pointer}
+  button:active{transform:translateY(1px)}
+  button:disabled{opacity:.45;cursor:not-allowed}
+  button.primary{background:linear-gradient(180deg,var(--accent),#D4D4D4);border-color:var(--accent);font-weight:600;color:#000000}
+  button.danger{background:rgba(255,255,255,.06);border-color:rgba(255,255,255,.50);color:#F5F5F5}
+  button.sm{padding:5px 10px;font-size:12px;border-radius:7px}
+  .btns{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
+  pre{background:#000000;border:1px solid var(--line);border-radius:9px;padding:10px;
+    font:12px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace;color:#E5E5E5;
+    white-space:pre-wrap;word-break:break-word;max-height:46vh;overflow:auto;margin:0}
+  .switch{display:flex;align-items:center;justify-content:space-between;gap:10px;
+    padding:10px 0;border-bottom:1px dashed rgba(255,255,255,.06)}
+  .switch:last-child{border-bottom:none}
+  .sw{position:relative;width:46px;height:26px;flex:0 0 auto}
+  .sw input{opacity:0;width:0;height:0;position:absolute}
+  .sw span{position:absolute;inset:0;background:var(--line);border-radius:999px;transition:.2s;cursor:pointer}
+  .sw span:before{content:"";position:absolute;width:20px;height:20px;left:3px;top:3px;
+    background:#A3A3A3;border-radius:50%;transition:.2s}
+  .sw input:checked + span{background:rgba(255,255,255,.30)}
+  .sw input:checked + span:before{transform:translateX(20px);background:var(--accent2)}
+  .hint{color:var(--dim);font-size:12px;margin-top:8px;line-height:1.5}
+  .note{border-left:3px solid var(--accent2);padding:6px 10px;background:rgba(255,255,255,.07);
+    border-radius:0 8px 8px 0;font-size:12px;color:#E5E5E5;margin-top:8px}
+  .upd{border:1px solid var(--line);border-radius:10px;padding:10px;margin-bottom:8px;background:var(--card2)}
+  .upd .top{display:flex;justify-content:space-between;align-items:center;gap:8px}
+  .upd .ver{font-family:ui-monospace,Menlo,monospace;font-size:12px;color:var(--dim)}
+  nav.tabbar{position:fixed;left:0;right:0;bottom:0;display:flex;background:#0A0A0A;
+    border-top:1px solid var(--line);z-index:10;padding-bottom:env(safe-area-inset-bottom)}
+  nav.tabbar .tab{flex:1;background:none;border:0;border-radius:0;padding:9px 2px 8px;
+    display:flex;flex-direction:column;align-items:center;gap:2px;font-size:11px;color:var(--dim)}
+  nav.tabbar .tab.on{color:var(--accent)}
+  nav.tabbar .ico{font-size:17px;line-height:1}
+  .spin{display:inline-block;width:12px;height:12px;border:2px solid rgba(255,255,255,.28);
+    border-top-color:var(--accent);border-radius:50%;animation:sp .8s linear infinite;vertical-align:-2px}
+  @keyframes sp{to{transform:rotate(360deg)}}
+  .dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px;vertical-align:1px;
+    border:2px solid currentColor;background:currentColor}
+  .dot.hollow{background:transparent}
+  .toast{position:fixed;left:50%;transform:translateX(-50%);bottom:84px;background:var(--card2);
+    color:var(--fg);border:1px solid var(--line);padding:9px 14px;border-radius:10px;
+    font-size:13px;z-index:20;opacity:0;transition:.2s;pointer-events:none;max-width:88vw}
+  .toast.show{opacity:1}
+</style>
+</head>
+<body>
+<header>
+  <h1>DSHroid 控制台</h1>
+  <div class="sub" id="hdSub">正在读取状态…</div>
+</header>
+<div class="banner" id="previewBanner">
+  ⚠ 预览模式：当前不在 KernelSU 管理器里（没有 <code>ksu</code> 对象），<b>命令不会真正执行</b>。
+  界面布局与解析逻辑可在此模式核对；请在 KernelSU 管理器的模块详情页打开本页以获得完整功能。
+</div>
+
+<main>
+  <!-- ============ 状态 ============ -->
+  <section class="page active" id="page-dash">
+    <div class="card">
+      <h2>运行状态</h2>
+      <div class="row"><span class="k">状态</span><span class="v" id="stState">—</span></div>
+      <div class="row"><span class="k">模式</span><span class="v" id="stMode">—</span></div>
+      <div class="row"><span class="k">运行时长</span><span class="v" id="stUptime">—</span></div>
+      <div class="row"><span class="k">端口</span><span class="v" id="stPort">—</span></div>
+      <div class="row"><span class="k">健康</span><span class="v" id="stHealthy">—</span></div>
+      <div class="row"><span class="k">登录地址</span><span class="v" id="stUrl">—</span></div>
+      <div class="btns">
+        <button class="sm" id="btnCopyUrl">复制登录链接</button>
+        <button class="sm" id="btnOpenUrl">打开 DSH</button>
+      </div>
+      <div class="hint">登录链接含一次性令牌（每次重启都会变），所以这里**打码显示**；仅复制/打开时才用完整值。</div>
+    </div>
+
+    <div class="card">
+      <h2>层版本</h2>
+      <div id="stLayers"></div>
+      <div class="hint" id="stStorage"></div>
+    </div>
+
+    <div class="card">
+      <h2>模块</h2>
+      <div class="row"><span class="k">模块版本</span><span class="v" id="modVer">—</span></div>
+      <div class="row"><span class="k">运行时脚本</span><span class="v" id="modBin">—</span></div>
+      <div class="hint" id="modHint"></div>
+    </div>
+
+    <div class="card">
+      <h2>开机自启</h2>
+      <div class="switch">
+        <div>
+          <div>随系统启动</div>
+          <div class="hint" style="margin:0">写入 <code>etc/config.json</code> 的 <code>autostart</code>，与 App 设置页**共用同一份配置**。</div>
+        </div>
+        <label class="sw"><input type="checkbox" id="swAutostart"><span></span></label>
+      </div>
+      <div class="hint" id="autostartHint"></div>
+    </div>
+
+    <div class="card" id="undeployedCard" style="display:none">
+      <h2>还没有部署环境</h2>
+      <div class="hint">
+        layers/ 里没有可用的层，环境无法启动。下一步（任选其一）：<br>
+        1) 打开 <b>DSHroid App</b> → 首次部署向导（推荐，会自动下载并校验）；<br>
+        2) 在 root 终端执行 <code>su -c '$LH/bin/device-provision.sh'</code> 原生构建；<br>
+        3) 在本页「更新」标签里，添加频道后从频道安装层。
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 操作 ============ -->
+  <section class="page" id="page-ops">
+    <div class="card">
+      <h2>生命周期</h2>
+      <div class="btns">
+        <button class="primary" data-op="start">启动</button>
+        <button data-op="stop">停止</button>
+        <button data-op="restart">重启</button>
+        <button data-op="refresh">刷新状态</button>
+      </div>
+      <div class="hint">这些操作调用 <code>linuxctl start|stop|status</code>（幂等；重复启动不会报错）。</div>
+    </div>
+    <div class="card">
+      <h2>环境内命令</h2>
+      <div class="btns">
+        <button class="sm" data-op="exec-id">id（验证真 root）</button>
+        <button class="sm" data-op="exec-cap">CapEff（能力位）</button>
+        <button class="sm" data-op="exec-mount">/mnt/sdcard 挂载类型</button>
+      </div>
+      <div class="hint">用于验证验收标准 2/3/5：真 uid=0、真 capabilities、sdcard 直挂（非 fuse）。</div>
+      <pre id="opsOut" style="margin-top:10px">（输出会显示在这里）</pre>
+    </div>
+    <div class="card">
+      <h2>危险操作</h2>
+      <div class="btns">
+        <button class="danger sm" data-op="snapshot">快照可写层</button>
+        <button class="danger sm" data-op="reset">清空可写层（恢复出厂）</button>
+      </div>
+      <div class="hint">「清空可写层」会删除用户数据（会话、设置、凭据），只保留只读层。会二次确认。</div>
+    </div>
+  </section>
+
+  <!-- ============ 日志 ============ -->
+  <section class="page" id="page-logs">
+    <div class="card">
+      <h2>环境日志</h2>
+      <div class="btns">
+        <button class="sm" id="btnLogToggle">暂停自动刷新</button>
+        <button class="sm" id="btnLogReload">立即刷新</button>
+        <button class="sm" id="btnLogCopy">复制</button>
+        <span class="hint" id="logMeta" style="margin:0"></span>
+      </div>
+      <pre id="logOut" style="margin-top:10px;max-height:56vh">（加载中…）</pre>
+    </div>
+  </section>
+
+  <!-- ============ 诊断 ============ -->
+  <section class="page" id="page-diag">
+    <div class="card">
+      <h2>自检（doctor）</h2>
+      <div class="btns">
+        <button class="primary sm" id="btnDoctor">运行自检</button>
+        <button class="sm" id="btnDoctorCopy">复制结果</button>
+        <button class="sm" id="btnSelftest">跑回归自测</button>
+      </div>
+      <div class="hint">
+        自检覆盖：内核能力（erofs/overlay/tmpfs）、三层镜像完整性、可写层可挂性、端口占用、
+        SELinux avc、toybox 的 mount/unshare 选项支持面、挂载实现（metamodule）、DSH profile 与 pnpm。
+        <b>启动失败时先看这里。</b>
+      </div>
+      <pre id="diagOut" style="margin-top:10px;max-height:56vh">（未运行）</pre>
+    </div>
+  </section>
+
+  <!-- ============ 更新 ============ -->
+  <section class="page" id="page-upd">
+    <div class="card">
+      <h2>频道与更新</h2>
+      <div class="btns">
+        <button class="primary sm" id="btnCheckUpd">检查更新</button>
+        <button class="sm" id="btnReloadCh">重读频道</button>
+        <span class="hint" id="updMeta" style="margin:0"></span>
+      </div>
+      <div class="note">
+        更新走 <b>gzip（.gz）</b> 产物：本机内核/系统<b>没有 zstd</b>（只有 toybox gzip）。<br>
+        App 侧走 <b>zstd（.zst）</b>，体积小约 <b>35%</b> —— 想要更省流量请用 App 更新。<br>
+        清单 <code>channel.json</code> 的 Ed25519 签名<b>强制校验</b>，验签失败会拒绝该频道（不静默降级）。
+      </div>
+      <pre id="updOut" style="margin-top:10px;max-height:40vh">（点「检查更新」开始）</pre>
+    </div>
+    <div class="card">
+      <h2>可更新的层</h2>
+      <div id="updList" class="hint">还没有检查结果。</div>
+    </div>
+    <div class="card" id="cardModUpd">
+      <h2>模块自我更新</h2>
+      <div class="row"><span class="k">当前模块</span><span class="v" id="muCur">—</span></div>
+      <div class="row"><span class="k">频道最新</span><span class="v" id="muLatest">—</span></div>
+      <div class="btns">
+        <button class="primary sm" id="btnModCheck">检查模块更新</button>
+        <button class="sm" id="btnModApply" disabled>下载模块包</button>
+        <button class="sm" id="btnBinApply" disabled>下载并暂存脚本包</button>
+      </div>
+      <div class="note">
+        模块的更新走<b>频道清单里的 <code>module</code> 段</b>，与层更新同一套安全模型：
+        清单必须通过 Ed25519 <b>验签</b>，验签失败一律拒绝。<br>
+        <b>下载的 zip 不会自动安装</b>：模块文件在 <code>/data/adb/modules/</code> 下，
+        热替换有风险且管理器不认；本页只把它落到 <code>Download/</code>，
+        再由你在 KernelSU / Magisk 管理器里「从本地安装」。
+        <br><br>
+        「<b>下载并暂存脚本包</b>」是另一条路：只更新 <code>bin/</code> 里的运行时脚本，
+        解到 <code>cache/updates/bin-packages/&lt;版本&gt;/</code> 并写 <code>etc/bin-pending</code>，
+        <b>下次开机</b>由 <code>post-fs-data</code> 同步到 <code>$LINUX_HOME/bin</code>
+        （不热替换正在跑的脚本，所以安全）。撤销：
+        <code>rm -rf cache/updates/bin-packages/&lt;版本&gt; etc/bin-pending</code>，
+        下次开机自动回落到模块目录里的版本。
+      </div>
+      <pre id="muOut" style="margin-top:10px;max-height:26vh">（点「检查模块更新」开始）</pre>
+    </div>
+
+    <div class="card">
+      <h2>回滚（切回旧版本）</h2>
+      <div id="rollbackList" class="hint">正在读取本机已有版本…</div>
+      <div class="hint">回滚只改变“当前生效版本”的指向，<b>不删除</b>任何层文件，所以可以来回切。</div>
+    </div>
+  </section>
+</main>
+
+<nav class="tabbar">
+  <button class="tab on" data-page="dash"><span class="ico">📊</span><span>状态</span></button>
+  <button class="tab" data-page="ops"><span class="ico">⚙️</span><span>操作</span></button>
+  <button class="tab" data-page="logs"><span class="ico">📜</span><span>日志</span></button>
+  <button class="tab" data-page="diag"><span class="ico">🩺</span><span>诊断</span></button>
+  <button class="tab" data-page="upd"><span class="ico">⬆️</span><span>更新</span></button>
+</nav>
+
+<div class="toast" id="toast"></div>
+
+<script>
+"use strict";
+/* =========================================================================
+ * 0. 常量
+ * ========================================================================= */
+var LH = "/data/linux";
+var CTL = LH + "/bin/linuxctl";
+var CONF = LH + "/etc/config.json";
+var RUN_LOG = LH + "/run/linux.log";
+
+/* =========================================================================
+ * 1. KernelSU WebUI 桥（★ 实测签名，不要改成 await ksu.exec()）
+ *    来源：设备上正在运行的模块 WebUI（docs/ksu-webui-api.md）
+ * ========================================================================= */
+function exec(command) {
+  return new Promise(function (resolve, reject) {
+    if (typeof ksu === "undefined") { resolve({ errno: -1, stdout: "", stderr: "dev-preview" }); return; }
+    var cb = "dshroid_cb_" + Date.now() + "_" + Math.floor(Math.random() * 1e6);
+    window[cb] = function (errno, stdout, stderr) {
+      delete window[cb];                       // 必须清理，否则全局函数泄漏
+      resolve({ errno: errno, stdout: stdout, stderr: stderr });
+    };
+    try { ksu.exec(command, "{}", cb); }
+    catch (e) { delete window[cb]; reject(e); }
+  });
+}
+function toast(msg) { (typeof ksu !== "undefined") ? ksu.toast(msg) : console.log("toast:", msg); }
+function isPreview() { return typeof ksu === "undefined"; }
+
+/* =========================================================================
+ * 2. 纯函数区（★ 不依赖 DOM —— 本机可用 node 单测）
+ * ========================================================================= */
+var PURE = {};
+
+/* HTML 转义：插入任何命令输出前**必须**调用，否则日志里的 < 会破坏页面 */
+PURE.esc = function (s) {
+  return String(s === null || s === undefined ? "" : s)
+    .replace(/[&<>"']/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+    });
+};
+
+/* 打码带令牌的 URL：保留 scheme://host:port 与令牌首尾各 4 位 */
+PURE.maskUrl = function (url) {
+  if (!url) return "";
+  return String(url).replace(/([?&]token=)([^&\s]+)/i, function (_m, p, tok) {
+    if (tok.length <= 8) return p + "****";
+    return p + tok.slice(0, 4) + "****" + tok.slice(-4);
+  });
+};
+
+/* 秒 → "3天2小时5分" */
+PURE.fmtUptime = function (sec) {
+  // ★ 必须先挡 null/undefined：Number(null) === 0 会被当成"0 秒"，
+  //   而契约要求"取不到"要显示成明确的空值，不能编造数字。
+  if (sec === null || sec === undefined || sec === "") return "—";
+  var n = Number(sec);
+  if (!isFinite(n) || n < 0) return "—";
+  if (n < 60) return n + " 秒";
+  var d = Math.floor(n / 86400), h = Math.floor((n % 86400) / 3600), m = Math.floor((n % 3600) / 60);
+  var out = "";
+  if (d) out += d + " 天 ";
+  if (h) out += h + " 小时 ";
+  if (m && !d) out += m + " 分";
+  return out.trim() || (n + " 秒");
+};
+
+/* 安全解析 JSON（linuxctl 的输出可能混入 stderr 或截断） */
+PURE.tryJson = function (text) {
+  if (!text) return null;
+  try { return JSON.parse(text); } catch (e) {}
+  // 从第一行开始逐行尝试（有些命令会先打日志再打 JSON）
+  var lines = String(text).split("\n");
+  for (var i = 0; i < lines.length; i++) {
+    var t = lines[i].trim();
+    if (!t || t[0] !== "{") continue;
+    try { return JSON.parse(t); } catch (e2) {}
+  }
+  return null;
+};
+
+/* status JSON → 视图模型（纯函数，便于单测） */
+PURE.statusView = function (st) {
+  st = st || {};
+  var dsh = st.dsh || {};
+  var layers = st.layers || {};
+  var storage = st.storage || {};
+  function layerRow(id, label) {
+    var L = layers[id] || {};
+    return {
+      id: id, label: label,
+      version: L.version === undefined ? null : L.version,
+      sizeMB: (typeof L.size === "number" && L.size > 0) ? Math.round(L.size / 1048576 * 10) / 10 : null,
+      mounted: L.mounted === true,
+    };
+  }
+  return {
+    state: st.state || null,
+    mode: st.mode || null,
+    pid: st.pid === undefined ? null : st.pid,
+    uptimeText: PURE.fmtUptime(st.uptime_sec),
+    port: dsh.port === undefined ? null : dsh.port,
+    healthy: dsh.healthy === true,
+    baseUrl: dsh.base_url || null,
+    urlMasked: PURE.maskUrl(dsh.url),
+    lastError: st.last_error || null,
+    layers: [layerRow("base", "OS 基线"), layerRow("runtime", "运行时"), layerRow("dsh", "DSH")],
+    upperUsedMB: (typeof storage.upper_used === "number") ? Math.round(storage.upper_used / 1048576) : null,
+    upperTotalMB: (typeof storage.upper_total === "number") ? Math.round(storage.upper_total / 1048576) : null,
+  };
+};
+
+/* 状态 → {icon, label, cls}。★ 单色板下**不靠颜色**，靠图标+明度+描边：
+ *   运行 ● 实心（最亮） / 过渡 ○ 空心（中灰） / 停止 暗灰 / 错误 ✕（白底黑字+粗描边） */
+PURE.stateView = function (state) {
+  switch (state) {
+    case "running":  return { icon: "\u25CF", label: "运行中", cls: "running", dot: "solid" };
+    case "starting": return { icon: "\u25CB", label: "启动中", cls: "starting", dot: "hollow" };
+    case "stopping": return { icon: "\u25CB", label: "停止中", cls: "stopping", dot: "hollow" };
+    case "error":    return { icon: "\u2715", label: "错误",   cls: "error",   dot: "none" };
+    case "stopped":  return { icon: "\u25CB", label: "已停止", cls: "stopped", dot: "hollow" };
+    default:         return { icon: "\u25CB", label: state ? String(state) : "未知", cls: "stopped", dot: "hollow" };
+  }
+};
+
+/* 模块信息（module-info 的输出）→ 视图模型 */
+PURE.moduleView = function (info) {
+  info = info || {};
+  var ver = info.version || null;
+  return {
+    id: info.id || null,
+    name: info.name || "DSHroid",
+    version: ver,
+    versionShort: PURE.normVer(ver),
+    versionCode: info.versionCode || null,
+    binVersion: info.bin_version || null,
+    installed: info.installed === true,
+    // 运行时脚本与模块版本不一致 → 提示（脚本可能没同步，或模块刚更新还没重启）
+    drift: !!(ver && info.bin_version && PURE.normVer(ver) !== PURE.normVer(info.bin_version)),
+  };
+};
+
+/* 归一化版本：去掉开头的 v（module.prop 习惯写 v1.0.0，频道里可能是 1.0.0） */
+PURE.normVer = function (v) {
+  return String(v == null ? "" : v).trim().replace(/^v(?=\d)/i, "");
+};
+
+/* 模块更新检查结果 → 视图模型 */
+PURE.moduleUpdateView = function (res) {
+  res = res || {};
+  var m = res.module || null;
+  var latest = res.module_latest || m;
+  var out = { installed: res.module_installed || null, hasUpdate: !!m, update: null, latestVersion: null, errors: [], notes: [] };
+  (res.channels || []).forEach(function (c) {
+    if (c.signature_valid === false) {
+      out.errors.push("频道 " + (c.name || c.id) + " 验签失败，已拒绝：" + (c.error || "签名无效"));
+    }
+  });
+  (res.errors || []).forEach(function (e) { out.errors.push(e); });
+  if (m) {
+    out.update = {
+      version: m.version, url: m.url, sha256: m.sha256, size: m.size,
+      changelog: m.changelog, channel: m.channel_name || m.channel,
+    };
+  } else {
+    out.latestVersion = latest ? latest.version : null;
+    if (!out.errors.length) out.notes.push(latest ? ("已是最新（频道最新 " + latest.version + "）") : "频道里没有模块更新信息");
+  }
+  return out;
+};
+
+/* 日志 → 可显示的转义文本（限制行数，避免大日志卡死 WebView） */
+PURE.logView = function (text, maxLines) {
+  var lim = maxLines || 400;
+  var lines = String(text || "").replace(/\r/g, "").split("\n");
+  var truncated = false;
+  if (lines.length > lim) { lines = lines.slice(lines.length - lim); truncated = true; }
+  return { text: lines.join("\n"), truncated: truncated, lines: lines.length };
+};
+
+/* 版本比较（与 channel 工具同一套语义：数字段 > 预发布标记）
+ * ★ 踩过的坑：不要用 max(len) 补空段再按"数字 vs 非数字"判 —— 那样
+ *   "0.1.5"(只有 3 段) 对 "0.1.5-rc.2"(5 段) 时，第 4 段 x=undefined 被当成
+ *   非数字、第 5 段 x=undefined vs y="2" 也被当成非数字，于是把 -rc 判成"更大"。
+ *   正确做法：**先比公共段**，再按"哪边还有剩余段"决定 —— 有剩余段的一边是
+ *   预发布（更小）；两边都没剩余才相等。 */
+/* 版本比较。三种语义叠在一起，必须分开，否则一定踩坑（实测踩了三次）：
+ *   ① base 层：`<ubuntu 版本>-l<n>`（layer-spec §5），l<n> 是**第 n 次修订**，
+ *      必须按**整数**比 —— 字典序会得出 "l10" < "l9" 的错误结论。
+ *   ② 其余层：semver。**有预发布后缀的版本更小**（0.1.5-rc.2 < 0.1.5），
+ *      绝不能拿 "rc" 跟 "5" 做字典序比较 —— 那正是前两版实现的错处。
+ *   ③ 主干按**数字段**比（04 == 4，10 > 9）。
+ * 做法：先把 -l<n> 摘出来；再按 semver 拆成 [主干, 预发布]；主干逐段数值比；
+ *      主干相同则"有预发布后缀的更小"；两边都是 -l<n> 且主干相同则比修订号整数。
+ */
+PURE.cmpVer = function (a, b) {
+  // 归一化开头的 "v"（module.prop 习惯写 v1.0.0，频道里可能是 1.0.0），
+  // 统一走 PURE.normVer，避免两处归一化逻辑漂移。
+  var sa = PURE.normVer(a), sb = PURE.normVer(b);
+
+  // ① base 层的 -l<n> 修订号（唯一需要整数比较的特例）
+  var ma = sa.match(/^(.*?)-l(\d+)$/);
+  var mb = sb.match(/^(.*?)-l(\d+)$/);
+  if (ma && mb && ma[1] === mb[1]) {
+    var ra = Number(ma[2]), rb = Number(mb[2]);
+    return ra === rb ? 0 : (ra < rb ? -1 : 1);
+  }
+
+  // ② semver：拆成 主干 / 预发布
+  function split(v) {
+    var i = v.indexOf("-");
+    return i < 0 ? { core: v, pre: null } : { core: v.slice(0, i), pre: v.slice(i + 1) };
+  }
+  function cmpCore(x, y) {
+    var px = x.split("."), py = y.split(".");
+    var n = Math.max(px.length, py.length);
+    for (var i = 0; i < n; i++) {
+      var a1 = px[i] === undefined ? "0" : px[i], b1 = py[i] === undefined ? "0" : py[i];
+      var na = /^\d+$/.test(a1), nb = /^\d+$/.test(b1);
+      if (na && nb) { if (Number(a1) !== Number(b1)) return Number(a1) < Number(b1) ? -1 : 1; }
+      else if (na !== nb) return na ? 1 : -1;
+      else if (a1 !== b1) return a1 < b1 ? -1 : 1;
+    }
+    return 0;
+  }
+  var A = split(sa), B = split(sb);
+  var c = cmpCore(A.core, B.core);
+  if (c !== 0) return c;
+  // 主干相同：没有预发布后缀的**更大**（1.0.0 > 1.0.0-rc.1）
+  if (A.pre === null && B.pre === null) return 0;
+  if (A.pre === null) return 1;
+  if (B.pre === null) return -1;
+  // 都有预发布：逐段比（数字段数值比，字母段字典序）
+  var pa = A.pre.split("."), pb = B.pre.split(".");
+  var m = Math.max(pa.length, pb.length);
+  for (var j = 0; j < m; j++) {
+    var x1 = pa[j], y1 = pb[j];
+    if (x1 === undefined) return -1;    // 段少 = 更小
+    if (y1 === undefined) return 1;
+    if (x1 === y1) continue;
+    var nx1 = /^\d+$/.test(x1), ny1 = /^\d+$/.test(y1);
+    if (nx1 && ny1) return Number(x1) < Number(y1) ? -1 : 1;
+    if (nx1 !== ny1) return nx1 ? -1 : 1;   // 数字段 < 字母段（semver: numeric < alphanumeric）
+    return x1 < y1 ? -1 : 1;
+  }
+  return 0;
+};
+
+/* 从 check 结果里挑出"该层可更新项"的人类可读摘要（纯函数） */
+PURE.updateSummary = function (res) {
+  res = res || {};
+  var out = { channels: [], updates: [], errors: [], warnings: [] };
+  (res.channels || []).forEach(function (c) {
+    out.channels.push({
+      id: c.id, name: c.name, ok: c.ok === true, sig: c.signature_valid === true,
+      error: c.error || null, fingerprint: c.pubkey_fingerprint || null,
+    });
+    // ★ 验签失败必须显式报错（安全模型：不得静默降级）
+    if (!c.signature_valid) {
+      out.errors.push("频道 " + (c.name || c.id) + " 验签失败，已拒绝：" + (c.error || "签名无效"));
+    } else if (!c.ok && c.error) {
+      out.errors.push("频道 " + (c.name || c.id) + " 读取失败：" + c.error);
+    }
+  });
+  (res.updates || []).forEach(function (u) {
+    var v = PURE.cmpVer(u.version, u.installed);
+    out.updates.push({
+      id: u.id, version: u.version, installed: u.installed, url: u.url,
+      sha256: u.sha256, transport: u.transport, size: u.size, rawSize: u.size_raw,
+      channel: u.channel, isUpgrade: v > 0, isDowngrade: v < 0,
+      label: u.installed ? (u.installed + " → " + u.version) : ("安装 " + u.version),
+    });
+  });
+  (res.errors || []).forEach(function (e) { out.errors.push(e); });
+  if (!out.channels.length) out.warnings.push("没有启用任何频道（先在 App 设置页添加，或用 dshroid-channel channels add）");
+  else if (!out.updates.length && !out.errors.length) out.warnings.push("已是最新（所有层与频道清单一致）");
+  return out;
+};
+
+/* 版本列表（update-versions）→ 回滚候选（纯函数） */
+PURE.rollbackModel = function (res) {
+  res = res || {};
+  var installed = res.installed || {}, active = res.active || {};
+  var ids = ["base", "runtime", "dsh"];
+  var rows = [];
+  ids.forEach(function (id) {
+    var list = Array.isArray(installed[id]) ? installed[id].slice() : [];
+    list.sort(function (a, b) { return PURE.cmpVer(a, b); });
+    var others = list.filter(function (v) { return v !== active[id]; });
+    rows.push({ id: id, active: active[id] || null, all: list, rollbackTo: others.length ? others[others.length - 1] : null });
+  });
+  return rows;
+};
+
+/* 命令输出 → 是否成功的判定 + 可读错误（linuxctl 成功时 ok 缺省为 true） */
+PURE.resultOk = function (obj) {
+  if (!obj) return false;
+  if (obj.ok === false) return false;
+  if (obj.state === "error") return false;
+  return true;
+};
+
+/* 在 node 里可 require 这段做单测：导出到 globalThis */
+if (typeof globalThis !== "undefined") globalThis.DSHROID_PURE = PURE;
+if (typeof module !== "undefined" && module.exports) module.exports = PURE;
+
+/* =========================================================================
+ * 3. 命令封装
+ * ========================================================================= */
+function shq(s) { return "'" + String(s).replace(/'/g, "'\\''") + "'"; }
+
+async function ctl(args, timeoutMs) {
+  // 在 Android 侧以 root 执行；时间戳前缀用于区分并发调用的日志
+  var cmd = "LINUX_HOME=" + shq(LH) + " " + shq(CTL) + " " + args;
+  var r = await exec(cmd);
+  return r || { errno: -1, stdout: "", stderr: "" };
+}
+async function ctlJson(args) {
+  var r = await ctl(args);
+  var obj = PURE.tryJson(r.stdout);
+  if (!obj && r.stderr) obj = { ok: false, error: String(r.stderr).trim() };
+  if (!obj) obj = { ok: false, error: "命令没有返回可解析的 JSON" };
+  obj.__raw = { errno: r.errno, stdout: r.stdout, stderr: r.stderr };
+  return obj;
+}
+
+/* =========================================================================
+ * 4. DOM 交互
+ * ========================================================================= */
+var $ = function (id) { return document.getElementById(id); };
+var ESC = PURE.esc;
+var toastTimer = null;
+function showToast(msg) {
+  var t = $("toast"); t.textContent = msg; t.classList.add("show");
+  if (toastTimer) clearTimeout(toastTimer);
+  toastTimer = setTimeout(function () { t.classList.remove("show"); }, 2200);
+}
+function setOut(id, text) { $(id).textContent = text; }
+
+/* ---- 预览模式的模拟数据（让界面可离线自测）---- */
+function fakeStatus() {
+  return {
+    schema: 1, mode: "root", state: "running", pid: 12345, uptime_sec: 3721,
+    dsh: { url: "http://127.0.0.1:3080/?token=PREVIEWTOKEN1234567890abcdef", base_url: "http://127.0.0.1:3080",
+           port: 3080, version: "0.1.5-rc.2", healthy: true },
+    layers: { base: { version: "24.04.3-l1", size: 140000000, mounted: true },
+              runtime: { version: "1.0.0", size: 70000000, mounted: true },
+              dsh: { version: "0.1.5-rc.2", size: 90000000, mounted: true } },
+    storage: { upper_used: 123456789, upper_total: 8589934592 }, last_error: null,
+  };
+}
+
+var LAST = { status: null, statusView: null, updRes: null, doctor: "" };
+
+async function refreshStatus(silent) {
+  var st;
+  if (isPreview()) {
+    st = fakeStatus();
+  } else {
+    var r = await ctl("status");
+    st = PURE.tryJson(r.stdout);
+    if (!st) {
+      st = { state: "error", last_error: (r.stderr || "无法解析 status 输出").trim() };
+    }
+  }
+  LAST.status = st;
+  var v = PURE.statusView(st);
+  LAST.statusView = v;
+
+  // 状态胶囊：单色板下用「图标 + 文案 + 明度/描边」表达，不用颜色
+  var sv = PURE.stateView(v.state);
+  var dot = sv.dot === "solid" ? '<span class="dot"></span>'
+          : sv.dot === "hollow" ? '<span class="dot hollow"></span>' : "";
+  var pill = '<span class="pill ' + ESC(sv.cls) + '">' + dot +
+             '<span class="mark">' + ESC(sv.icon) + "</span>" + ESC(sv.label) + "</span>";
+  $("stState").innerHTML = pill;
+  $("stMode").textContent = v.mode || "—";
+  $("stUptime").textContent = v.uptimeText;
+  $("stPort").textContent = v.port == null ? "—" : String(v.port);
+  // 健康：单色下用文字符号（✓ / !）而不是绿/黄
+  $("stHealthy").textContent = v.state === "running" ? (v.healthy ? "✓ 健康" : "! 无响应") : "—";
+  $("stUrl").textContent = v.urlMasked || "—";
+  $("stUrl").title = "含一次性令牌，已打码";
+  $("hdSub").innerHTML = (v.state || "未知") + " · " + (v.mode || "?") +
+    (v.state === "running" ? (" · " + ESC(v.uptimeText)) : "");
+
+  $("stLayers").innerHTML = v.layers.map(function (L) {
+    return '<div class="row"><span class="k">' + ESC(L.label) + "</span><span class=\"v\">" +
+      (L.version ? ESC(L.version) : '<span style="color:var(--faint)">未安装</span>') +
+      (L.sizeMB ? " · " + L.sizeMB + " MB" : "") + "</span></div>";
+  }).join("");
+  $("stStorage").textContent = (v.upperUsedMB == null ? "可写层未挂载" :
+    ("可写层已用 " + v.upperUsedMB + " MB / " + (v.upperTotalMB || "?") + " MB"));
+
+  // 未部署提示：三层全空
+  var none = v.layers.every(function (L) { return !L.version; });
+  $("undeployedCard").style.display = none ? "block" : "none";
+
+  if (v.lastError) {
+    // 错误态：白底黑字胶囊（最"重"的表达）+ 加粗文案
+    $("stState").innerHTML = pill + ' <span class="hint" style="color:var(--fg);font-weight:700">' +
+      ESC(v.lastError) + "</span>";
+  }
+  if (!silent) { /* 无需额外动作 */ }
+}
+
+/* ---- autostart：读写同一份 config.json（不另存状态）---- */
+async function loadAutostart() {
+  var txt = "";
+  if (isPreview()) {
+    txt = '{"port":3080,"autostart":true}';
+  } else {
+    var r = await exec("cat " + shq(CONF));
+    txt = r.stdout || "";
+  }
+  var m = txt.match(/"autostart"\s*:\s*(true|false)/);
+  if (!m) {
+    $("autostartHint").textContent = "读不到 " + CONF + "（可能尚未部署）。";
+    $("swAutostart").checked = false;
+    $("swAutostart").disabled = true;
+    return;
+  }
+  $("swAutostart").checked = (m[1] === "true");
+  $("swAutostart").disabled = false;
+  $("autostartHint").textContent = "当前值：" + m[1] + "（与 App 设置页共用同一份 config.json）";
+}
+
+async function setAutostart(on) {
+  // 用 sed 原地改 config.json 的 autostart —— 只改这一个键，不动别的字段，
+  // 这样不会覆盖 App 写的端口/频道等配置。
+  var cmd = "sed -i 's/\"autostart\"[ \t]*:[ \t]*\\(true\\|false\\)/\"autostart\": " +
+            (on ? "true" : "false") + "/' " + shq(CONF);
+  var r = await exec(cmd);
+  if (r.errno !== 0) {
+    showToast("写入失败：" + (r.stderr || r.errno));
+    return false;
+  }
+  showToast(on ? "已开启开机自启" : "已关闭开机自启");
+  await loadAutostart();
+  return true;
+}
+
+/* ---- 模块版本与自我更新 ---- */
+var MOD = { info: null, check: null, pending: null };
+
+async function loadModuleInfo() {
+  var res;
+  if (isPreview()) {
+    res = { id: "dshroid", name: "DSHroid", version: "v1.0.0", versionCode: "10000",
+            bin_version: "v1.0.0", installed: true };
+  } else {
+    res = await ctlJson("update-module-info");
+  }
+  MOD.info = res;
+  var mv = PURE.moduleView(res);
+  $("modVer").textContent = (mv.name || "DSHroid") + " " + (mv.version || "未知") +
+    (mv.versionCode ? "（code " + mv.versionCode + "）" : "");
+  $("modBin").textContent = mv.binVersion || "未同步";
+  $("modHint").innerHTML = mv.drift
+    ? "! 模块版本与已同步的运行时脚本不一致；重启（或刷一次模块）后会自动同步。"
+    : "运行时脚本与模块版本一致（post-fs-data 每次开机从模块目录同步）。";
+  $("muCur").textContent = mv.version || "未知";
+}
+
+async function checkModuleUpdate() {
+  $("btnModCheck").disabled = true;
+  setOut("muOut", "正在拉取频道清单并验签…");
+  var res;
+  if (isPreview()) {
+    res = { ok: true, module_installed: "v1.0.0",
+      channels: [ { id: "official", name: "官方", ok: true, signature_valid: true },
+                  { id: "evil", name: "可疑频道", ok: false, signature_valid: false, error: "签名无效：清单与公钥不匹配" } ],
+      module: { version: "1.1.0", url: "https://example.org/dshroid-module-1.1.0.zip", sha256: "aa11",
+                size: 145000, changelog: "· 修复日志页偶发空白\n· 新增模块自我更新", channel_name: "官方" },
+      module_latest: { version: "1.1.0" }, errors: [] };
+  } else {
+    res = await ctlJson("update-module-check");
+  }
+  MOD.check = res;
+  var v = PURE.moduleUpdateView(res);
+  setOut("muOut", JSON.stringify(res, null, 2));
+  $("muLatest").textContent = v.update ? v.update.version : (v.latestVersion || "无信息");
+  var enabled = !!(v.update && v.update.url);
+  $("btnModApply").disabled = !enabled;
+  $("btnBinApply").disabled = !enabled;
+  MOD.pending = enabled ? v.update : null;
+  if (v.errors.length) showToast("验签失败，已拒绝该频道");
+  else if (enabled) showToast("发现模块更新 " + v.update.version);
+  else showToast(v.notes[0] || "没有模块更新");
+  $("btnModCheck").disabled = false;
+}
+
+async function applyModuleUpdate(asBin) {
+  var u = MOD.pending;
+  if (!u) { showToast("先检查更新"); return; }
+  var msg = asBin
+    ? ("把 " + u.version + " 的运行时脚本包暂存下来？\n\n它会在**下次开机**生效（不热替换正在跑的脚本）。")
+    : ("下载模块更新包 " + u.version + "？\n\n不会自动安装：下载后请在 KernelSU / Magisk 管理器里「从本地安装」。");
+  if (!confirm(msg)) return;
+  $("btnModApply").disabled = true;
+  $("btnBinApply").disabled = true;
+  setOut("muOut", "正在下载并校验 sha256…");
+  var cmd = "LINUX_HOME=" + shq(LH) + " bash " + shq(LH + "/bin/update.sh") + " module-apply " +
+            shq(u.version) + " " + shq(u.url) + " " + shq(u.sha256 || "") + (asBin ? " --bin" : "");
+  var r;
+  if (isPreview()) r = { errno: 0, stdout: '{"ok":true,"preview":true}', stderr: "" };
+  else r = await exec(cmd);
+  var res = PURE.tryJson(r.stdout) || { ok: false, error: (r.stderr || "无输出").trim() };
+  setOut("muOut", JSON.stringify(res, null, 2));
+  if (PURE.resultOk(res)) {
+    toast(res.install_hint || "");
+    showToast(asBin ? "已暂存；下次开机生效" : "已下载；请到管理器里安装");
+    // 顺手把安装指引显示在界面上（用户可能没看到 toast）
+    var hint = document.createElement("div");
+    hint.className = "note";
+    hint.textContent = res.install_hint || "";
+    $("muOut").parentNode.insertBefore(hint, $("muOut"));
+  } else {
+    showToast("下载失败：" + (res.error || "见输出"));
+  }
+  $("btnModApply").disabled = false;
+  $("btnBinApply").disabled = false;
+  await loadModuleInfo();
+}
+
+/* ---- 日志 ---- */
+var logTimer = null, logPaused = false;
+async function refreshLog() {
+  var txt;
+  if (isPreview()) {
+    txt = "[preview] 这是预览模式下的示例日志行\n" +
+          "[2026-09-15 15:00:00] [supervise.sh] dsh 已后台启动，pid=12345\n" +
+          "dsh web: http://127.0.0.1:3080/?token=<TEST>  <-- 含 <尖括号> 验证转义\n" +
+          "[2026-09-15 15:00:03] [supervise.sh] 已捕获带令牌 URL 并写入 run/dsh.url\n";
+  } else {
+    var r = await ctl("logs -n 400");
+    txt = r.stdout || r.stderr || "(空)";
+  }
+  var v = PURE.logView(txt, 400);
+  setOut("logOut", v.text + (v.truncated ? "\n…（已截断，只显示最后 400 行）" : ""));
+  $("logOut").scrollTop = $("logOut").scrollHeight;
+  $("logMeta").textContent = "共 " + v.lines + " 行 · " + new Date().toLocaleTimeString();
+}
+function startLogTimer() {
+  if (logTimer) clearInterval(logTimer);
+  logTimer = setInterval(function () { if (!logPaused) refreshLog(); }, 3000);
+}
+
+/* ---- 操作 ---- */
+async function doOp(op) {
+  var map = {
+    start: ["start", "正在启动…"],
+    stop: ["stop", "正在停止…"],
+    restart: ["stop", "正在重启…"],
+  };
+  if (op === "refresh") { await refreshStatus(); showToast("已刷新"); return; }
+
+  if (op === "start" || op === "stop" || op === "restart") {
+    var btn = document.querySelector('[data-op="' + op + '"]');
+    if (btn) btn.disabled = true;
+    showToast(map[op][1]);
+    setOut("opsOut", map[op][1]);
+    var r1 = await ctlJson(map[op][0]);
+    setOut("opsOut", JSON.stringify(r1, null, 2));
+    if (op === "restart") {
+      await new Promise(function (res) { setTimeout(res, 1200); });
+      var r2 = await ctlJson("start");
+      setOut("opsOut", "stop → " + JSON.stringify(r1) + "\n\nstart → " + JSON.stringify(r2));
+      if (!PURE.resultOk(r2)) showToast("重启可能失败：" + (r2.last_error || r2.error || "见输出"));
+    } else if (!PURE.resultOk(r1)) {
+      showToast("失败：" + (r1.last_error || r1.error || "见输出"));
+    } else {
+      showToast("完成");
+    }
+    if (btn) btn.disabled = false;
+    await refreshStatus(true);
+    return;
+  }
+
+  if (op === "exec-id" || op === "exec-cap" || op === "exec-mount") {
+    var cmds = {
+      "exec-id": "id",
+      "exec-cap": "grep CapEff /proc/self/status",
+      "exec-mount": "findmnt -no FSTYPE /mnt/sdcard || df -T /mnt/sdcard",
+    };
+    setOut("opsOut", "执行中…");
+    var rr = await ctl("exec -- " + cmds[op]);
+    setOut("opsOut", (rr.stdout || "") + (rr.stderr ? ("\n[stderr] " + rr.stderr) : "") +
+      "\n[exit=" + rr.errno + "]");
+    return;
+  }
+
+  if (op === "snapshot") {
+    var name = "web-" + new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+    setOut("opsOut", "正在快照…（会先停止环境）");
+    var rs = await ctlJson("snapshot " + name);
+    setOut("opsOut", JSON.stringify(rs, null, 2));
+    showToast(PURE.resultOk(rs) ? "快照完成" : "快照失败");
+    await refreshStatus(true);
+    return;
+  }
+
+  if (op === "reset") {
+    if (!confirm("确定要清空可写层吗？\n\n这会删除环境内的用户数据（会话、设置、凭据），只保留只读层。此操作不可撤销。")) return;
+    if (!confirm("再确认一次：真的要恢复出厂吗？")) return;
+    setOut("opsOut", "正在清空可写层…");
+    var rr2 = await ctlJson("reset");
+    setOut("opsOut", JSON.stringify(rr2, null, 2));
+    showToast(PURE.resultOk(rr2) ? "已恢复出厂" : "操作失败");
+    await refreshStatus(true);
+    return;
+  }
+}
+
+/* ---- 诊断 ---- */
+async function runDoctor() {
+  $("btnDoctor").disabled = true;
+  setOut("diagOut", "正在自检…（可能十几秒）");
+  var txt;
+  if (isPreview()) {
+    txt = "[preview] doctor 示例输出\n== 1. 内核能力 ==\n  [ok] CONFIG_EROF5_FS=y\n  [skip] avc 检查（预览模式）";
+  } else {
+    var r = await ctl("doctor");
+    txt = (r.stdout || "") + (r.stderr ? ("\n[stderr]\n" + r.stderr) : "");
+  }
+  LAST.doctor = txt;
+  setOut("diagOut", txt || "(无输出)");
+  $("btnDoctor").disabled = false;
+  $("diagOut").scrollTop = 0;
+}
+async function runSelftest() {
+  setOut("diagOut", "正在跑回归自测…");
+  var r = await ctl("exec -- bash " + shq(LH + "/bin/selftest.sh"));
+  var txt = (r.stdout || "") + (r.stderr ? ("\n[stderr]\n" + r.stderr) : "");
+  setOut("diagOut", txt || "(无输出)");
+  LAST.doctor = txt;
+}
+
+/* ---- 更新 ---- */
+async function checkUpdates() {
+  $("btnCheckUpd").disabled = true;
+  setOut("updOut", "正在拉取频道清单并验签…");
+  $("updList").innerHTML = '<span class="hint">检查中…</span>';
+  var res;
+  if (isPreview()) {
+    res = {
+      ok: true,
+      channels: [
+        { id: "official", name: "官方", ok: true, signature_valid: true, error: null, pubkey_fingerprint: "a583b7b4cc5b2f3b" },
+        { id: "evil", name: "可疑频道", ok: false, signature_valid: false, error: "签名无效：清单与公钥不匹配", pubkey_fingerprint: "deadbeefdeadbeef" }
+      ],
+      updates: [
+        { id: "dsh", version: "0.1.6-alpha.1", installed: "0.1.5-rc.2", url: "https://example.org/dsh-0.1.6-alpha.1.erofs.gz",
+          sha256: "aa11", size: 50146411, size_raw: 211259392, transport: "gzip", channel: "official" },
+        { id: "runtime", version: "1.0.0", installed: null, url: "https://example.org/runtime-1.0.0.erofs.gz",
+          sha256: "bb22", size: 77067997, size_raw: 240828416, transport: "gzip", channel: "official" }
+      ],
+      errors: []
+    };
+  } else {
+    res = await ctlJson("update-check");
+  }
+  LAST.updRes = res;
+  setOut("updOut", JSON.stringify(res, null, 2));
+  renderUpdates(res);
+  $("btnCheckUpd").disabled = false;
+}
+
+function renderUpdates(res) {
+  var m = PURE.updateSummary(res);
+  var html = "";
+  if (m.errors.length) {
+    html += m.errors.map(function (e) {
+      return '<div class="upd" style="border-color:rgba(255,255,255,.55);background:rgba(255,255,255,.06)">🔒 ' + ESC(e) + "</div>";
+    }).join("");
+  }
+  if (m.warnings.length) {
+    html += m.warnings.map(function (w) { return '<div class="upd">ℹ️ ' + ESC(w) + "</div>"; }).join("");
+  }
+  if (m.channels.length) {
+    html += '<div class="hint" style="margin:6px 0">频道（验签结果）：' +
+      m.channels.map(function (c) {
+        var mark = c.sig ? '<b>✓ 已验签</b>'
+                         : '<b>✕ 验签失败（已拒绝）</b>';
+        return '<br>· ' + ESC(c.name || c.id) + " " + mark + (c.fingerprint ? " <code>" + ESC(c.fingerprint) + "</code>" : "");
+      }).join("") + "</div>";
+  }
+  m.updates.forEach(function (u) {
+    html += '<div class="upd"><div class="top"><b>' + ESC(u.id) + "</b>" +
+      '<span class="ver">' + ESC(u.label) + "</span></div>" +
+      '<div class="ver" style="margin-top:4px">' + ESC(u.transport) +
+      (u.size ? " · 下载约 " + Math.round(u.size / 1048576) + " MB" : "") +
+      (u.rawSize ? " · 解压后约 " + Math.round(u.rawSize / 1048576) + " MB" : "") +
+      (u.channel ? " · 频道 " + ESC(u.channel) : "") + "</div>" +
+      '<div class="btns"><button class="primary sm" data-apply="' + ESC(u.id) + '|' + ESC(u.version) +
+      '|' + ESC(u.url || "") + "|" + ESC(u.sha256 || "") + '">' +
+      (u.isDowngrade ? "降级到 " + ESC(u.version) : "更新到 " + ESC(u.version)) + "</button></div></div>";
+  });
+  $("updList").innerHTML = html || '<span class="hint">没有可更新的层。</span>';
+
+  Array.prototype.forEach.call($("updList").querySelectorAll("[data-apply]"), function (b) {
+    b.addEventListener("click", function () { applyUpdate(b.getAttribute("data-apply"), b); });
+  });
+}
+
+async function applyUpdate(spec, btn) {
+  var p = spec.split("|");
+  var layer = p[0], version = p[1], url = p[2], sha = p[3];
+  if (!url) { showToast("该层没有可用的 .gz 下载地址"); return; }
+  if (!confirm("确定要更新 " + layer + " 到 " + version + " 吗？\n\n下载：" + url +
+      "\n\n更新会重启环境；失败会自动回滚。")) return;
+  if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spin"></span> 下载中…'; }
+  setOut("updOut", "正在下载并校验（200 MB 级可能较慢，请勿离开）…\n" + url);
+
+  // 大文件落盘前先看空间（linuxctl/update.sh 内部也会再查一次）
+  var cmd = "LINUX_HOME=" + shq(LH) + " LINUXCTL_SH=" + shq(CTL) + " bash " + shq(LH + "/bin/update.sh") +
+            " apply " + shq(layer) + " " + shq(version) + " " + shq(url) + " " + shq(sha);
+  var r;
+  if (isPreview()) {
+    r = { errno: 0, stdout: '{"ok":true,"preview":true}', stderr: "" };
+  } else {
+    r = await exec(cmd);
+  }
+  var res = PURE.tryJson(r.stdout) || { ok: false, error: (r.stderr || "无输出").trim() };
+  setOut("updOut", JSON.stringify(res, null, 2));
+  showToast(PURE.resultOk(res) ? "更新完成" : "更新失败：" + (res.error || "见输出"));
+  if (btn) { btn.disabled = false; }
+  await refreshStatus(true);
+  await loadRollback();
+}
+
+async function loadRollback() {
+  var res;
+  if (isPreview()) {
+    res = { installed: { base: ["24.04.3-l1"], runtime: ["1.0.0"], dsh: ["0.1.5-rc.2", "0.1.5-rc.1"] },
+            active: { base: "24.04.3-l1", runtime: "1.0.0", dsh: "0.1.5-rc.2" } };
+  } else {
+    res = await ctlJson("update-versions");
+  }
+  var rows = PURE.rollbackModel(res);
+  var html = rows.map(function (r) {
+    if (!r.all.length) return '<div class="upd"><b>' + ESC(r.id) + '</b> <span class="ver">没有带版本名的层</span></div>';
+    var btns = r.all.map(function (v) {
+      if (v === r.active) return '<span class="ver">（当前 ' + ESC(v) + "）</span>";
+      return '<button class="sm" data-rb="' + ESC(r.id) + "|" + ESC(v) + '">切到 ' + ESC(v) + "</button>";
+    }).join(" ");
+    return '<div class="upd"><div class="top"><b>' + ESC(r.id) + "</b>" +
+      '<span class="ver">当前：' + ESC(r.active || "未记录") + "</span></div>" +
+      '<div class="btns">' + btns + "</div></div>";
+  }).join("");
+  $("rollbackList").innerHTML = html || '<span class="hint">没有可回滚的版本。</span>';
+  Array.prototype.forEach.call($("rollbackList").querySelectorAll("[data-rb]"), function (b) {
+    b.addEventListener("click", function () { doRollback(b.getAttribute("data-rb")); });
+  });
+}
+
+async function doRollback(spec) {
+  var p = spec.split("|"), layer = p[0], ver = p[1];
+  if (!confirm("把 " + layer + " 切回 " + ver + " 吗？\n\n不会删除任何层文件，可以再切回来。")) return;
+  setOut("updOut", "正在回滚 " + layer + " → " + ver + " …");
+  var res = await ctlJson("rollback " + layer + " --to " + ver);
+  setOut("updOut", JSON.stringify(res, null, 2));
+  showToast(PURE.resultOk(res) ? "已切回 " + ver : "回滚失败");
+  await refreshStatus(true);
+  await loadRollback();
+}
+
+/* =========================================================================
+ * 5. 启动
+ * ========================================================================= */
+function bindTabs() {
+  Array.prototype.forEach.call(document.querySelectorAll("nav.tabbar .tab"), function (t) {
+    t.addEventListener("click", function () {
+      Array.prototype.forEach.call(document.querySelectorAll("nav.tabbar .tab"), function (x) { x.classList.remove("on"); });
+      Array.prototype.forEach.call(document.querySelectorAll(".page"), function (x) { x.classList.remove("active"); });
+      t.classList.add("on");
+      var pg = $("page-" + t.getAttribute("data-page"));
+      if (pg) pg.classList.add("active");
+      if (t.getAttribute("data-page") === "logs") refreshLog();
+      if (t.getAttribute("data-page") === "upd") { loadRollback(); loadModuleInfo(); }
+    });
+  });
+}
+
+function boot() {
+  if (isPreview()) $("previewBanner").classList.add("show");
+  bindTabs();
+
+  $("swAutostart").addEventListener("change", function (e) { setAutostart(e.target.checked); });
+  $("btnCopyUrl").addEventListener("click", function () {
+    var u = (LAST.status && LAST.status.dsh && LAST.status.dsh.url) || "";
+    if (!u) { showToast("没有可复制的链接（环境未运行？）"); return; }
+    // 复制**完整**链接（打码只用于显示）；剪贴板 API 在 WebView 里可能被禁，给回退提示
+    try {
+      navigator.clipboard.writeText(u).then(function () { showToast("已复制完整登录链接"); },
+        function () { showToast("复制被拒绝；请从 App 获取链接"); });
+    } catch (e) { showToast("复制不可用；请从 App 获取链接"); }
+  });
+  $("btnOpenUrl").addEventListener("click", function () {
+    var u = (LAST.status && LAST.status.dsh && LAST.status.dsh.url) || "";
+    if (!u) { showToast("环境未运行"); return; }
+    // 不能直接 location.href（会把 WebUI 自己换掉）；让宿主 App/浏览器打开
+    if (typeof ksu !== "undefined" && ksu.openUrl) { try { ksu.openUrl(u); return; } catch (e) {} }
+    toast("请在 App 或浏览器里打开：" + PURE.maskUrl(u));
+    showToast("已提示；完整链接请用「复制登录链接」");
+  });
+
+  Array.prototype.forEach.call(document.querySelectorAll("[data-op]"), function (b) {
+    b.addEventListener("click", function () { doOp(b.getAttribute("data-op")); });
+  });
+  $("btnLogToggle").addEventListener("click", function () {
+    logPaused = !logPaused;
+    $("btnLogToggle").textContent = logPaused ? "继续自动刷新" : "暂停自动刷新";
+    if (!logPaused) refreshLog();
+  });
+  $("btnLogReload").addEventListener("click", refreshLog);
+  $("btnLogCopy").addEventListener("click", function () {
+    var t = $("logOut").textContent || "";
+    try { navigator.clipboard.writeText(t).then(function () { showToast("日志已复制"); }, function () { showToast("复制被拒绝"); }); }
+    catch (e) { showToast("复制不可用"); }
+  });
+
+  $("btnDoctor").addEventListener("click", runDoctor);
+  $("btnSelftest").addEventListener("click", runSelftest);
+  $("btnDoctorCopy").addEventListener("click", function () {
+    try { navigator.clipboard.writeText(LAST.doctor || $("diagOut").textContent || "")
+      .then(function () { showToast("已复制"); }, function () { showToast("复制被拒绝"); }); }
+    catch (e) { showToast("复制不可用"); }
+  });
+
+  $("btnCheckUpd").addEventListener("click", checkUpdates);
+  $("btnModCheck").addEventListener("click", checkModuleUpdate);
+  $("btnModApply").addEventListener("click", function () { applyModuleUpdate(false); });
+  $("btnBinApply").addEventListener("click", function () { applyModuleUpdate(true); });
+  $("btnReloadCh").addEventListener("click", function () { loadAutostart(); loadRollback(); showToast("已重读配置"); });
+
+  refreshStatus();
+  loadAutostart();
+  loadModuleInfo();
+  startLogTimer();
+  loadRollback();
+  // 状态每 5 秒自动刷新（running 时才有意义，但成本很低）
+  setInterval(function () { refreshStatus(true); }, 5000);
+}
+
+if (typeof document !== "undefined" && document.addEventListener) {
+  document.addEventListener("DOMContentLoaded", boot);
+}
+</script>
+</body>
+</html>

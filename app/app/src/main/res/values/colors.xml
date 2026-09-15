@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      平台层用到的少量颜色（真正的配色在 Compose 侧 ui/theme/Theme.kt）。
+      全部灰阶：App 是单色黑白主题。
+    -->
+    <color name="dsh_bg">#FF000000</color>
+    <color name="dsh_bg_alt">#FF0A0A0A</color>
+    <color name="ic_launcher_background">#FF0A0A0A</color>
+</resources>

@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 排障包分享用：只暴露 cacheDir/exports 与 filesDir/crash，其它目录一律不暴露 -->
+<paths>
+    <cache-path name="exports" path="exports/" />
+    <files-path name="crash" path="crash/" />
+</paths>
