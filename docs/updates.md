@@ -540,14 +540,22 @@ tools/channel/sunsetlinux-channel publish-channel \
 
 ### 让用户用上你的频道
 
-有两种做法，**当前代码里的默认是第一种**：
+两种做法**现在都有**：内置的官方频道是默认，用户也可以自己加频道。
 
-1. **用户手填**（现状）：App「设置 → 频道管理 → 添加」，填 `channel.json` 的 URL + 公钥；
-   命令行等价：`sunsetlinux-channel channels add --id official --url … --pub …`。
-   好处是零信任内置、完全去中心化；代价是**新用户要自己粘两串东西**。
-2. **内置默认频道**（⏳ 未实现，需要你定）：把 URL + 公钥写进 App（`BuildConfig` 或环境播种），
-   首启就带一个「官方」频道且不可删除。要做的话给我 `--base-url` 对应的
-   `channel.json` URL 与公钥即可 —— 指纹会一起写进 `docs/`，用户可以核对。
+1. **内置官方频道**（✅ 2026-09-16 起为默认）：
+   - `channel.json`：<https://sunsetrne.github.io/SunsetLinux/channel/channel.json>
+   - 公钥：`YXoAcwa3clZCRd7+DlIHMS3cQ40HlyXVSKblvX5Ye1M=`
+   - 指纹：`ed25519:06:d0:c4:4d:29:1c:ef:66`
+   - 实现：`app/.../core/Prefs.kt` 的 `Channel.OFFICIAL`（URL + 公钥**写死在代码里**），
+     `Prefs.channels` 读时并入、写时剔除 —— 用户数据里**不存**这一项，所以改不掉、删不掉、
+     升级也不会留旧副本；设置页里它带「内置」标记，只有启用/停用开关。
+   - 有测试钉着（`OfficialChannelContractTest`）：URL 必须是 https、公钥必须与本文档公开的一致。
+2. **用户手填**：App「设置 → 频道管理 → 添加」，填 URL + 公钥；
+   命令行等价：`sunsetlinux-channel channels add --id mychan --url … --pub …`。
+   好处是完全去中心化（第三方开发者可自签自建，App 不做中心审核）。
+
+> ⚠️ 内置频道只是"默认从哪拿更新"，不代表更可信：**信任仍然只来自公钥验签**。
+> 用户随时可以在设置里停用它，或换成别的频道。
 
 ---
 

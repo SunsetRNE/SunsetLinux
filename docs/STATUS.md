@@ -46,10 +46,10 @@
 |---|---|---|
 | `runtime/root/selftest.sh` | 20 | ✅ |
 | `runtime/proot/selftest.sh` | 18 | ✅ |
-| `module/webroot/selftest.mjs`（WebUI 纯函数） | 41 | ✅ |
+| `module/webroot/selftest.mjs`（WebUI 纯函数 + 图标守卫） | 64 | ✅ |
 | `tools/cmp-consistency.mjs`（三方版本比较） | 16 | ✅ |
 | `tools/contract-check.mjs`（status JSON 契约，root+proot） | — | ✅ 双通过 |
-| App 单测（解压 13 + 归因 8 + UI 契约 16 + 调色对比 9 + 功能 10） | 54 | ✅（`./gradlew :app:testDebugUnitTest`） |
+| App 单测（解压 13 + 归因 8 + UI 契约 14 + 调色对比 9 + 功能 10 + 官方频道 4） | 58 | ✅（`./gradlew :app:testDebugUnitTest`） |
 
 ### 3.2 端到端实测过的链路
 
@@ -141,9 +141,25 @@ Android 上没有随系统可用的伪终端分配接口，自己引（JNI + for
 才断开 —— 避免留下没人管的 shell 进程。起会话前先判一次环境是否 `RUNNING`（`attach` 进的是
 已存在的 mount namespace，没起来时只会甩一行报错）。
 
-**验收**：`:app:assembleDebug` + `:app:testDebugUnitTest` → **54 用例全过**（新增
+**验收**：`:app:assembleDebug` + `:app:testDebugUnitTest` → **58 用例全过**（新增
 `ShellLayoutContractTest` 7 条，守着"底栏只放 3 格 / DSH 在顶栏 / 更新在侧边栏 /
 终端走 attach 且先判环境 / 会话随外壳销毁"）。
+
+### 3.7 ★ 模块 WebUI 图标化 + 内置官方频道 + 模块 1.0.1（2026-09-16 第二批）
+
+| 改动 | 做法 | 回归 |
+|---|---|---|
+| **WebUI 不再用 emoji** | `module/webroot/index.html` 的 5 个 tab（📊⚙️📜🩺⬆️）、预览横幅 ⚠、更新页 🔒/ℹ️ 全部换成**内联 SVG sprite**（`<symbol>` + `<use href="#i-…">`，`stroke: currentColor`）。理由：emoji 是**彩色**的，与单色板冲突；而且同一串码点在各 ROM 的 emoji 字体下渲染差别很大。spite 全部内联，**不引任何外部资源**（WebUI 可能没网） | `module/webroot/selftest.mjs` 新增 3 条：不许出现 emoji 码点、图标走 sprite、旧 emoji 字号规则已移除 |
+| **模块按"一次更新"发布** | `module/module.prop`：`v1.0.0` → `v1.0.1`、`versionCode` `10000` → `10001`。CI 从 `module.prop` 取版本产出 `sunsetlinux-module-1.0.1.zip`；`post-fs-data.sh` 开机写 `etc/bin-version` 也随之为 1.0.1（不会报"脚本/模块漂移"） | CI 出 zip + `cmp-consistency` |
+| **内置官方频道**（"自己的发布作为默认与内置发布"） | `core/Prefs.kt` 新增 `Channel.OFFICIAL`：URL `https://sunsetrne.github.io/SunsetLinux/channel/channel.json` + 公钥 `YXoAcwa3clZCRd7+DlIHMS3cQ40HlyXVSKblvX5Ye1M=`（指纹 `ed25519:06:d0:c4:4d:29:1c:ef:66`）**写死在代码里**。`Prefs.channels` **读时并入、写时剔除** —— 用户数据里不存这一项，所以改不掉 URL/公钥、删不掉、升级也不留旧副本；设置页给它打「内置」标记、只有启用/停用开关 | `OfficialChannelContractTest` 4 条（https 强制、公钥必须与 `docs/` 公开的一致、读走 `withBuiltin`/写走 `withoutBuiltin`、UI 不给改删键） |
+
+> 为什么"内置"必须写死在代码里而不是塞进默认数据：官方频道的 URL + 公钥就是**信任根**。
+> 若它躺在可写的用户数据里，一次静默篡改就能让 App 忠诚地去验**别人的**签名。
+> 内置只是"默认从哪拿更新"，**信任仍然只来自公钥验签**（用户可随时停用或换成别的频道）。
+
+**仍未做**：把 `module` 段写进频道清单（`gen-manifest.mjs` 目前只出 `layers` + `dsh_npm`，
+而 `update.sh` 读的是 `manifest.module`）—— 不补这一段，**模块更新在 App/WebUI 里拿不到**，
+内置频道只能送层、送不了模块；以及层/频道的实际发布（要定层从哪来，见 §七）。
 
 ---
 

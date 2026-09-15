@@ -136,6 +136,21 @@ console.log('\n== 配色必须是灰阶（黑白单色板，与 App 一致）=='
   ok(left.length === 0, left.length ? `残留旧配色：${left.join(', ')}` : '无旧彩色 token 残留');
 }
 
+console.log('\n== 图标：一律单色内联 SVG，不许出现 emoji ==');
+{
+  // 为什么立这条：emoji 是**彩色**的（和本页单色板冲突），而且同一串码点在不同 ROM 的
+  // emoji 字体下渲染差别很大。图标统一走页首的 sprite（<use href="#i-…">）。
+  // 注意：● ○ ✕ ✓ ★ 这些**单色符号**是刻意保留的设计元素（下面「状态不用颜色」那组断言依赖它们），
+  // 所以这里只禁真正的 emoji 码点。
+  const EMOJI = /[\u{1F000}-\u{1FAFF}\u{2139}\u{2699}\u{26A0}\u{2B06}\u{FE0F}]/gu;
+  const found = html.match(EMOJI) || [];
+  ok(found.length === 0, found.length ? `index.html 里还有 emoji：${[...new Set(found)].join(' ')}` : '没有 emoji');
+  const icons = (html.match(/<use href="#i-[a-z]+"\/>/g) || []).length;
+  ok(icons >= 5, `图标走 sprite（当前引用 ${icons} 处）`);
+  ok(/<symbol id="i-dash"/.test(html) && /<symbol id="i-upd"/.test(html), 'sprite 里定义了状态/更新等图标');
+  ok(!/font-size:17px;line-height:1/.test(html), '旧的 emoji 字号规则已移除（图标改由 .ico 控制尺寸）');
+}
+
 console.log('\n== 状态不用颜色：图标 + 文案 ==');
 {
   const sv = P.stateView;

@@ -74,6 +74,42 @@ data class Channel(
             }
             return root.toString(2)
         }
+
+        /** 官方内置频道的 id。**不可改名/改 URL/改公钥、不可删除**（见 [OFFICIAL]）。 */
+        const val OFFICIAL_ID = "official"
+
+        /**
+         * **内置的官方频道** —— App 自带、默认启用、不可删除。
+         *
+         * URL 与 ed25519 公钥都写死在代码里：公钥不是秘密，它就是这条频道的**信任根**
+         * （用户拿它与 `docs/` 里公开的指纹核对，防中间人）。因此这里的三项内容
+         * 不允许被用户数据覆盖 —— 否则恶意数据可以在用户不知情时把"官方频道"指到别处。
+         *
+         * 为什么要有它：新用户不再需要自己粘 URL + 公钥；也让"官方发布"成为默认发布源。
+         */
+        val OFFICIAL = Channel(
+            id = OFFICIAL_ID,
+            name = "SunsetLinux 官方",
+            url = "https://sunsetrne.github.io/SunsetLinux/channel/channel.json",
+            pubkey = "YXoAcwa3clZCRd7+DlIHMS3cQ40HlyXVSKblvX5Ye1M=",
+            enabled = true,
+            priority = 10,
+        )
+
+        fun isBuiltin(id: String): Boolean = id == OFFICIAL_ID
+
+        /**
+         * 把内置频道**并到用户列表最前面**：URL/公钥/名称以代码里的定义为准，
+         * 只保留用户对它的"启用/停用"这一个选择（其余字段改了也没用，防伪造）。
+         */
+        fun withBuiltin(user: List<Channel>): List<Channel> {
+            val stored = user.firstOrNull { it.id == OFFICIAL_ID }
+            return listOf(OFFICIAL.copy(enabled = stored?.enabled ?: OFFICIAL.enabled)) +
+                user.filter { it.id != OFFICIAL_ID }
+        }
+
+        /** 落盘时去掉内置项：它不占用户数据，永远由代码提供（升级后也不会留旧副本）。 */
+        fun withoutBuiltin(all: List<Channel>): List<Channel> = all.filter { !isBuiltin(it.id) }
     }
 }
 
@@ -105,9 +141,15 @@ class Prefs(context: Context) {
         get() = sp.getBoolean(KEY_AUTO_START, false)
         set(value) = sp.edit { putBoolean(KEY_AUTO_START, value) }
 
+    /**
+     * 频道列表 = **内置官方频道 + 用户自建频道**。
+     *
+     * 读：始终把内置项并进来（老数据里没有它也会自动出现）；
+     * 写：内置项不落盘 —— 它的 URL/公钥永远来自代码，避免"用户数据里躺着一份可被改掉的官方频道"。
+     */
     var channels: List<Channel>
-        get() = Channel.listFrom(sp.getString(KEY_CHANNELS, null))
-        set(value) = sp.edit { putString(KEY_CHANNELS, Channel.listToJson(value)) }
+        get() = Channel.withBuiltin(Channel.listFrom(sp.getString(KEY_CHANNELS, null)))
+        set(value) = sp.edit { putString(KEY_CHANNELS, Channel.listToJson(Channel.withoutBuiltin(value))) }
 
     /** 用户选择忽略的更新（形如 `dsh:0.1.5-rc.2`），避免一直顶着角标。 */
     var ignoredUpdate: String?

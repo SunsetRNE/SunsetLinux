@@ -166,9 +166,15 @@ class SettingsActivity : ComponentActivity() {
                         replaceChannel(ch.copy(enabled = enabled))
                     },
                     onDeleteChannel = { ch ->
-                        channels.removeAll { it.id == ch.id }
-                        persistChannels()
-                        notice.value = "已删除频道「${ch.name}」"
+                        // 内置频道删不掉：它的 URL/公钥是代码里的信任根（UI 上也不显示删除键）。
+                        // 这里再兜一层，防止以后有人在别处直接调这个回调。
+                        if (Channel.isBuiltin(ch.id)) {
+                            notice.value = "「${ch.name}」是内置频道，不能删除（可停用）。"
+                        } else {
+                            channels.removeAll { it.id == ch.id }
+                            persistChannels()
+                            notice.value = "已删除频道「${ch.name}」"
+                        }
                     },
                     onSyncChannels = ::syncChannelsToEnv,
                     onOpenLogs = { startActivity(Intent(this, LogActivity::class.java)) },
@@ -502,6 +508,7 @@ private fun SettingsScreen(
                             channels.forEach { ch ->
                                 ChannelRow(
                                     channel = ch,
+                                    builtin = Channel.isBuiltin(ch.id),
                                     onToggle = { onToggleChannel(ch, it) },
                                     onEdit = { onEditChannel(ch) },
                                     onDelete = { onDeleteChannel(ch) },
@@ -668,6 +675,7 @@ private fun FreezeExemptionCard(onCopyPackage: () -> Unit) {
 @Composable
 private fun ChannelRow(
     channel: Channel,
+    builtin: Boolean = false,
     onToggle: (Boolean) -> Unit,
     onEdit: () -> Unit,
     onDelete: () -> Unit,
@@ -682,6 +690,10 @@ private fun ChannelRow(
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(channel.name, style = MaterialTheme.typography.bodyMedium)
                 Spacer(Modifier.width(6.dp))
+                // 内置频道：URL 与公钥来自代码（信任根），只允许启用/停用
+                if (builtin) {
+                    Pill("内置", color = StateRunning)
+                }
                 if (channel.pubkey.isBlank()) {
                     Pill("无公钥·不验签", color = WarnTone)
                 } else {
@@ -697,9 +709,11 @@ private fun ChannelRow(
             )
         }
         Switch(checked = channel.enabled, onCheckedChange = onToggle)
-        IconButton(onClick = onEdit) { Text("改", style = MaterialTheme.typography.labelMedium) }
-        IconButton(onClick = onDelete) {
-            Icon(Icons.Filled.Delete, contentDescription = "删除", tint = Danger, modifier = Modifier.size(18.dp))
+        if (!builtin) {
+            IconButton(onClick = onEdit) { Text("改", style = MaterialTheme.typography.labelMedium) }
+            IconButton(onClick = onDelete) {
+                Icon(Icons.Filled.Delete, contentDescription = "删除", tint = Danger, modifier = Modifier.size(18.dp))
+            }
         }
     }
 }
