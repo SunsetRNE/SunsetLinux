@@ -2,18 +2,20 @@
 
 > 用途：**对话记录可能被删/会被换掉**，所以把"现在到哪了、还剩什么、怎么接着做"落进仓库。
 > 和 `docs/STATUS.md`（项目总账）配合看：STATUS 讲**项目本身**做到什么程度，本文讲**这次协作的落点**。
-> 最后更新：**2026-09-16**（本轮 12 个提交，全部已推送、CI 已发布）
+> 最后更新：**2026-09-16**（第 12 条：`device-provision.sh` mksh 化 → 模块 1.0.5；真机现状见 §〇）
 
 ---
 
 ## 〇、一分钟版
 
-- 分支：`main` = `beta` = **`bfabbc8`**；`channel` = `0d1efff`；`gh-pages` 由 CI 独占。
-- 发布：`/stable/` **run 40**、`/beta/` **run 41**，都是 `bfabbc8`，**模块 1.0.4**、**App 0.2.0**。
+- 分支：`main` = `beta` = **本次那个提交**；`channel` = `0d1efff`；`gh-pages` 由 CI 独占。
+- 发布：本次推送会覆盖 `/stable/`、`/beta/`，产出 **模块 1.0.5**、**App 0.2.0**（run 号见下载页）。
 - **下载页（别点 GitHub Releases，那里永远是空的）**：
   <https://sunsetrne.github.io/SunsetLinux/> → `/stable/`（正式）· `/beta/`（预发布）。
-- 你自己那台机器：模块还停在旧包、`/data/sunsetlinux/layers/` 仍然是空的
-  → root 模式起不来、内置终端也就没环境可连（见 §二）。
+- **你自己那台机器（2026-09-16 05:10 实测）**：模块还是 **1.0.3**；`/data/sunsetlinux/` 里
+  `layers/` **是空的**、`upper.img`（8 GiB 稀疏）与 `etc/state.json` 是 `linuxctl provision` 建的
+  （它不构建层）、`seeds/` 里两个种子**都已下好**（29.9 MB + 29.8 MB）→ root 模式起不来、
+  内置终端没环境可连；**下一步就是 §二·1 那两条命令**（装 1.0.5 → 用自带 `sh` 跑 device-provision.sh）。
 
 **分支与 CI 拓扑**（细节见 `docs/release-ci.md` §二·五）：
 
@@ -44,22 +46,61 @@ CI 四条线路：① `ci.yml` 回归门禁（shell / node / android 三并行�
 | 9 | `cd537c2` | **修我自己的 bug**：`bad()` 定义被"删空行"编辑并进注释 → `mksh -n` 照过、真机只多一行 `bad: inaccessible…`，**且阻断计数永远 0**；新增 `tools/oneshot-selftest.mjs`（29 条，进 CI） | 冒烟在 mksh+bash 下断言"八段都在、无 not found、缺模块/缺层必须报阻断" |
 | 10 | `2113217` | **proot 能力审计 + 随包 proot 5.1.0(2014) → 5.4.0**；修 `--link2symlink` 在老 proot 上直接 fatal；修 bundle 工具自检判据 | bundle 988,717 B / `3d72e0c3…`；两版 proot 实测两条分支；`--verify` 通过 |
 | 11 | `bfabbc8` | 把"CI 不产出 proot bundle"**说出来**（不再静默跳过） | job summary 有 ⚠️/✅ 分支 |
+| 12 | *(本次)* | **`device-provision.sh` mksh 化 —— 拆掉设备侧首次部署的 bash 依赖**（下一节详述） | 新增 `tools/provision-selftest.mjs`（28 条，进 CI）；mksh+bash 下真跑内层到「准备 base 阶段」；模块 **1.0.5** |
 
-**测试总账**：App **62/0** · WebUI **64/64** · proot 纯函数 **65/65**（bash+mksh）· proot entry 解析 **18/18**（mksh）·
-root selftest **20/20**（bash+mksh）· 版本一致性 **16/16** · 契约 root/proot × bash/mksh 全通过 · oneshot 冒烟 **29/29**。
+### 第 12 条到底修了什么 —— 一句话：**真机上根本跑不了首次部署**
+
+起因：上一轮真机 `--run` 只把两个种子下下来了，层始终是空的。上真机核了一遍（root shell），
+发现两件事：
+
+1. **`/data/adb/modules/sunsetlinux` 还是 1.0.3，`/data/sunsetlinux/layers/` 是空的**；
+   `etc/state.json` 的 `generator` 写着 `linuxctl provision` —— 而 **`linuxctl provision` 只会
+   建目录 / upper.img / 写 config，它从来不构建层**（层缺失时它直接 `ok:false`，让你去跑
+   `device-provision.sh`）。也就是说：**App 的「首次部署向导（推荐）」在这台机器上必然做不成事** ——
+   不是用户操作问题，是这条路缺一环。已写进 §三·0 与 docs/install.md。
+2. **设备上既没有 Termux，也没有 `/system/bin/bash`**（两个路径都实测 `ls` 过），而
+   `device-provision.sh` 第一件事就是"没有 `BASH_VERSION` → 找 `/system/bin/bash` → 找不到 `exit 1`"。
+   → **"在手机上建层"这条路是被自己的守卫堵死的**；上一轮给的那条 Termux 命令在这台机器上敲不通。
+
+修法（三处 bash 专有写法，全部有实测依据）：
+
+| 问题 | 为什么必须改 | 改成 |
+|---|---|---|
+| `[ -z "$BASH_VERSION" ]` → `exec bash` / `exit 1` | 设备上没有 bash → 直接死 | **删掉守卫**，脚本本身只用 mksh 也支持的东西 |
+| `declare -f` 转储函数生成内层构建脚本 | `declare` 是 bash 内建；mksh 下 `declare: inaccessible or not found`，而 `unshare -m` 里跑的正是 mksh | 内层引导脚本改成 **`exec 本文件 --inner-run`**（函数永远来自同一份源码；29 行，不再有引号拼装风险） |
+| 裸 `local tb` + `set -u` | **mksh 的 `local x` 是"未设置"，bash 的是"空"** → `[ -n "$tb" ]` 在 mksh 下 `tb: parameter not set`，**每个阶段第一步就死** | 30 处裸 `local` 全部补 `=""`（这类问题只在真跑时暴露，语法闸门看不见） |
+
+顺带修掉一个**再执行传参**缺陷：内层是重新执行本文件，`--seeds/--force/--skip-*` 必须能从环境继承
+（原来 `SEEDS_DIR="$LH/seeds"` 是**无条件赋值**，会把 `--seeds` 静默吞掉）。
+
+回归 `tools/provision-selftest.mjs`（**28 条**，进 CI 的 shell job）：静态断言没有 bash 专有写法；
+并在 mksh 与 bash 下**各真跑一次内层**（临时 LINUX_HOME、故意不给种子），断言它走到「准备 base 阶段」、
+以可读的缺种子错误收场、**没有任何 shell 级错误**（not found / parameter not set / syntax error）。
+`oneshot-setup.sh` 那节"找 bash"也换成**行为探测**：用 `sh` 跑一次 `--help`，旧版会打印「需要 bash」
+并 exit 1、新版正常打印用法 —— 体检能直接指出"你装的是旧模块"。
+
+**测试总账**：App **62/0** · WebUI **64/64** · proot 纯函数 **62/65**（本容器里端口探测 3 条受 /proc/net/tcp 限制会红，
+基线同样如此，CI 上为 65/65）· proot entry 解析 **18/18**（mksh）· root selftest **19/19**（bash+mksh，本容器）·
+版本一致性 **16/16** · 契约 root/proot × bash/mksh 全通过 · oneshot 冒烟 **29/29** · **provision 冒烟 28/28**。
 
 ---
 
 ## 二、需要你操作的（按优先级）
 
 1. **真机把层建出来**（唯一挡着 root 模式 + 终端/DSH 全链路验收的事）：
-   - 先装**模块 1.0.4**（KernelSU 管理器）：`…/stable/sunsetlinux-module-1.0.4.zip`，装完**重启一次**；
-   - `device-provision.sh` **内部要求 bash**（Android 自带只有 mksh）→ 用 Termux 的 bash：
+   - 先装**模块 1.0.5**（KernelSU 管理器）：`…/stable/sunsetlinux-module-1.0.5.zip`，装完**重启一次**；
+     （设备上现在还是 1.0.3 —— 上一轮说要装 1.0.4 但没装成；1.0.5 才是"能在真机上跑"的那一版）
+   - 然后**在 root 终端里**跑（KernelSU 管理器的终端 / MT 管理器「以 root 执行」/ `adb shell su`）：
      ```bash
-     su -c '/data/data/com.termux/files/usr/bin/bash /data/adb/modules/sunsetlinux/bin/device-provision.sh --seeds /data/sunsetlinux/seeds'
+     sh /data/adb/modules/sunsetlinux/bin/device-provision.sh --seeds /data/sunsetlinux/seeds
      ```
-     种子**已经下好了**（上一轮 `--run` 成功下载了 ubuntu-base 与 Node 包）；跑完 `linuxctl start`。
-   - 失败就把 `--run` 最后 ~40 行、或 `linuxctl doctor` 的输出贴回来。
+     ★ **不需要 bash、不需要 Termux**（1.0.5 起是 mksh 原生的；设备上实测两个都没有）。
+     种子**已经下好了**（ubuntu-base 29.9 MB + Node 29.8 MB 都在 `/data/sunsetlinux/seeds/`）；
+     跑完 `linuxctl start`，再 `linuxctl doctor`。
+   - 或者用 `sh $MODDIR/bin/oneshot-setup.sh --run`（体检 → 缺种子就下 → 再跑上面那条）。
+   - 失败就把最后 ~40 行、或 `linuxctl doctor` 的输出贴回来。
+   - **别用 App 的「首次部署向导」**：它调的是 `linuxctl provision`，那个命令只建目录/upper.img，
+     不会构建层（真机上就是这么白跑一趟的）；向导要能真正建层得改 App（见 §三·0）。
 2. **arm64 上重打层 → 发布**（"官方频道有货"的前置）：
    ```bash
    sudo bash rootfs/build-layers.sh --out-dir dist --runtime-dir runtime/root --dsh-dist-tag next
@@ -72,22 +113,29 @@ root selftest **20/20**（bash+mksh）· 版本一致性 **16/16** · 契约 roo
 
 ## 三、下一步技术清单（方向已定，尚未开工）
 
+0. **让 App 的「首次部署向导」真的能建层**（本轮真机核出来的空缺，优先级最高）
+   - 现状：`ProvisionActivity` 走 `LinuxCtl.provision()` → `linuxctl provision`，**只建目录/upper.img**；
+     层缺失时它以 `ok:false` 结束，用户看到"provision 失败"，而其实**缺的是构建这一步**。
+   - 做法：层缺失时改调 `device-provision.sh`（走已有的 `su -c` 通道，逐行流式输出已有）；
+     `provision` 只作为"目录树/upper.img"的幂等前置。顺带把 ProvisionActivity 的文案与
+     `docs/install.md`「方式 A：App 向导（推荐）」对齐 —— 现在那句"会自动下载并校验"是空的。
+
 1. **proot 运行时进 `jniLibs` + App 自动解压**（建议先做）
    - 现状：App 里**没有 `assets/`**，doctor 那句"App 应随包携带 proot"一直是空的 → 非 root 模式开箱即用不了；
    - 做法：CI 从 Debian 的 proot arm64 deb 重建 bundle（命令已验证可复现）→ 放进 `jniLibs/arm64-v8a/`
-     （**Android 10+ 不能 execve App 私有目录里的文件，但 `nativeLibraryDir` 里的可以**）→ App 首启解压/校验；
-   - 顺带给"设备侧要 bash"开一条路（bash 也能这么做）。
+     （**Android 10+ 不能 execve App 私有目录里的文件，但 `nativeLibraryDir` 里的可以**）→ App 首启解压/校验。
 2. **内置裁剪版 Ubuntu（分包形态）**——用户明确要，上游 DSHA 就是这么做的：
    - `offline-rootfs.bin`（Ubuntu = base+runtime）与 `dsh-runtime.bin`（dsh）**分包**；
    - **CI 生成资产、不入库**；**冷装两份都解、局部更新只读 dsh 包**（不必每次重下整套）；
    - 参考上游脚本：`scripts/ci-make-offline-bundle.sh`、`tools/prepare-standard-assets.py`、`scripts/offline-provision.sh`。
 3. **PTY 终端**（解掉"vim/htop 不可用"）：自研 `forkpty` JNI（约百行，避开 `termux-jni` 的 GPL 传染风险）。
    上游留下的硬性细节：fork/exec 握手登记出生身份、16 KB 页对齐、关闭标签必须核验会话真的退出。
-4. **两处待查/待修**：
+4. **待查**：
    - **App 的 zstd 解压 bug**：设备报过 `Invalid magic prefix: 0: offset=542314549248`（505 GiB 偏移，明显不对），
      它决定内置包用 `.zst` 还是 `.gz`；
-   - **`device-provision.sh` 的 bash 依赖**：1315 行里只有 2 处数组 + 2 处 `[[ ]]`、没有 `=~`/进程替换，
-     改成 mksh 可跑是根治（模块在 stock Android 上自足，不需要 Termux）。
+   - ~~`device-provision.sh` 的 bash 依赖~~ → **本次已根治**（mksh 原生，模块 1.0.5；
+     见 §一 第 12 条）。**仍需真机验收**：装 1.0.5 后用设备自带 `sh` 跑一次，
+     确认三层 erofs 真的产出（这是唯一还没被真机证明的一步）。
 5. **性能路线（可选）**：自己编译 proot 打开 **seccomp 加速器**（`proot --version` 会打印
    `built-in accelerators: … seccomp_filter = yes/no`；现在的 Debian 5.4.0 是 `no`）。
    **不采用 proroot**（见 §四）。
@@ -124,6 +172,7 @@ git log --oneline 35ac91d..HEAD
 node tools/shell-compat-check.mjs --verbose
 node module/webroot/selftest.mjs
 node tools/oneshot-selftest.mjs
+node tools/provision-selftest.mjs
 node tools/cmp-consistency.mjs
 bash runtime/proot/selftest-funcs.sh && mksh runtime/proot/selftest-funcs.sh
 bash runtime/root/selftest.sh && mksh runtime/root/selftest.sh
@@ -139,11 +188,23 @@ curl -s https://sunsetrne.github.io/SunsetLinux/stable/index.json
 
 - **"能解析"≠"函数真的存在"**：一次删空行的编辑把 `bad() {}` 并进注释，`mksh -n` 全绿，
   真机只多一行 `bad: inaccessible or not found`，**而且阻断计数永远是 0**（该拦的不拦，用户是唯一发现者）。
-  → 规矩：**任何体检/闸门脚本都要有"行为级冒烟"**（`tools/oneshot-selftest.mjs` 就是这么来的）。
-- **只看 `mksh -n` 不够**：`/dev/tcp`、`device-provision.sh` 的 bash 依赖都属于"语法过、运行时废"。
+  → 规矩：**任何体检/闸门脚本都要有"行为级冒烟"**（`tools/oneshot-selftest.mjs`、
+  `tools/provision-selftest.mjs` 都是这么来的）。
+- **mksh 的 `local x` 是"未设置"，bash 的是"空"**：配 `set -u` 就是"bash 全绿、mksh 第一步就死"
+  （`tb: parameter not set`）。**别写裸 `local`**，一律 `local x=""`。
+- **`declare -f` / `declare -a` 是 bash 专有**：设备上（mksh）报 `declare: inaccessible or not found`。
+  要"把函数交给另一个 shell"就别转储函数 —— **重新执行同一个文件**（`--inner-run` 那种）。
+- **别再假设设备上有 bash 或 Termux**：这台机器两个都实测没有。设备侧脚本一律按
+  `/system/bin/sh`（mksh）写，`mksh -n` 只是最低门槛，**必须真跑一次**（`tools/provision-selftest.mjs` 就是干这个的）。
+- **只看 `mksh -n` 不够**：`/dev/tcp`、`local x` + `set -u` 都属于"语法过、运行时废"。
+- **`linuxctl provision` 不会构建层**：它只建目录 / upper.img / 写 config，层要么来自频道、
+  要么来自 `device-provision.sh`。App 的「首次部署向导」现在走的正是它 → 见 §三·0。
 - **`dist/` 是 gitignore 的** → CI 拿不到本地产物；发布步骤里依赖本地构建物的，必须显式说"本次没有"，
   **不许静默跳过**（`release.yml` 的 job summary 已这么做）。
 - **编辑时别在空行边界动手**：删空行会把下一行粘上来（本轮那个 bug 就是这么来的）。
+- **别用正则批量改代码**：用脚本给裸 `local` 补 `=""` 时，朴素按空格分词会把
+  `local files="a b c"` 切成 `local files="a b="" c"` —— 引号内的空格必须按 token 处理；
+  改完一定要 `git diff` 逐行看一遍（本次差点把这个残次品提交上去）。
 - **GitHub Release 资产地址会 302**：任何"能不能下载"的预检都要 `curl -L`（`channel.yml` 已修）。
 - **Releases 页面永远是空的**（刻意不用 tag）；下载页在 gh-pages，见 §〇。
 - **签名必须固定**：授权按【包名+签名】记（KernelSU），换 key 会让已授的 root 全失效。

@@ -50,14 +50,12 @@ warn() { WARN=$((WARN + 1)); c_warn "$*"; }
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
-# 找一个能跑的 bash：device-provision.sh 内部要求 bash（Android 自带只有 mksh）。
-# 顺序：显式指定 → PATH 里 → Android 自带位置 → Termux（用户常常就站在 Termux 里）。
-find_bash() {
-  for c in "${SUNSETLINUX_BASH:-}" \
-           "$(command -v bash 2>/dev/null || true)" \
-           /system/bin/bash /system/xbin/bash /vendor/bin/bash \
-           /data/data/com.termux/files/usr/bin/bash \
-           /data/local/tmp/bash; do
+# 跑 device-provision.sh 用哪个 shell：**设备自带的 sh 就够**。
+# 2026-09-16 起那个脚本是 mksh 原生的（文件头有说明），不再需要 bash；
+# 以前"找不到 bash 就报阻断"是本体检里最坑的一条隐形门槛 —— 它让设备侧首次部署
+# 在 stock Android（没有 /system/bin/bash、也没装 Termux）上根本没法开工。
+find_sh() {
+  for c in /system/bin/sh "$(command -v sh 2>/dev/null || true)" /system/xbin/sh; do
     [ -n "$c" ] || continue
     [ -x "$c" ] || continue
     printf '%s' "$c"
@@ -196,16 +194,23 @@ have fsck.erofs && c_ok "fsck.erofs（打包后校验）" || warn "缺 fsck.erof
 have mke2fs && c_ok "mke2fs（建 upper.img）" || bad "缺 mke2fs —— 建不出可写层"
 have sha256sum && c_ok "sha256sum（种子/层校验）" || warn "缺 sha256sum（不阻断，但少一道完整性核对）"
 
-# device-provision.sh 内部**要求 bash**（Android 自带只有 mksh）——这条以前是隐形门槛：
-# 实测设备上 `su -c 'sh .../oneshot-setup.sh --run'` 会在这一步直接退出（退出码 1）。
-BASH_BIN="$(find_bash || true)"
-if [ -n "$BASH_BIN" ]; then
-  c_ok "bash：$BASH_BIN（部署脚本要求 bash）"
+# device-provision.sh **不再要求 bash**（2026-09-16 起 mksh 原生，文件头有说明）。
+# 但设备上装的那一份可能是**旧的 bash-only 版本** —— "体检说 OK、部署立刻死"最典型的来源，
+# 所以这里做**行为探测**（只跑 --help，不碰设备上任何东西）：
+#   新版：sh <脚本> --help → 退出码 0，打印用法
+#   旧版：BASH_VERSION 为空，在解析参数之前就 exit 1 并打印「需要 bash」
+PROV_BIN="${BIN_DIR:-$LINUX_HOME/bin}/device-provision.sh"
+if [ -f "$PROV_BIN" ]; then
+  PROV_SH="$(find_sh || printf 'sh')"
+  if PROV_OUT="$("$PROV_SH" "$PROV_BIN" --help 2>&1)"; then
+    c_ok "device-provision.sh：$PROV_SH 可直接跑（mksh 原生，不需要 bash）"
+  else
+    bad "device-provision.sh 用 mksh 跑不起来（装的还是旧版？）：
+       $(printf '%s' "$PROV_OUT" | sed -n '1,2p' | tr '\n' ' ')
+       修：把模块升到 ≥1.0.5（新版 device-provision.sh 是 mksh 原生的）"
+  fi
 else
-  bad "找不到 bash —— device-provision.sh 在 Android 自带的 mksh 下会直接退出。三条路：
-       ① 在 Termux 里 pkg install bash，然后重跑本脚本（它会自动找到并用它）；
-       ② 手动跑：/data/data/com.termux/files/usr/bin/bash /data/adb/modules/sunsetlinux/bin/device-provision.sh --seeds /data/sunsetlinux/seeds
-       ③ 别在手机上建层：等层发到频道后从 App/终端装（linuxctl update <层> <裸.erofs>）"
+  c_info "device-provision.sh 不在（模块没装？），跳过 mksh 探测"
 fi
 if have curl || have wget; then
   c_ok "有 $(have curl && printf curl || printf wget)（下种子用）"
@@ -372,16 +377,15 @@ fi
 
 printf '\n开始 provisioning（真 chroot 里跑 apt + npm，可能要十几分钟到半小时）…\n'
 printf '  日志：%s/run/linux.log\n\n' "$LINUX_HOME"
-# ⚠️ device-provision.sh **必须用 bash 跑**（它自己会在没有 BASH_VERSION 时直接退出）。
-# 实测：用设备自带的 mksh（`sh script.sh`）跑会立刻 "需要 bash" 退出码 1 —— 所以这里显式挑 bash，
-# 并把 bash 所在目录放进 PATH（脚本内部还会用 tar/mkfs.erofs 等，Termux 那套更全）。
-BASH_BIN="$(find_bash || true)"
-if [ -z "$BASH_BIN" ]; then
-  c_bad "找不到 bash，device-provision.sh 跑不起来 —— 见上面「工具链」那节的①②③"
+# 用**设备自带的 sh**跑（mksh 原生，不需要 bash，也不需要 Termux）。
+# 以前这里是"必须找到 bash 才能继续"，在 stock Android 上就是死路 —— 已根治。
+RUN_SH="$(find_sh || true)"
+if [ -z "$RUN_SH" ]; then
+  c_bad "连 sh 都找不到（$PROV 跑不起来）—— PATH 不正常？"
   exit 1
 fi
-printf '用 %s 执行部署脚本\n\n' "$BASH_BIN"
-PATH="$(dirname "$BASH_BIN"):$PATH" "$BASH_BIN" "$PROV" --seeds "$SEEDS_DIR"
+printf '用 %s 执行部署脚本\n\n' "$RUN_SH"
+"$RUN_SH" "$PROV" --seeds "$SEEDS_DIR"
 RC=$?
 if [ "$RC" != 0 ]; then
   c_bad "device-provision.sh 退出码 $RC —— 看日志：$LINUX_HOME/run/linux.log"

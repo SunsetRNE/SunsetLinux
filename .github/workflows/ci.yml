@@ -85,6 +85,15 @@ jobs:
       - name: 脚本断言 — oneshot-setup.sh 冒烟（mksh + bash）
         run: node tools/oneshot-selftest.mjs
 
+      # device-provision.sh 的**行为级冒烟**：设备侧首次部署唯一的入口，1300+ 行，
+      # 而"能解析 ≠ 能跑"在这里尤其致命 —— 实测踩过两回：
+      #   ① 用 `declare -f` 转储函数生成内层脚本（bash 专有，unshare 里跑的是 mksh）
+      #   ② `local tb` 在 mksh 里是"未设置"，配合 `set -u` 直接死在每个阶段的第一步
+      # 这一关真的把内层跑起来（临时 LINUX_HOME、故意不给种子），断言它走到"准备 base 阶段"
+      # 并以可读错误收场，且**没有任何 shell 级错误**。
+      - name: 脚本断言 — device-provision.sh 冒烟（mksh + bash）
+        run: node tools/provision-selftest.mjs
+
       # 设备上只有 /system/bin/sh（mksh），没有 bash：这一关专门防"本地 bash 跑得通、
       # 真机一行都跑不了"的语法漂移（历史上真的发生过，见 tools/shell-compat-check.mjs 注释）
       - name: 断言 — 设备侧脚本能被 mksh 解析（含 shebang 与欠债名单）

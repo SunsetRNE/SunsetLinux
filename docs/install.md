@@ -58,32 +58,38 @@ adb install -r dist/sunsetlinux-launcher-debug.apk
 Provisioning 会：建目录树 → 铺三层 erofs → 创建可写层镜像 → 写入配置。
 **这一步涉及挂载与 chroot，必须由 root 执行。**
 
-### 方式 A：App 向导（推荐）
+> ⚠️ **先分清两件事**（真机上踩过）：`linuxctl provision` **只会**建目录树、`upper.img`、
+> 写 `config.json`/`state.json` —— 它**不构建层**。层只有两个来源：**频道里已发布的层**（方式 C），
+> 或者**设备侧原生构建**（方式 B，`device-provision.sh`）。只有 `linuxctl provision` 是跑不出环境的。
+
+### 方式 A：App 向导
 
 在 `ProvisionActivity` 里：选模式 → 选频道（或选"使用离线种子"）→ 点开始。
 App 会通过 `su -c` 调用 `linuxctl provision` 并显示进度。
 
-### 方式 B：手工在 root 终端执行
+> ⚠️ **目前它只能铺层、不能建层**：层缺失时它会以 `ok:false` 结束（提示去跑
+> `device-provision.sh`）。所以第一次部署请走**方式 B** 或**方式 C**；把向导接到
+> `device-provision.sh` 是待办（见 `docs/HANDOFF.md` §三·0）。
 
-如果你想自己控制，或 App 向导出问题，可以在 root 终端（KernelSU / Termux+`su`）里：
+### 方式 B：设备侧原生构建（在 root 终端执行，不需要 bash / Termux）
 
 ```bash
-# 1) 铺基础目录
-mkdir -p /data/sunsetlinux/{layers,seeds,cache,etc,bin,run,snapshots,work,rootfs,upper}
+# 1) 首次部署入口：建目录树 + 在真 chroot 里装 Ubuntu base → Node+pnpm → DSH，
+#    每层打成 erofs 只读镜像，最后建可写层 upper.img 并写 config/state。
+sh /data/adb/modules/sunsetlinux/bin/device-provision.sh --seeds /data/sunsetlinux/seeds
 
-# 2) 放置离线种子（可选，能显著加速且不依赖网络）
-#    把 dist/sunsetlinux-seed-*.tar.zst 解开到 /data/sunsetlinux/seeds/
-#    （至少包含 ubuntu-base-24.04.3-base-arm64.tar.gz 与 node 官方 arm64 包）
-
-# 3) 执行 provisioning（内部用真 chroot，产出三层 erofs）
-/data/sunsetlinux/bin/linuxctl provision --seed /data/sunsetlinux/seeds
-
-# 4) 启动
+# 2) 启动
 /data/sunsetlinux/bin/linuxctl start
 
-# 5) 看状态（stdout 是 JSON）
+# 3) 看状态（stdout 是 JSON）
 /data/sunsetlinux/bin/linuxctl status
 ```
+
+- 种子（`ubuntu-base-*.tar.gz` + Node 官方 arm64 包）放 `--seeds` 指的目录；
+  没有的话脚本会打印下载 URL，或直接用 `oneshot-setup.sh --run`（它会先下种子）。
+- ★ **不需要 bash、不需要 Termux**（模块 1.0.5 起 `device-provision.sh` 是 mksh 原生的，
+  设备自带的 `sh` 直接跑）。装的是旧模块会看到「需要 bash」——升到 1.0.5 即可。
+- 这一步要跑 apt + npm，**十几分钟到半小时**；日志在 `/data/sunsetlinux/cache/provision.log`。
 
 ### 方式 C：从已发布的层安装（最快）
 

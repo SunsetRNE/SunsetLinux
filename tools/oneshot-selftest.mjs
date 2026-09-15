@@ -7,8 +7,10 @@
  *      `bad` 从此没被定义。`mksh -n` 照样通过（语法没错），真机上只表现成一行
  *      `bad: inaccessible or not found`，**而且阻断计数永远是 0**：明明缺三层镜像，
  *      脚本却报"没有阻断项"，然后一路往下跑 provisioning。用户是唯一的发现者。
- *   2. 部署脚本 `device-provision.sh` 内部要求 **bash**，而 Android 自带只有 mksh ——
- *      同类"能解析 ≠ 能跑"的隐形门槛。现在体检里会明确报出来。
+ *   2. 部署脚本 `device-provision.sh` 曾经**内部要求 bash**，而 Android 自带只有 mksh ——
+ *      同类"能解析 ≠ 能跑"的隐形门槛（真机上没有 Termux、没有 /system/bin/bash，
+ *      这条路等于堵死）。2026-09-16 已把它改成 mksh 原生，体检里改成**行为探测**
+ *      （用 sh 跑一次 --help：旧版会打印「需要 bash」并 exit 1，新版正常打印用法）。
  *
  * 所以这里断言的是**行为**：脚本能被 mksh 与 bash 跑起来、八个体检段落都在、
  * 没有任何 "command not found" 类错误、并且**该报的阻断项真的报了**。
@@ -68,8 +70,9 @@ for (const shell of ['mksh', 'bash']) {
   ok(out.includes('✗'), '报出了阻断项（✗）—— 缺模块/缺层时必须能被判为阻断');
   ok(/[1-9]\d* 个阻断项/.test(out), '结论里有"N 个阻断项"且 N ≥ 1');
 
-  // 体检里应当提到 bash 门槛（device-provision.sh 要求 bash）
-  ok(/bash/.test(out), '体检提到了 bash 门槛（部署脚本要求 bash）');
+  // 体检里必须交代"部署脚本用什么 shell 跑"这件事。以前这条是"要求 bash"（真机上
+  // 没有 bash 就等于死路）；2026-09-16 起改成**行为探测 + mksh 原生**。
+  ok(/mksh/.test(out), '体检交代了部署脚本的 shell（mksh 原生，不再要求 bash）');
 }
 
 console.log('\n== --help ==');

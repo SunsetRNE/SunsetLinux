@@ -239,21 +239,40 @@ apksigner verify --print-certs <旧 CI 包>             → 84be9523…  ← 与
 在临时目录里用 **mksh 与 bash 各跑一遍只读体检**，断言八个体检段落都在、
 **没有任何 "not found" 类输出**、并且**缺模块/缺层时必须真的报出阻断项**。
 
-**② 真正的拦路虎：`device-provision.sh` 要求 bash**。它第 137-140 行显式检查 `BASH_VERSION`，
+**② 真正的拦路虎：`device-provision.sh` 要求 bash**。它显式检查 `BASH_VERSION`，
 没有就打印「需要 bash」并 `exit 1` —— 而 Android 自带只有 mksh，所以"在手机上建层"这条路
 在 stock 环境里**走不通**（除非借 Termux 的 bash）。
 
-实测该文件 1315 行里只有 **2 处数组赋值 + 2 处 `[[ ]]`**，没有 `=~`、没有进程替换 ——
-它离"mksh 可跑"其实很近（规模与 proot 那次要动的四类构造相当）。
+当时的对策是让 `oneshot-setup.sh` 自己找 bash（`$SUNSETLINUX_BASH` → PATH → `/system/bin/bash`
+→ Termux 的 `/data/data/com.termux/files/usr/bin/bash` → `/data/local/tmp/bash`），找到就用它；
+并留下了一句"待办：把 `device-provision.sh` 也改成 mksh 可跑"。模块当时推进到 **`v1.0.4/10004`**。
 
-当前对策：`oneshot-setup.sh` 自己找 bash（`$SUNSETLINUX_BASH` → PATH → `/system/bin/bash`
-→ Termux 的 `/data/data/com.termux/files/usr/bin/bash` → `/data/local/tmp/bash`），
-找到就用它执行部署脚本、并把它的目录放进 PATH（脚本内部还要用 tar/mkfs.erofs 等）；
-找不到则明确给出三条出路（Termux 装 bash / 手动用 Termux bash 跑 / 等层发到频道再装）。
-模块随之推进到 **`v1.0.4/10004`**。
+### 3.10.1 ★ 收官：`device-provision.sh` mksh 化（模块 **v1.0.5/10005**）
 
-> **待办（独立一件工作）**：把 `device-provision.sh` 也改成 mksh 可跑，彻底拆掉 bash 依赖 ——
-> 那样模块在 stock Android 上就自足了：不需要 Termux，也不需要另一台 arm64 机器。
+**先上真机核了一遍，发现"找 bash"这条对策在这台机器上也不成立**：`/system/bin/bash` 与
+`/data/data/com.termux/files/usr/bin/bash` **都不存在**（Termux 根本没装）。所以那句"找个 bash 就行"
+等于把设备侧首次部署堵死了 —— 而且堵了两层（守卫 + 找不到 bash）。
+
+真正的 bash 专有写法只有三处，但**每一处都致命**：
+
+| 写法 | 实测后果 | 改成 |
+|---|---|---|
+| `[ -z "$BASH_VERSION" ]` → `exec bash` / `exit 1` | 设备上没 bash → 立刻死 | 删掉守卫 |
+| `declare -f` 转储函数生成内层脚本 | mksh 下 `declare: inaccessible or not found`；而 `unshare -m` 里跑的就是 mksh | 内层引导脚本 `exec 本文件 --inner-run` |
+| 裸 `local tb` + `set -u` | **mksh 的 `local x` 是"未设置"** → `tb: parameter not set`，**每个阶段第一步**就死 | 30 处裸 `local` 补 `=""` |
+
+> 第 3 条是这一轮最有价值的发现：它是"bash 全绿、mksh 第一步就死"的典型，
+> `mksh -n` 与任何静态检查都看不见 —— 只有**真跑一次**才会露头。
+> 这就是 `tools/provision-selftest.mjs`（28 条）存在的原因：它在 mksh 与 bash 下各真跑一次内层。
+
+顺带修掉再执行的传参：内层重新执行本文件，`--seeds/--force/--skip-*` 必须能从环境继承
+（原来 `SEEDS_DIR="$LH/seeds"` 是无条件赋值，会把 `--seeds` 静默吞掉）。
+`oneshot-setup.sh` 的"找 bash"那节也换成**行为探测**（用 `sh` 跑一次 `--help`：旧版会打印
+「需要 bash」并 exit 1，新版正常打印用法），体检因此能直接指出"你装的是旧模块"。
+
+**同时核出来的另一件事（尚未修，见 HANDOFF §三·0）**：真机上 `etc/state.json` 的
+`generator` 是 `linuxctl provision`，而 **`linuxctl provision` 只建目录 / upper.img / 写 config，
+从不构建层** —— App 的「首次部署向导（推荐）」走的正是它，所以在没有预置层的机器上必然做不成事。
 
 ### 3.7 ★ 模块 WebUI 图标化 + 内置官方频道 + 模块 1.0.1（2026-09-16 第二批）
 

@@ -46,6 +46,16 @@
 #     -h|--help
 #
 # 环境变量：LINUX_HOME / NODE_VERSION / DSH_NPM_TAG / UPPER_SIZE_MB / LAYER_FORMAT(erofs|squashfs)
+#
+# ★ 解释器要求：**/system/bin/sh（mksh）即可，不需要 bash**。
+#   2026-09-16 实测：真机上**没有 Termux、没有 /system/bin/bash**，原先那句
+#   "内部要求 bash，请用 Termux 的 bash 跑" 等于把设备侧首次部署彻底堵死。
+#   本脚本现在只用 mksh 也支持的东西；唯一两处 bash 专有写法已清掉：
+#     · `[ -z "$BASH_VERSION" ] → exec bash` 的自我再执行守卫（已删）
+#     · `declare -f` 把函数文本转储进内层脚本（bash 专有；mksh 下
+#       "declare: inaccessible or not found"）→ 改成内层脚本 exec 本文件 `--inner-run`
+#   闸门：tools/shell-compat-check.mjs 管"能不能解析"，tools/provision-selftest.mjs 管
+#   "在 mksh 下真的跑得起来"（行为级冒烟，两者缺一不可）。
 # =============================================================================
 set -euo pipefail
 
@@ -53,7 +63,30 @@ set -euo pipefail
 # 0. 基础
 # ===========================================================================
 SELF_PATH="${BASH_SOURCE[0]:-$0}"
-SELF_DIR="$(cd -- "$(dirname -- "$SELF_PATH")" && pwd -P)"
+# 用**纯 shell** 拆目录，不调 dirname/basename：设备上它们是 toybox applet，
+# 命令行细节（比如 `--`）没必要赌；`${var%/*}` / `${var##*/}` 在 mksh 与 bash 里一致。
+case "$SELF_PATH" in
+    */*) SELF_DIR_RAW="${SELF_PATH%/*}" ;;
+    *)   SELF_DIR_RAW="." ;;
+esac
+SELF_DIR="$(cd "$SELF_DIR_RAW" && pwd -P)"
+# SELF_PATH 必须是**绝对路径**：内层引导脚本要 exec 它（那时工作目录可能已经不同），
+# sync_scripts 也要把它拷进 $LH/bin。用相对路径调用本脚本（`sh rootfs/…`）时同样要成立。
+SELF_PATH="$SELF_DIR/${SELF_PATH##*/}"
+
+# 设备上跑本脚本的 shell：Android 上是 /system/bin/sh（mksh）。开发机/CI 上没有它，
+# 依次退回 mksh / bash —— **故意不退回 dash**：它没有 `set -o pipefail`，也理解不了
+# 本脚本用的数组，跑起来是立刻炸而不是降级。用途有二：① --dump-inner 的语法自检
+# ② 没有 unshare 时的兜底执行（以及内层引导脚本 exec 的目标）。
+SH_BIN=""
+for _shcand in /system/bin/sh mksh bash; do
+    case "$_shcand" in
+        /*) [ -x "$_shcand" ] && { SH_BIN="$_shcand"; break; } ;;
+        *)  _shp="$(command -v "$_shcand" 2>/dev/null || true)"
+            [ -n "$_shp" ] && { SH_BIN="$_shp"; break; } ;;
+    esac
+done
+[ -n "$SH_BIN" ] || SH_BIN="sh"
 
 # LINUX_HOME 必须**先定义**：下面的 layer-spec 查找会把它当作候选项之一
 LINUX_HOME="${LINUX_HOME:-/data/sunsetlinux}"
@@ -80,7 +113,9 @@ fi
 
 LAYERS_DIR="$LH/layers"
 LAYERS_MNT="$LH/layers-mnt"
-SEEDS_DIR="$LH/seeds"
+# ★ 允许从环境继承：内层（--inner-run）是**重新执行本文件**，外层用 --seeds 指定的目录
+#   只能靠环境变量传进来；写成无条件赋值会把 --seeds 悄悄吞掉（真机表现为"种子在却被报缺少"）。
+SEEDS_DIR="${SEEDS_DIR:-$LH/seeds}"
 CACHE_DIR="$LH/cache"
 ETC_DIR="$LH/etc"
 BIN_DIR="$LH/bin"
@@ -92,6 +127,9 @@ ROOTFS_DIR="$LH/rootfs"           # 运行时 overlay 的合并点（空目录�
 BUILD_DIR="$LH/cache/rootfs-provision"   # 构建期真正 chroot 进去的目录
 
 LOG_FILE="$LH/cache/provision.log"
+# 阶段基线清单（"before"）：内层每个阶段开始时生成，build_layer 用它切增量。
+# 允许从环境继承 —— 外层生成的引导脚本会把同一个路径导进来。
+MANIFEST_BEFORE="${MANIFEST_BEFORE:-$CACHE_DIR/.manifest-before}"
 
 NODE_VERSION="${NODE_VERSION:-v24.21.0}"
 DSH_NPM_TAG="${DSH_NPM_TAG:-latest}"
@@ -100,10 +138,14 @@ UPPER_SIZE_MB="${UPPER_SIZE_MB:-8192}"
 LAYER_FORMAT="${LAYER_FORMAT:-$LAYER_FS}"  # 由 layer-spec 决定（erofs）；squashfs 在本机内核挂不了
 # EROFS_COMPRESS 由 layer-spec 提供，默认 none（镜像内不压缩；分发时整体 zstd 压缩）
 # 若要兼顾 flash 可设 EROFS_COMPRESS=lz4hc,9
-FORCE=0
-CLEAN=0
+# ★ 这几个开关同样必须能从环境继承：外层用 --force/--skip-* 指定的意图要传进 --inner-run，
+#   否则内层会把它们重置成 0 —— 表现为"加了 --force 却还是跳过已存在的层"。
+FORCE="${FORCE:-0}"
+CLEAN="${CLEAN:-0}"
 DUMP_INNER=0
-SKIP_BASE=0; SKIP_RUNTIME=0; SKIP_DSH=0
+SKIP_BASE="${SKIP_BASE:-0}"; SKIP_RUNTIME="${SKIP_RUNTIME:-0}"; SKIP_DSH="${SKIP_DSH:-0}"
+# 内层模式（由本脚本生成的引导脚本传入）：只跑三层构建，不做前置检查/不重新生成引导脚本
+INNER_RUN="${INNER_RUN:-0}"
 
 # 语义版本（layer-spec §5）：base=<ubuntu 版本>-l<n>、runtime=<semver>、dsh=<npm 版本>
 # 可在命令行/环境变量覆盖；dsh 的真实版本构建时从安装后的 package.json 读出。
@@ -124,7 +166,7 @@ INSTALL_WEB_PROFILE=""
 # 1. 日志与工具
 # ===========================================================================
 log() {
-    local line
+    local line=""
     line="[$(date '+%Y-%m-%d %H:%M:%S')] [provision] $*"
     printf '%s\n' "$line" >&2
     [ -d "$(dirname "$LOG_FILE")" ] && printf '%s\n' "$line" >> "$LOG_FILE" 2>/dev/null || true
@@ -134,12 +176,11 @@ warn() { log "WARN: $*"; }
 die()  { log "ERROR: $*"; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
-# Android 上 shell 是 mksh/toybox；本脚本要求 bash（Android 有 /system/bin/sh 但不是 bash）
-if [ -z "${BASH_VERSION:-}" ]; then
-    if [ -x /system/bin/bash ]; then exec /system/bin/bash "$SELF_PATH" "$@"; fi
-    printf 'device-provision.sh 需要 bash（Android 上一般不带；可在装了 bash 的环境内运行）\n' >&2
-    exit 1
-fi
+# 这里**故意不再有** bash 自我再执行守卫。
+# 原先的写法是：`[ -z "$BASH_VERSION" ] && { [ -x /system/bin/bash ] && exec bash …; die "需要 bash"; }`
+# —— 而真机上 /system/bin/bash 不存在、Termux 也没装，于是这个守卫直接把设备侧
+# 首次部署判了死刑（2026-09-16 实测：`ls /data/data/com.termux/files/usr/bin/bash` 不存在）。
+# 现在整个脚本只用 mksh 支持的东西，/system/bin/sh 直接跑。
 
 # ===========================================================================
 # 2. 参数
@@ -156,8 +197,10 @@ while [ $# -gt 0 ]; do
         --skip-runtime) SKIP_RUNTIME=1; shift ;;
         --skip-dsh)     SKIP_DSH=1; shift ;;
         -h|--help) sed -n '2,60p' "$SELF_PATH" >&2; exit 0 ;;
-        # 只生成内层构建脚本后退出（离线体检用：可在本机 bash -n 校验，不碰设备）
+        # 只生成内层引导脚本后退出（离线体检用：可在本机做语法校验，不碰设备）
         --dump-inner) DUMP_INNER=1; shift ;;
+        # 内部使用：由生成的引导脚本调用（见 main 的说明）。不对外。
+        --inner-run) INNER_RUN=1; shift ;;
         *) printf 'device-provision: 未知参数 %s\n' "$1" >&2; exit 2 ;;
     esac
 done
@@ -166,7 +209,7 @@ done
 # 3. 素材定位（包清单 / profile 模板 / 安装脚本）
 # ===========================================================================
 locate_assets() {
-    local cand
+    local cand=""
     for base in "$SELF_DIR" "$SELF_DIR/.." "$SELF_DIR/../.." "$LH/bin" "/data/adb/modules/sunsetlinux/bin"; do
         [ -d "$base" ] || continue
         [ -z "$PKG_LIST_BASE" ] && [ -f "$base/profiles/base.packages" ] && PKG_LIST_BASE="$base/profiles/base.packages"
@@ -197,7 +240,7 @@ preflight() {
     [ "$(id -u)" = "0" ] || die "需要真 root（当前 uid=$(id -u)）。请用 su 执行。"
 
     # 真 root 证据：CapEff 非零（proot 伪 root 的 CapEff 是 0）
-    local capeff
+    local capeff=""
     capeff="$(grep -E '^CapEff:' /proc/self/status 2>/dev/null | awk '{print $2}')"
     if [ -z "$capeff" ] || [ "$capeff" = "0000000000000000" ]; then
         die "CapEff=${capeff:-未知} 为零 → 这不是真 root（可能是 proot 伪 root）。必须用 KernelSU 的真 root。"
@@ -211,7 +254,7 @@ preflight() {
     [ -x /system/bin/mount ] || have mount || die "找不到 mount"
 
     # 只读层格式与内核能力匹配
-    local fslist
+    local fslist=""
     fslist="$(cat /proc/filesystems 2>/dev/null | tr '\n' ' ')"
     case "$LAYER_FORMAT" in
         erofs)
@@ -255,7 +298,7 @@ make_tree() {
 }
 
 sync_scripts() {
-    local f src
+    local f="" src=""
     # layer-spec.sh 必须一起装：linuxctl.sh 会 source 它（唯一事实源）。
     # 它位于 rootfs/，所以靠 "$SELF_DIR/$f"（SELF_DIR == rootfs/）命中。
     local files="linuxctl.sh layer-spec.sh start.sh stop.sh status.sh entry.sh supervise.sh doctor.sh selftest.sh"
@@ -306,7 +349,7 @@ ensure_base_tarball() {
         return 0
     fi
     # 也接受别的 24.04 arm64 base 包名
-    local alt
+    local alt=""
     for alt in "$SEEDS_DIR"/ubuntu-base-24.04*-base-arm64.tar.gz "$SEEDS_DIR"/ubuntu-base-*-arm64.tar.gz; do
         [ -f "$alt" ] && { log "使用已有种子：$alt"; printf '%s' "$alt"; return 0; }
     done
@@ -324,7 +367,7 @@ ensure_base_tarball() {
 # ===========================================================================
 # 解包 base tarball 到 $BUILD_DIR（**清空重建**：每个阶段都要干净起点）
 extract_base() {
-    local tb
+    local tb=""
     # 允许直接指定 tarball 路径（内层脚本自己找）
     for cand in "$SEEDS_DIR/$UBUNTU_BASE_TARBALL" "$SEEDS_DIR"/ubuntu-base-24.04*-base-arm64.tar.gz \
                 "$SEEDS_DIR"/ubuntu-base-*-arm64.tar.gz; do
@@ -346,7 +389,7 @@ extract_base() {
 # 外层 dry 准备：只确认种子可用 + 建好目录（真正的解包由内层每阶段做）
 prepare_build_root() {
     step "2. 检查构建素材"
-    local tb
+    local tb=""
     tb="$(ensure_base_tarball)" || die "没有可用的 Ubuntu base 种子"
     log "种子：$tb（$(stat -c '%s' "$tb" 2>/dev/null) 字节）"
     if [ "$CLEAN" = "1" ]; then
@@ -390,7 +433,7 @@ chroot_mounts() {
 
 # 把宿主（Android）当前 DNS 写进 chroot 的 /etc/resolv.conf（多路回退）
 write_resolv_conf() {
-    local dns="" raw="" ns
+    local dns="" raw="" ns=""
     # ① ndc（netd 权威）
     if [ -x /system/bin/ndc ]; then
         raw="$(/system/bin/ndc resolver getresolvers 2>/dev/null || true)"
@@ -423,7 +466,7 @@ write_resolv_conf() {
 
 chroot_umounts() {
     [ "$CHROOT_MOUNTED" = "1" ] || return 0
-    local rel
+    local rel=""
     for rel in dev/shm dev/pts dev sys proc; do
         umount -l "$BUILD_DIR/$rel" 2>/dev/null || umount -f "$BUILD_DIR/$rel" 2>/dev/null || true
     done
@@ -503,7 +546,7 @@ collect_changed() {
         | LC_ALL=C sort -u > "$out.txt" || true
     # 转成 NUL 分隔（文件名可含空格/中文；这里不允许含换行——若含则明确报错）
     : > "$out"
-    local line
+    local line=""
     while IFS= read -r line; do
         [ -n "$line" ] || continue
         printf '%s\0' "$line" >> "$out"
@@ -517,7 +560,7 @@ report_deletions() {
     local before="$1" after="$2" name="$3"
     # 只看**普通文件与符号链接**：目录的 mtime 会因为子文件增删而变化，
     # 若不排除会把每个父目录都误报成"消失"（第一次实测就踩到了）。
-    local gone
+    local gone=""
     gone="$( { LC_ALL=C comm -23 "$before" "$after" 2>/dev/null || true; } \
              | awk '$1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ && substr($0, index($0,$3)) != "" {
                        # 只保留 $6 里的类型标记？清单里没有类型列，用下面的 find 交叉核对
@@ -526,7 +569,7 @@ report_deletions() {
              | cut -d' ' -f5- | grep -v '^\\.$' | head -n 200 || true)"
     if [ -n "$gone" ]; then
         # 交叉核对：只有"在 before 里是文件/链接、在 after 里彻底不存在"的才算真删除
-        local real="" p
+        local real="" p=""
         while IFS= read -r p; do
             [ -n "$p" ] || continue
             [ -e "$BUILD_DIR/$p" ] && continue          # 还存在（只是属性变了）
@@ -548,7 +591,7 @@ build_layer() {
     local stage_layer_dir="$CACHE_DIR/layer-stage"
     step "打包 $name 层（清单比对）"
 
-    local ver file
+    local ver="" file=""
     ver="$(layer_version "$name")"
     file="$(layer_file_name "$name" "$ver")"
     local out="$LAYERS_DIR/$file"
@@ -563,7 +606,7 @@ build_layer() {
     report_deletions "$before_manifest" "$after_manifest" "$name"
 
     local list="$CACHE_DIR/.files-$name"
-    local count
+    local count=""
     count="$(collect_changed "$before_manifest" "$after_manifest" "$list")"
     log "本层变更条目数：$count（清单：$CACHE_DIR/.files-$name.txt）"
     if [ "$count" = "0" ]; then
@@ -607,7 +650,7 @@ build_layer() {
         erofs)    make_erofs "$stage_layer_dir" "$out" ;;
         squashfs) make_squashfs "$stage_layer_dir" "$out" ;;
     esac
-    local sz
+    local sz=""
     sz="$(stat -c '%s' "$out" 2>/dev/null || echo 0)"
     log "$name 层完成：$out（$(( sz / 1024 / 1024 )) MB）"
     # 把 after 清单留档，供下一阶段/排障使用
@@ -636,7 +679,7 @@ layer_version() {
 
 # 本层镜像在本地的实际路径（走 spec 的 layer_file_name，不再内联命名）
 local_layer_path_for() {
-    local name="$1" ver
+    local name="$1" ver=""
     ver="$(layer_version "$name" 2>/dev/null || echo unknown)"
     [ -n "$ver" ] || ver="unknown"
     printf '%s/layers/%s' "$LINUX_HOME" "$(layer_file_name "$name" "$ver")"
@@ -655,7 +698,7 @@ layer_version_valid() {
 
 # mkfs.erofs 定位
 mkfs_erofs_bin() {
-    local c
+    local c=""
     for c in "$BUILD_DIR/usr/bin/mkfs.erofs" "$BUILD_DIR/usr/sbin/mkfs.erofs" \
              /system/bin/mkfs.erofs /system/vendor/bin/mkfs.erofs \
              /usr/bin/mkfs.erofs /usr/sbin/mkfs.erofs; do
@@ -682,7 +725,7 @@ make_erofs() {
     mk="$(mkfs_erofs_bin)" || die "找不到 mkfs.erofs（erofs-utils 未安装，且设备没有 /system/bin/mkfs.erofs）"
     log "mkfs.erofs：$mk（compress=$comp，block=$bs）"
 
-    local zargs
+    local zargs=""
     zargs=()
     case "$comp" in
         none|"") : ;;                       # 不传 -z = 不压缩
@@ -693,7 +736,7 @@ make_erofs() {
     # 为什么要探测：设备用 /system/bin/mkfs.erofs（Android 自带，参数兼容性可能与
     # 宿主 erofs-utils 1.7.1 不同），--all-root / -x-1 / -b 未必都认。
     # 每次尝试都**把实际执行的命令原文 + 退出码写进日志**，便于真机排错。
-    local attempts
+    local attempts=""
     attempts=(
         "${zargs[@]}" -b "$bs" --all-root -x-1    # 完整参数集
         "${zargs[@]}" -b "$bs" --all-root         # 去掉 xattr
@@ -794,7 +837,7 @@ squashfs-tools xz-utils"
     rm -rf "$BUILD_DIR/var/lib/apt/lists"/* 2>/dev/null || true
     mkdir -p "$BUILD_DIR/var/lib/apt/lists/partial" 2>/dev/null || true
     # 3) locale：只保留 C / C.UTF-8 / zh_CN（其余删掉；locale-archive 保留）
-    local loc keep
+    local loc="" keep=""
     for loc in "$BUILD_DIR"/usr/share/locale/*; do
         [ -d "$loc" ] || continue
         keep=0
@@ -855,7 +898,7 @@ build_runtime() {
     in_chroot /bin/ln -sfn /opt/node/bin/npx  /usr/local/bin/npx
     in_chroot /bin/rm -f /tmp/node.tar.xz
 
-    local nv
+    local nv=""
     nv="$(in_chroot /opt/node/bin/node --version 2>/dev/null || echo '?')"
     log "Node 安装完成：$nv"
     [ "$nv" != "?" ] || die "node --version 失败（/opt/node 可能不完整）"
@@ -865,7 +908,7 @@ build_runtime() {
     if ! in_chroot_net /usr/local/bin/npm i -g --prefix /opt/node pnpm --no-audit --no-fund; then
         die "pnpm 安装失败（dsh plugin 将无法安装第三方插件，不能静默跳过）"
     fi
-    local pv
+    local pv=""
     pv="$(in_chroot /opt/node/bin/pnpm --version 2>/dev/null || echo '?')"
     if [ "$pv" = "?" ]; then
         # 有些环境 pnpm 落在 /opt/node/lib/node_modules/pnpm/bin，补一个软链
@@ -881,7 +924,7 @@ build_runtime() {
     # 不该逼用户为了改 entry.sh 去重下 OS 基线层。
     step "4b. 安装运行时入口脚本到 $LAYER_RUNTIME_ENTRY_DIR（runtime 层）"
     in_chroot /bin/mkdir -p "$LAYER_RUNTIME_ENTRY_DIR"
-    local ef found=0
+    local ef="" found=0
     for ef in entry.sh supervise.sh; do
         local src=""
         for src in "$SELF_DIR/$ef" "$SELF_DIR/../runtime/root/$ef" "$BIN_DIR/$ef"; do
@@ -934,7 +977,7 @@ build_dsh() {
     [ -f "$dsh_bin" ] || die "安装后找不到 $dsh_bin（npm 前缀不对？必须是 --prefix /usr/local）"
     # 入口软链（契约 §5.3 / findings §6.5）
     in_chroot /bin/ln -sfn ../lib/node_modules/@deepseek-ai/dsh/lib/bin.js /usr/local/bin/dsh
-    local dv
+    local dv=""
     dv="$(in_chroot /bin/sh -c 'cd /usr/local/lib/node_modules/@deepseek-ai/dsh && node -e "console.log(require(\"./package.json\").version)"' 2>/dev/null || echo '?')"
     [ "$dv" != "?" ] || die "读不出 DSH 版本（安装可能不完整）"
     log "DSH 版本：$dv"
@@ -948,7 +991,7 @@ build_dsh() {
     in_chroot /bin/mkdir -p /opt/sunsetlinux
     copy_into_chroot "$INSTALL_WEB_PROFILE" /opt/sunsetlinux/install-web-profile.sh 0755
     in_chroot /bin/mkdir -p /opt/sunsetlinux/web-profile
-    local tf
+    local tf=""
     for tf in "$WEB_PROFILE_TEMPLATE"/*; do
         [ -f "$tf" ] || continue
         copy_into_chroot "$tf" "/opt/sunsetlinux/web-profile/$(basename "$tf")" 0644
@@ -1070,7 +1113,7 @@ EOF
     fi
 
     # state.json：层**语义版本** + 大小 + sha256（App/频道比对用，layer-spec §5）
-    local name f sz sha ver json_layers="" first=1
+    local name="" f="" sz="" sha="" ver="" json_layers="" first=1
     for name in "${LAYERS_ORDER[@]}"; do
         f="$(local_layer_path_for "$name")"
         sz="null"; sha="null"
@@ -1118,7 +1161,7 @@ EOF
 # ===========================================================================
 make_transports() {
     step "8. 产出分发压缩包（.zst + .gz）"
-    local name f ver tname zst gz rc_z=0 rc_g=0
+    local name="" f="" ver="" tname="" zst="" gz="" rc_z=0 rc_g=0
     for name in "${LAYERS_ORDER[@]}"; do
         f="$(local_layer_path_for "$name")"
         if [ ! -f "$f" ]; then
@@ -1162,7 +1205,7 @@ make_transports() {
 # ===========================================================================
 summary() {
     step "完成摘要"
-    local name f
+    local name="" f=""
     for name in base runtime dsh; do
         f=""
         for cand in "$LAYERS_DIR/$name.erofs" "$LAYERS_DIR/$name.squashfs"; do
@@ -1189,11 +1232,56 @@ summary() {
     log "日志：$LOG_FILE"
 }
 
+# ===========================================================================
+# 17. 三层阶段编排（只在内层 --inner-run 里跑）
+#   ★ 每一步都"重新解包同一个 base"再构建，保证每层的 before 基线是干净起点，
+#     层与层之间不会互相污染（这是"层可比对"的前提）。
+#   ★ 以前这段是作为 heredoc 文本拼进内层脚本的；现在内层就是本文件本身，
+#     所以它就是普通函数 —— 改这里等于改设备上真正执行的代码，不需要两头同步。
+# ===========================================================================
+prepare_stage() {
+    local name="$1"
+    step "准备 $name 阶段的干净起点（重新解包 base）"
+    extract_base
+    chroot_mounts
+    write_manifest "$MANIFEST_BEFORE"
+    log "before 清单：$(wc -l < "$MANIFEST_BEFORE" | tr -d ' ') 条"
+}
+
+run_stages() {
+    if [ "$SKIP_BASE" != "1" ]; then
+        prepare_stage base
+        build_base
+        chroot_umounts
+    fi
+    if [ "$SKIP_RUNTIME" != "1" ]; then
+        prepare_stage runtime
+        build_runtime
+        chroot_umounts
+    fi
+    if [ "$SKIP_DSH" != "1" ]; then
+        prepare_stage dsh
+        build_dsh
+        chroot_umounts
+    fi
+}
+
 main() {
     mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || true
     : >> "$LOG_FILE" 2>/dev/null || true
 
-    # --dump-inner 是离线体检模式：只生成内层脚本供 bash -n / 人工审阅，不做任何设备操作
+    # 内层模式：本进程由外层生成的引导脚本**重新执行本文件**拉起（--inner-run），
+    # 只做三层构建。前置检查 / 建目录 / 种子检查 / upper.img 都在外层做，这里绝不重复，
+    # 也绝不重新生成引导脚本（否则递归）。
+    if [ "$INNER_RUN" = "1" ]; then
+        log "内层构建开始（shell=$SH_BIN，uid=$(id -u)）"
+        locate_assets
+        run_stages
+        log "内层构建结束"
+        return 0
+    fi
+
+    # --dump-inner 是离线体检模式：只生成内层引导脚本供语法校验 / 人工审阅，不做任何设备操作
     if [ "${DUMP_INNER:-0}" != "1" ]; then
         preflight
         make_tree
@@ -1207,15 +1295,21 @@ main() {
     # 构建期的挂载（proc/sys/dev）放在**独立 mount namespace** 里做：
     # 进程退出时随 ns 一起消失，绝不污染宿主挂载表（这是"无残留"的保障）。
     #
-    # 为什么要写临时脚本而不是 `bash -c`：unshare 起的是一个新 bash 进程，
-    # 用 `declare -f` 把函数文本塞进 -c 字符串很容易被引号问题打碎；
-    # 落一个临时脚本最稳，也便于失败后直接重放调试。
+    # ★ 内层脚本为什么是"重新执行本文件"，而不是把函数文本塞进去：
+    #   旧写法用 `declare -f` 转储函数 —— 那是 **bash 专有**内置命令，而 unshare 里
+    #   起来的是一个新 shell 进程（设备上是 /system/bin/sh = mksh），于是真机上
+    #   必然 "declare: inaccessible or not found"。改成落一个几行的引导脚本
+    #   （导出环境 → exec 本文件 --inner-run）：函数永远来自同一份源码，
+    #   没有引号拼装风险，也不再要求 bash。落文件（而不是 -c 字符串）依然保留，
+    #   便于失败后直接重放调试。
     local inner="$CACHE_DIR/.provision-inner.sh"
     {
-        printf '#!/usr/bin/env bash\n'
-        printf '# 由 device-provision.sh 生成：在 unshare -m 内部执行的构建脚本\n'
+        printf '#!/system/bin/sh\n'
+        printf '# 由 device-provision.sh 生成：在 unshare -m 内部执行的引导脚本\n'
+        printf '# 只做两件事：把外层算好的环境交给内层，然后重新执行本脚本（--inner-run）。\n'
         printf '# 每层都从同一 Ubuntu base 解包（干净起点），用清单比对切出增量。\n'
-        printf 'set -euo pipefail\n'
+        printf 'set -eu\n'
+        printf '# 只用 set -eu：pipefail 由重新执行的那个脚本自己设（这里少一层依赖）。\n'
         printf 'export LINUX_HOME=%q\n' "$LH"
         printf 'export BUILD_DIR=%q\n' "$BUILD_DIR"
         printf 'export LAYER_FORMAT=%q\n' "$LAYER_FORMAT"
@@ -1240,70 +1334,30 @@ main() {
         printf 'export LAYER_NAMES_ORDER=%q\n' "${LAYERS_ORDER[*]}"
         printf 'export UPPER_SIZE_MB=%q SUNSETLINUX_PORT=%q\n' "$UPPER_SIZE_MB" "${SUNSETLINUX_PORT:-3080}"
         printf 'export SELF_DIR=%q SELF_PATH=%q\n' "$SELF_DIR" "$SELF_PATH"
-        printf 'export MANIFEST_BEFORE=%q\n' "$CACHE_DIR/.manifest-before"
-        printf 'export CHROOT_MOUNTED=0\n'
+        printf 'export MANIFEST_BEFORE=%q\n' "$MANIFEST_BEFORE"
+        printf 'export INNER_RUN=1 CHROOT_MOUNTED=0\n'
         printf '\n'
-        for fn in log step warn die have parse_packages locate_assets ensure_base_tarball \
-                  extract_base chroot_mounts chroot_umounts write_resolv_conf in_chroot \
-                  in_chroot_net write_manifest manifest_paths collect_changed report_deletions \
-                  build_layer layer_version layer_version_valid local_layer_path_for \
-                  mkfs_erofs_bin make_erofs probe_set_erofs_args make_squashfs build_base build_runtime \
-                  build_dsh copy_into_chroot sync_scripts; do
-            printf '\n'
-            declare -f "$fn" || true
-        done
-        printf '\n'
-        printf '\n'
-        # 内层也要 source 规格文件（断言函数与常量都要用）
-        printf '# layer-spec：唯一共同事实源\n'
-        printf '. %q\n' "$LAYER_SPEC_FILE"
-        printf '\n'
-        cat <<'INNER'
-# --- 每个阶段都从同一个 base 解包，得到干净的 before 基线 ---------------------
-prepare_stage() {
-    local name="$1"
-    step "准备 $name 阶段的干净起点（重新解包 base）"
-    extract_base
-    chroot_mounts
-    write_manifest "$MANIFEST_BEFORE"
-    log "before 清单：$(wc -l < "$MANIFEST_BEFORE" | tr -d ' ') 条"
-}
-
-if [ "$SKIP_BASE" != "1" ]; then
-    prepare_stage base
-    build_base
-    chroot_umounts
-fi
-if [ "$SKIP_RUNTIME" != "1" ]; then
-    prepare_stage runtime
-    build_runtime
-    chroot_umounts
-fi
-if [ "$SKIP_DSH" != "1" ]; then
-    prepare_stage dsh
-    build_dsh
-    chroot_umounts
-fi
-INNER
+        # 交棒：重新执行同一个文件。函数、常量、层规格都来自那份源码本身。
+        printf 'exec %s %q --inner-run\n' "$SH_BIN" "$SELF_PATH"
     } > "$inner"
     chmod 0755 "$inner"
 
     if [ "${DUMP_INNER:-0}" = "1" ]; then
-        printf '内层构建脚本已写出：%s\n' "$inner" >&2
-        printf 'bash -n：%s\n' "$(bash -n "$inner" 2>&1 && echo OK || echo FAIL)" >&2
+        printf '内层引导脚本已写出：%s\n' "$inner" >&2
+        printf '语法自检（%s -n）：%s\n' "$SH_BIN" "$("$SH_BIN" -n "$inner" 2>&1 && echo OK || echo FAIL)" >&2
         exit 0
     fi
 
     if [ -x /system/bin/unshare ]; then
         log "在独立 mount namespace 中构建（unshare -m --propagation private）"
-        if ! /system/bin/unshare -m --propagation private /system/bin/sh "$inner"; then
+        if ! /system/bin/unshare -m --propagation private "$SH_BIN" "$inner"; then
             # toybox unshare 可能不认 --propagation，退化为不带该参数
             warn "unshare --propagation private 失败，改为 unshare -m"
-            /system/bin/unshare -m /system/bin/sh "$inner" || die "构建失败（详见 $LOG_FILE）"
+            /system/bin/unshare -m "$SH_BIN" "$inner" || die "构建失败（详见 $LOG_FILE）"
         fi
     else
         warn "找不到 /system/bin/unshare，构建期挂载可能残留（脚本会自动尝试卸载）"
-        bash "$inner" || die "构建失败（详见 $LOG_FILE）"
+        "$SH_BIN" "$inner" || die "构建失败（详见 $LOG_FILE）"
     fi
 
     make_upper
