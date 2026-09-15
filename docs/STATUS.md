@@ -49,7 +49,7 @@
 | `module/webroot/selftest.mjs`（WebUI 纯函数 + 图标守卫） | 64 | ✅ |
 | `tools/cmp-consistency.mjs`（三方版本比较） | 16 | ✅ |
 | `tools/contract-check.mjs`（status JSON 契约，root+proot） | — | ✅ 双通过 |
-| App 单测（解压 13 + 归因 8 + UI 契约 14 + 调色对比 9 + 功能 10 + 官方频道 4） | 58 | ✅（`./gradlew :app:testDebugUnitTest`） |
+| App 单测（解压 13 + 归因 8 + UI 契约 14 + 调色对比 9 + 功能 10 + 官方频道 4 + 签名 4） | 62 | ✅（`./gradlew :app:testDebugUnitTest`） |
 
 ### 3.2 端到端实测过的链路
 
@@ -141,9 +141,49 @@ Android 上没有随系统可用的伪终端分配接口，自己引（JNI + for
 才断开 —— 避免留下没人管的 shell 进程。起会话前先判一次环境是否 `RUNNING`（`attach` 进的是
 已存在的 mount namespace，没起来时只会甩一行报错）。
 
-**验收**：`:app:assembleDebug` + `:app:testDebugUnitTest` → **58 用例全过**（新增
+**验收**：`:app:assembleDebug` + `:app:testDebugUnitTest` → **62 用例全过**（新增
 `ShellLayoutContractTest` 7 条，守着"底栏只放 3 格 / DSH 在顶栏 / 更新在侧边栏 /
 终端走 attach 且先判环境 / 会话随外壳销毁"）。
+
+### 3.8 ★ 版本号推进 + **APK 签名漂移**修复（2026-09-16 第三批）
+
+用户点名："别忘了更新版本号（模块和 APP），以及解决 APK 签名随机漂移的问题"。
+
+**① 版本号**
+
+| 组件 | 之前 | 现在 | 说明 |
+|---|---|---|---|
+| 模块 | `v1.0.0` / 10000 | **`v1.0.1` / 10001** | 见 §3.7（随 WebUI 图标化一起发） |
+| **App** | `versionCode = 1` / `versionName = "0.1.0"`（**一直没动过**） | **`2` / `"0.2.0"`** | 本次含：内置终端、DSH 上顶栏、更新进侧边栏、内置官方频道 |
+
+**② 签名漂移（真机上会咬人，已实测复现并修掉）**
+
+根因：`build.gradle.kts` **完全没有 `signingConfig`** → AGP 用各机器自建的
+`~/.android/debug.keystore`；CI runner 是临时的 → **每次发布一把新 key**。实测两个包都是
+`CN=Android Debug` 自签，但证书 SHA-256 一个是 `84be9523…`（CI）、一个是 `3b68b616…`（本机）。
+
+后果（比"装不上"严重）：用户装新版报 `INSTALL_FAILED_UPDATE_INCOMPATIBLE`（必须先卸载、
+App 数据清空）；**KernelSU 已授予的 root 授权全部作废**（授权按【包名+签名】记录，
+`build.gradle.kts` 里原本就写着这句）；系统也不把新版当升级。
+
+修法（两档，详见 `docs/release-ci.md` §5.4）：
+1. **默认**：仓库内固定调试密钥 `app/app/debug.keystore`（PKCS12；`.gitignore` 里加了
+   **唯一例外** `!app/app/debug.keystore`，否则会被 `*.keystore` 静默忽略 → CI 上找不到文件）；
+2. **要私有发布密钥**：设 `ANDROID_KEYSTORE_BASE64` 等 4 个 Secret，`ci.yml` 落成临时文件并注入
+   `SUNSETLINUX_KEYSTORE*` 环境变量 —— 这条通道以前**文档写了、代码没接**（`ci.yml` 里搜不到
+   `ANDROID_KEYSTORE`），这次一并接上。
+
+**验收证据（可复跑）**：
+
+```
+keytool -list -v -keystore app/app/debug.keystore   → SHA256 5D:5F:A7:24:…:69:F7
+apksigner verify --print-certs app-debug.apk         → 5d5fa724612e1df6c017cd1b88a3c47b0b4c80b078c1b7b4c403295a5a7d69f7   ← 逐位一致
+apksigner verify --print-certs <旧 CI 包>             → 84be9523…  ← 与上面不同＝漂移确实存在
+```
+
+`assembleDebug` 与 `assembleRelease` 都通过；新增 `SigningContractTest` 4 条
+（密钥文件在、两个 buildType 绑同一配置、无环境变量时必须回落到仓库内那把、
+`.gitignore` 必须放行、版本号必须推进过）。
 
 ### 3.7 ★ 模块 WebUI 图标化 + 内置官方频道 + 模块 1.0.1（2026-09-16 第二批）
 

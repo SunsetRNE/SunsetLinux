@@ -152,8 +152,8 @@ https://<用户名>.github.io/<仓库名>/stable/channel.json
 | Secret | 用途 | 缺失时 |
 |---|---|---|
 | `CHANNEL_SIGNING_KEY` | Ed25519 私钥，签 `channel.json` | **`channel.yml` 用它**（仅在 `channel` 分支推送 `channel/channel.json` 时触发）：缺失时该工作流**直接失败**，绝不跳过签名发布。`release.yml` 不用它（它只发 APK + 模块 + `index.json`） |
-| `ANDROID_KEYSTORE_BASE64` | 正式签名 keystore（base64） | 未配置时只出 **debug 包**，并在 Release 说明里标注 |
-| `ANDROID_KEYSTORE_PASSWORD` / `ANDROID_KEY_ALIAS` / `ANDROID_KEY_PASSWORD` | 签名口令 | 同上 |
+| `ANDROID_KEYSTORE_BASE64` | 私有**发布** keystore（base64） | 未配置时用**仓库内固定的调试密钥**签名（`app/app/debug.keystore`）—— 签名仍然稳定（可覆盖安装），只是密钥是公开的调试密钥。**别在两档之间来回跳**：换密钥那次用户必须卸载重装（见 §5.4） |
+| `ANDROID_KEYSTORE_PASSWORD` / `ANDROID_KEY_ALIAS` / `ANDROID_KEY_PASSWORD` | 发布密钥的 store 口令 / 别名 / key 口令 | 只在配了 `ANDROID_KEYSTORE_BASE64` 时才需要；缺了会让签名失败（不是静默降级） |
 
 ### 5.1 层产物与频道清单：**不在 CI 里，走 `publish-channel`**
 
@@ -298,6 +298,49 @@ tools/channel/sunsetlinux-channel keygen --out-dir ~/.sunsetlinux-keys
 
 > 本地开发用的 `channel.key` **已经**在 `.gitignore` 里；仓库里还曾遗留过一份测试私钥，已清除。
 > 生成与保管方式见 `docs/updates.md`。
+
+### 5.4 APK 签名：**必须固定**（否则用户升级不了、root 授权还会全丢）
+
+**问题（2026-09-16 实测确认）**：`app/app/build.gradle.kts` 原来**没有任何 `signingConfig`**，
+于是 AGP 用各机器自己生成的 `~/.android/debug.keystore`。CI runner 是临时的 → **每次发布都是一把新 key**：
+
+```
+CI 发布的 APK      Signer #1: CN=Android Debug  SHA-256 84be9523b5623a543f6ce517d73858c0fc2bad9b331fd40aa5a9b33ffc29a221
+本机构建的 APK     Signer #1: CN=Android Debug  SHA-256 3b68b61675bd7ccb6a2d81b7edac2f2c3f005e5154b3c4d38e78e747a7bf318c
+```
+
+后果比"装不上"严重得多：
+
+| 后果 | 说明 |
+|---|---|
+| `INSTALL_FAILED_UPDATE_INCOMPATIBLE` | 用户必须先卸载才能装新版 —— App 数据清空 |
+| **KernelSU root 授权全部作废** | 授权按【包名 + 签名】记录（`build.gradle.kts` 里原本就写着这句），签名一变，之前授过的 root 全失效 |
+| 系统不认为这是升级 | 版本更新、`index.json` 里的 sha256 都对不上实际安装的包 |
+
+**修法（两档，已实现）**：
+
+1. **默认：仓库内固定的调试密钥** `app/app/debug.keystore`（PKCS12，alias/pass 都是 `sunsetlinux`，
+   口令刻意不用默认的 `android`）。`.gitignore` 里对它有**唯一的例外** `!app/app/debug.keystore`
+   —— 否则 `*.keystore` 会把它静默忽略，CI 上 `storeFile` 找不到。调试密钥不是秘密，
+   本地与 CI 天然同签名，开箱即稳。
+2. **私有发布密钥（更安全）**：设四个 Secret，`ci.yml` 会把它落成一个临时文件并注入环境变量：
+
+   | Secret | 用途 |
+   |---|---|
+   | `ANDROID_KEYSTORE_BASE64` | 发布 keystore 的 base64（`base64 -w0 my.jks`） |
+   | `ANDROID_KEYSTORE_PASSWORD` | store 口令 |
+   | `ANDROID_KEY_ALIAS` | 别名 |
+   | `ANDROID_KEY_PASSWORD` | key 口令 |
+
+   自建（只做一次）：`keytool -genkeypair -v -keystore release.jks -storetype PKCS12 -keyalg RSA \
+   -keysize 4096 -validity 10950 -alias sunsetlinux -dname "CN=SunsetLinux, O=SunsetLinux, C=CN"`，
+   然后 `base64 -w0 release.jks` 贴进 Secret，**并把 release.jks 离线备份**（丢了就再也升不了级）。
+
+> ⚠️ **换密钥那一次，所有用户都必须卸载重装一遍**（签名变了做不到平滑升级，root 授权也会重授）。
+> 所以要么一开始就上私有密钥，要么就老老实实用那把固定的调试密钥 —— 别在两档之间来回跳。
+>
+> 回归守卫：`app/app/src/test/.../SigningContractTest.kt`（密钥文件在、两个 buildType 都绑同一配置、
+> 没环境变量时必须回落到仓库内那把、`.gitignore` 必须放行、版本号必须推进过）。
 
 ---
 

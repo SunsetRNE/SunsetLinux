@@ -156,6 +156,33 @@ jobs:
       - name: 关掉 Gradle 守护进程（CI 上没必要常驻）
         run: echo "org.gradle.daemon=false" >> app/gradle.properties
 
+      # 签名：**默认用仓库里那把固定的调试密钥**（app/app/debug.keystore），所以本步可以什么都不做
+      # —— 关键在于"永远不要落到 runner 自己新生成的 ~/.android/debug.keystore"，
+      # 否则每次发布签名都不同：用户装新版报 INSTALL_FAILED_UPDATE_INCOMPATIBLE，
+      # 且 KernelSU 已授予的 root 授权（按包名+签名记录）全部作废。
+      # 配了 Secret 就用私有发布密钥（更安全）；⚠️ 换密钥那次用户必须卸载重装一次。
+      - name: 准备签名密钥（有 Secret 用发布密钥，否则用仓库内固定调试密钥）
+        env:
+          KS_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KS_PASS: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KS_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KS_KEYPASS: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -n "${KS_B64:-}" ]; then
+            printf '%s' "$KS_B64" | base64 -d > "$RUNNER_TEMP/release.keystore"
+            {
+              echo "SUNSETLINUX_KEYSTORE=$RUNNER_TEMP/release.keystore"
+              echo "SUNSETLINUX_KEYSTORE_PASSWORD=$KS_PASS"
+              echo "SUNSETLINUX_KEY_ALIAS=$KS_ALIAS"
+              echo "SUNSETLINUX_KEY_PASSWORD=$KS_KEYPASS"
+            } >> "$GITHUB_ENV"
+            echo "签名：使用 Secret 提供的**发布密钥**"
+          else
+            echo "签名：未配置 ANDROID_KEYSTORE_BASE64 → 使用仓库内固定的调试密钥" >> "$GITHUB_STEP_SUMMARY"
+            echo "签名：未配置 ANDROID_KEYSTORE_BASE64 → 使用仓库内固定的调试密钥（app/app/debug.keystore，签名稳定、可覆盖安装）"
+          fi
+
       - name: Android 构建 + 单测（★ 两条一起跑）
         id: android
         working-directory: app

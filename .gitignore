@@ -31,6 +31,13 @@ channel.key
 credentials*
 .sunsetlinux-keys/
 
+# ★ 唯一的例外：App 的**固定调试密钥**。它必须进仓库，否则每次构建都会换一把 key，
+#   用户装新版报 INSTALL_FAILED_UPDATE_INCOMPATIBLE，且 KernelSU 已授予的 root 授权全部作废
+#   （授权按包名 + 签名记录）。调试密钥**不是秘密**（口令就写在 build.gradle.kts 的注释里），
+#   它只用于 debug/预览签名；要私有发布密钥请走 Secret（ANDROID_KEYSTORE_BASE64），
+#   见 docs/release-ci.md §5.4。
+!app/app/debug.keystore
+
 # ---- 下载缓存 / 临时目录 ---------------------------------------------------
 *.tar.zst
 *.tar.gz

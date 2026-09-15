@@ -31,7 +31,14 @@
 
 **已发布的产物**（gh-pages `stable/`）：APK、`sunsetlinux-module-1.0.1.zip`、`index.json`。
 门禁那轮实测：脚本断言 20/20（bash 与 mksh 各一遍）、proot 18/18、**proot 纯函数 65/65**、
-WebUI 64/64、版本一致性 16/16、契约通过、Android 构建 `BUILD SUCCESSFUL`、**单测 58/0**。
+WebUI 64/64、版本一致性 16/16、契约通过、Android 构建 `BUILD SUCCESSFUL`、**单测 62/0**。
+
+**版本与签名（2026-09-16）**：模块 **v1.0.1**、App **0.2.0（versionCode 2）**。
+**APK 签名已固定**：以前没有 `signingConfig` → 每次 CI 都是一把新的随机 debug key，
+用户装新版会 `INSTALL_FAILED_UPDATE_INCOMPATIBLE`、**KernelSU 已授予的 root 授权全部作废**；
+现在默认用仓库内的固定调试密钥 `app/app/debug.keystore`（要私有发布密钥就配
+`ANDROID_KEYSTORE_BASE64` 等 Secret，注意换密钥那次用户必须卸载重装一次）。
+详见 `docs/release-ci.md` §5.4 与 `docs/STATUS.md` §3.8。
 
 **App 外壳（2026-09-16 真机反馈后调整）**：DSH 从底栏移到**顶栏图标**、底栏变成
 **启动 / 插件 / 终端**三格、**更新移到侧边栏**；并新增**内置终端**（走 `linuxctl attach`，

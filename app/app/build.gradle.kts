@@ -13,8 +13,46 @@ android {
         applicationId = "io.github.sunsetrne.sunsetlinux"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0"
+        // 版本号规则：每次对外发布都要 +1（Android 只按 versionCode 判"这是不是新版"）。
+        // 0.2.0：内置终端、DSH 入口上顶栏、更新进侧边栏、内置官方频道。
+        versionCode = 2
+        versionName = "0.2.0"
+    }
+
+    // ────────────────────────────────────────────────────────────────────────
+    // 签名：**必须固定**，否则每次构建换一把 key，后果不是"小毛病"：
+    //   · 用户装新版 → INSTALL_FAILED_UPDATE_INCOMPATIBLE（必须先卸载，App 数据清空）
+    //   · KernelSU 的 root 授权按【包名 + 签名】记录 → 已授予的授权**全部作废**
+    //   · 系统不把新版当成同一应用的升级
+    //
+    // 实测证据（2026-09-16）：CI 发布的 APK 与本机构建的 APK 都是 `CN=Android Debug` 自签，
+    // 但证书 SHA-256 一个是 84be9523…、一个是 3b68b616… —— 因为 AGP 在缺少配置时会用
+    // 各机器自己生成的 ~/.android/debug.keystore，而 CI runner 是临时的（每次都新建一把）。
+    //
+    // 策略（两档，见 docs/release-ci.md §5.4）：
+    //   1) **默认**：用随仓库提交的固定调试密钥 `app/app/debug.keystore`
+    //      （调试密钥不是秘密；口令见下）。本地与 CI 天然同签名，开箱即稳。
+    //   2) **要私有发布密钥**时设环境变量（CI 从 Secret 注入，见 .github/workflows/ci.yml）：
+    //      SUNSETLINUX_KEYSTORE / SUNSETLINUX_KEYSTORE_PASSWORD /
+    //      SUNSETLINUX_KEY_ALIAS / SUNSETLINUX_KEY_PASSWORD
+    //      ⚠️ 换密钥的那一次，用户必须卸载重装一次（签名变了做不到平滑升级）。
+    // ────────────────────────────────────────────────────────────────────────
+    signingConfigs {
+        create("sunsetlinux") {
+            val envStore = System.getenv("SUNSETLINUX_KEYSTORE")
+            if (!envStore.isNullOrBlank()) {
+                storeFile = file(envStore)
+                storePassword = System.getenv("SUNSETLINUX_KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("SUNSETLINUX_KEY_ALIAS")
+                keyPassword = System.getenv("SUNSETLINUX_KEY_PASSWORD")
+            } else {
+                // 仓库内固定调试密钥：口令刻意不用默认的 "android"，避免与别的项目撞签名
+                storeFile = file("debug.keystore")
+                storePassword = "sunsetlinux"
+                keyAlias = "sunsetlinux"
+                keyPassword = "sunsetlinux"
+            }
+        }
     }
 
     buildTypes {
@@ -22,10 +60,12 @@ android {
             // 刻意不加 applicationIdSuffix：包名必须保持 io.github.sunsetrne.sunsetlinux，
             // 否则 KernelSU 里已授予的 root 授权会失效（授权按包名 + 签名记录）。
             isMinifyEnabled = false
+            signingConfig = signingConfigs.getByName("sunsetlinux")
         }
         release {
             isMinifyEnabled = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            signingConfig = signingConfigs.getByName("sunsetlinux")
         }
     }
 
