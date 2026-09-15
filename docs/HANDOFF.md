@@ -11,7 +11,8 @@
 - 分支：`main` = `beta` = **本次那个提交**；`channel` = `0d1efff`；`gh-pages` 由 CI 独占。
 - 发布：`/stable/` **run 44**、`/beta/` **run 45**，都是 **`4d53d02`**：模块 **1.0.5** + App **0.2.1**。
   再往前一格 `abb321f` 是 run 42/43（模块 1.0.5 + App 0.2.0）。
-  **本次再推一格：模块 `1.0.6` + App `0.2.2`**（真机第一跑暴露的两个坑，见 §一 第 14 条）。
+  **本次再推一格：`/stable/` run 46、`/beta/` run 47（`327001c`）—— 模块 `1.0.6` + App `0.2.2`**
+  （真机第一跑暴露的两个坑，见 §一 第 14 条）。
 - **下载页（别点 GitHub Releases，那里永远是空的）**：
   <https://sunsetrne.github.io/SunsetLinux/> → `/stable/`（正式）· `/beta/`（预发布）。
 - **内置官方频道的公开指纹**（与 `core/Prefs.kt` 里写死的那把是同一把，App 自带的
