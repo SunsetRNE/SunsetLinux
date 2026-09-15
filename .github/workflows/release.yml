@@ -87,13 +87,28 @@ jobs:
         working-directory: app
         run: ./gradlew --no-daemon :app:assembleDebug
 
+      # ★ 把 APK 收进 dist/ 并用**发布的命名**：下游「收集产物」是按 `dist/*.apk` 找的，
+      #   而 Gradle 的产物在 `app/app/build/outputs/apk/debug/app-debug.apk`。
+      #   本地之所以没暴露这个问题，是因为手工往 dist/ 拷过 —— CI 上没有这一步就直接
+      #   `cp: cannot stat 'dist/*.apk'` 挂掉（实测）。命名与本地/文档保持一致。
+      - name: 收集 APK 到 dist/（统一命名）
+        run: |
+          set -euo pipefail
+          SRC="app/app/build/outputs/apk/debug/app-debug.apk"
+          [ -f "$SRC" ] || { echo "::error::没找到构建产物：$SRC"; exit 1; }
+          cp -v "$SRC" dist/sunsetlinux-launcher-debug.apk
+          ( cd dist && sha256sum sunsetlinux-launcher-debug.apk > sunsetlinux-launcher-debug.apk.sha256 )
+
       - name: 打包 KernelSU 模块
         run: |
           # 版本取 module.prop 里的 version=，构建号用 run_number 便于区分
           V="$(sed -n 's/^version=//p' module/module.prop | head -n1)"
           [ -n "$V" ] || { echo "module.prop 里没有 version="; exit 1; }
-          bash module/mkmodule.sh --version "$V"
-          echo "MODULE_VERSION=$V" >> "$GITHUB_ENV"
+          # 产物名统一为 <product>-<组件>-<版本>：去掉 module.prop 里那个 `v` 前缀
+          # （module.prop 自己保留 v1.0.0 没关系，WebUI 会把 v1.0.0 与 1.0.0 视为一致）
+          VER="${V#v}"
+          bash module/mkmodule.sh --version "$VER"
+          echo "MODULE_VERSION=$VER" >> "$GITHUB_ENV"
 
       - name: 收集产物 + 生成 index.json
         run: |
