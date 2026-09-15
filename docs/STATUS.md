@@ -285,6 +285,22 @@ apksigner verify --print-certs <旧 CI 包>             → 84be9523…  ← 与
 | 缺层 + proot 模式 | 明说"proot 没有真 chroot，去频道装层"，不让用户白等 |
 | 解析不出缺什么 / 没有 su | FAILED（**不猜着跑一次半小时的构建**） |
 
+### 3.10.2 ★ 真机第一跑：又暴露两个"本地永远测不出来"的坑（模块 **v1.0.6/10006**）
+
+用户按文档跑了（好消息是 **bash 那道坎真的过去了**：前置检查 / 建目录 / 找种子全过），然后死在两处：
+
+| 现象 | 根因 | 改法 |
+|---|---|---|
+| `printf: bad %q@20`（生成内层脚本那一步，整个部署终止） | **Android 的 mksh 没有 `printf %q`**；容器/CI 的 mksh R59 有 —— 同一段代码在本地怎么跑都是绿的 | 内层引导脚本改成**原样重放命令行参数**（`exec /system/bin/sh <脚本> --inner-run <原参数…>`，8 行），彻底不用 `%q`；参数用 `squote()`（POSIX 单引号转义，sed 实现） |
+| `素材：base.packages=未找到`（还有 runtime / web-profile） | **模块从来没打包 `rootfs/profiles/`** —— `device-provision.sh` 按 `$SELF_DIR/../profiles/` 找，而 mkmodule 只铺了 bin/lib/webroot。后果是 base 层退化成内置最小集，跑到 dsh 阶段才 die（白等 20 分钟） | ① mkmodule 打包 `profiles/` + **必需项断言**；② `preflight` 对素材 **fail-fast**（缺了当场 die 并指明重装 ≥1.0.6）；③ `sync_scripts` 把 profiles 一并落到 `$LINUX_HOME/profiles`，候选路径补上模块根与 `$LH` |
+
+顺带加固：文件清单的 `find -exec … {} +` 改成**先探测再降级**（toybox 版本差异；不认 `+` 就会
+产出空清单 → 三层全空，再白等半小时）。
+
+回归从 28 条涨到 **35 条** —— 新增的包括：
+「代码里不许出现 `%q`」（静态，因为本地跑不出来）、「引导脚本里没有 `export` 一堆变量」、
+以及**把含空格与单引号的种子目录送进内层、断言它拿到的路径与命令行逐字一致**。
+
 回归：`ProvisionPlanTest` 9 条 + `ProvisionWiringTest` 3 条（源码级契约：向导里必须还有
 `ProvisionPlan.nextStep` / `streamDeviceProvision`，脚本路径与 `--seeds` 不能漂移，
 `Proc.stream` 不能又把 stdout 丢了）。App 单测 **74/0**。

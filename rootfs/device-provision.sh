@@ -176,6 +176,17 @@ warn() { log "WARN: $*"; }
 die()  { log "ERROR: $*"; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
+# POSIX 单引号转义：`it's` → `'it'\''s'`。
+#   ★ 为什么不用 `printf %q`：**Android 的 mksh 没有 %q**。真机实测（2026-09-16 05:36）：
+#     `printf: bad %q@20` —— 生成内层引导脚本的那一段当场把整个部署打死。
+#     容器/CI 里的 mksh（R59）有 %q，所以本地怎么测都测不出来 → 只能用不依赖 %q 的写法。
+#   sed 是 toybox 的，设备上必然有。
+squote() {
+    printf "'"
+    printf '%s' "$1" | sed "s/'/'\\\\''/g"
+    printf "'"
+}
+
 # 这里**故意不再有** bash 自我再执行守卫。
 # 原先的写法是：`[ -z "$BASH_VERSION" ] && { [ -x /system/bin/bash ] && exec bash …; die "需要 bash"; }`
 # —— 而真机上 /system/bin/bash 不存在、Termux 也没装，于是这个守卫直接把设备侧
@@ -184,33 +195,42 @@ have() { command -v "$1" >/dev/null 2>&1; }
 
 # ===========================================================================
 # 2. 参数
+#   ★ 参数解析必须在**函数**里：main 要保住原始 "$@"，才能把它们原样重放给内层
+#     （见 main 里生成引导脚本的那段）。函数里的 `shift` 只动函数自己的副本。
 # ===========================================================================
-while [ $# -gt 0 ]; do
-    case "$1" in
-        --seeds)   SEEDS_DIR="${2:-}"; shift 2 ;;
-        --node)    NODE_VERSION="${2:-}"; shift 2 ;;
-        --dsh)     DSH_NPM_TAG="${2:-}"; shift 2 ;;
-        --upper-mb) UPPER_SIZE_MB="${2:-}"; shift 2 ;;
-        --force)   FORCE=1; shift ;;
-        --clean)   CLEAN=1; shift ;;
-        --skip-base)    SKIP_BASE=1; shift ;;
-        --skip-runtime) SKIP_RUNTIME=1; shift ;;
-        --skip-dsh)     SKIP_DSH=1; shift ;;
-        -h|--help) sed -n '2,60p' "$SELF_PATH" >&2; exit 0 ;;
-        # 只生成内层引导脚本后退出（离线体检用：可在本机做语法校验，不碰设备）
-        --dump-inner) DUMP_INNER=1; shift ;;
-        # 内部使用：由生成的引导脚本调用（见 main 的说明）。不对外。
-        --inner-run) INNER_RUN=1; shift ;;
-        *) printf 'device-provision: 未知参数 %s\n' "$1" >&2; exit 2 ;;
-    esac
-done
+parse_args() {
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --seeds)   SEEDS_DIR="${2:-}"; shift 2 ;;
+            --node)    NODE_VERSION="${2:-}"; shift 2 ;;
+            --dsh)     DSH_NPM_TAG="${2:-}"; shift 2 ;;
+            --upper-mb) UPPER_SIZE_MB="${2:-}"; shift 2 ;;
+            --force)   FORCE=1; shift ;;
+            --clean)   CLEAN=1; shift ;;
+            --skip-base)    SKIP_BASE=1; shift ;;
+            --skip-runtime) SKIP_RUNTIME=1; shift ;;
+            --skip-dsh)     SKIP_DSH=1; shift ;;
+            -h|--help) sed -n '2,60p' "$SELF_PATH" >&2; exit 0 ;;
+            # 只生成内层引导脚本后退出（离线体检用：可在本机做语法校验，不碰设备）
+            --dump-inner) DUMP_INNER=1; shift ;;
+            # 内部使用：由生成的引导脚本调用（见 main 的说明）。不对外。
+            --inner-run) INNER_RUN=1; shift ;;
+            *) printf 'device-provision: 未知参数 %s\n' "$1" >&2; exit 2 ;;
+        esac
+    done
+}
 
 # ===========================================================================
 # 3. 素材定位（包清单 / profile 模板 / 安装脚本）
 # ===========================================================================
 locate_assets() {
     local cand=""
-    for base in "$SELF_DIR" "$SELF_DIR/.." "$SELF_DIR/../.." "$LH/bin" "/data/adb/modules/sunsetlinux/bin"; do
+    # 候选顺序（都是"base/profiles/…"的形式）：
+    #   · $SELF_DIR/..        模块里的 bin/ 旁边 => 模块根（模块包的正确位置）
+    #   · $LH/profiles        脚本被拷到 $LH/bin 后自足的那份（见 sync_scripts）
+    #   · 模块根 / 模块 bin   —— 从 $LH/bin 那份跑时也要能找到
+    for base in "$SELF_DIR" "$SELF_DIR/.." "$SELF_DIR/../.." "$LH" "$LH/bin" \
+                "/data/adb/modules/sunsetlinux" "/data/adb/modules/sunsetlinux/bin"; do
         [ -d "$base" ] || continue
         [ -z "$PKG_LIST_BASE" ] && [ -f "$base/profiles/base.packages" ] && PKG_LIST_BASE="$base/profiles/base.packages"
         [ -z "$PKG_LIST_RUNTIME" ] && [ -f "$base/profiles/runtime.packages" ] && PKG_LIST_RUNTIME="$base/profiles/runtime.packages"
@@ -279,8 +299,20 @@ preflight() {
     esac
 
     locate_assets
-    [ -n "$PKG_LIST_BASE" ] || warn "没找到 base.packages，base 层将只用内置最小集"
-    [ -n "$PKG_LIST_RUNTIME" ] || warn "没找到 runtime.packages，runtime 层将只装 Node+pnpm"
+    # ★ 素材必须齐 —— 缺了就是"跑 20 分钟才死"，所以在这里就拦住（fail fast）。
+    #   真机实测（2026-09-16）：模块 1.0.5 **压根没打包 profiles/**，于是
+    #   "素材：base.packages=未找到" 一路往下跑，base 层退化成内置最小集、
+    #   runtime 层只装 Node+pnpm，最后在 dsh 阶段才因为缺 web-profile 而 die。
+    #   判据：profiles/ 是模块的一部分，缺了说明模块包是残的（而不是用户操作问题）。
+    if [ -z "$PKG_LIST_BASE" ]; then
+        die "找不到 profiles/base.packages（模块包不完整？）。
+      已查找：$SELF_DIR/profiles/、$SELF_DIR/../profiles/、$SELF_DIR/../../profiles/、$LH/bin/profiles/
+      修：重装 ≥1.0.6 的模块 zip（1.0.5 及更早**没有随包带 profiles/**，设备侧构建必然失败）。"
+    fi
+    [ -n "$PKG_LIST_RUNTIME" ] || die "找不到 profiles/runtime.packages（模块包不完整？修法同上）。"
+    [ -n "$WEB_PROFILE_TEMPLATE" ] || die "找不到 profiles/web-profile（模块包不完整？修法同上）——dsh 层没有它装不出可用的 profile。"
+    [ -n "$INSTALL_WEB_PROFILE" ] || die "找不到 profiles/install-web-profile.sh（模块包不完整？修法同上）。"
+    log "素材齐全：base.packages / runtime.packages / web-profile / install-web-profile.sh"
 }
 
 # ===========================================================================
@@ -335,6 +367,18 @@ sync_scripts() {
     done
     cp -f "$SELF_PATH" "$BIN_DIR/device-provision.sh" 2>/dev/null || true
     chmod 0755 "$BIN_DIR"/*.sh 2>/dev/null || true
+    # profiles/：设备侧构建的素材（包清单 / web profile 模板）。**必须跟着落盘** ——
+    # 否则从 $LH/bin/device-provision.sh 再跑一次就"找不到 profiles"（真机踩过：
+    # 模块 1.0.5 压根没打包它们，1.0.6 才补上；这里再兜一层，让已安装副本自足）。
+    if [ -n "$PKG_LIST_BASE" ]; then
+        local pdir=""
+        pdir="$(dirname "$PKG_LIST_BASE")"
+        if [ -d "$pdir" ]; then
+            mkdir -p "$LH/profiles"
+            cp -rf "$pdir"/. "$LH/profiles"/ 2>/dev/null || true
+            log "已同步 profiles/ -> $LH/profiles（$(find "$LH/profiles" -type f 2>/dev/null | wc -l) 个文件）"
+        fi
+    fi
     log "已同步运行时脚本到 $BIN_DIR"
 }
 
@@ -518,12 +562,35 @@ in_chroot_net() {
 
 # write_manifest <out_file> —— 输出 "dev inode size mtime path" 并按路径排序
 manifest_path="$CACHE_DIR/.manifest"
+# 设备上的 find 是否支持 `-exec … {} +`（批量）？toybox 的版本差异在这点上不一样：
+#   支持 → 一条 find 批量 stat（快）；不支持 → 退化成每个文件一次 stat（慢，但正确）。
+# 不这么做的话，万一 toybox 不认 `+`，清单会是**空的** → "本层没有任何变更文件" →
+# 三层全空 → 白等半小时。宁可花一次 3 毫秒探测把这个不确定性钉死。
+MANIFEST_EXEC_STYLE=""
+manifest_exec_style() {
+    [ -n "$MANIFEST_EXEC_STYLE" ] && { printf '%s' "$MANIFEST_EXEC_STYLE"; return 0; }
+    local probe="$CACHE_DIR/.find-exec-probe" got=""
+    rm -rf "$probe" 2>/dev/null || true
+    mkdir -p "$probe" 2>/dev/null || true
+    : > "$probe/x" 2>/dev/null || true
+    got="$(find "$probe" -xdev -exec stat -c '%n' {} + 2>/dev/null || true)"
+    if [ -n "$got" ]; then MANIFEST_EXEC_STYLE="+"; else MANIFEST_EXEC_STYLE=";"; fi
+    rm -rf "$probe" 2>/dev/null || true
+    log "文件清单：find -exec … {} $MANIFEST_EXEC_STYLE（$([ "$MANIFEST_EXEC_STYLE" = "+" ] && printf '批量，快' || printf '逐个，慢但可用')）"
+    printf '%s' "$MANIFEST_EXEC_STYLE"
+}
+
 write_manifest() {
-    local out="$1"
+    local out="$1" style=""
+    style="$(manifest_exec_style)"
     (
         cd "$BUILD_DIR" || exit 1
         # -xdev：不跨文件系统（/proc /sys /dev 是挂载点，必须排除）
-        find . -xdev -exec stat -c '%d %i %s %Y %n' {} + 2>/dev/null
+        if [ "$style" = "+" ]; then
+            find . -xdev -exec stat -c '%d %i %s %Y %n' {} + 2>/dev/null
+        else
+            find . -xdev -exec stat -c '%d %i %s %Y %n' {} \; 2>/dev/null
+        fi
     ) | LC_ALL=C sort -k5 > "$out" || true
 }
 
@@ -1267,6 +1334,10 @@ run_stages() {
 }
 
 main() {
+    # ★ 参数解析放在这里（而不是脚本顶层）：main 必须保住原始 "$@"，
+    #   内层引导脚本要把它们**原样重放**（见下面生成引导脚本那段）。
+    parse_args "$@"
+
     mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || true
     : >> "$LOG_FILE" 2>/dev/null || true
 
@@ -1295,50 +1366,30 @@ main() {
     # 构建期的挂载（proc/sys/dev）放在**独立 mount namespace** 里做：
     # 进程退出时随 ns 一起消失，绝不污染宿主挂载表（这是"无残留"的保障）。
     #
-    # ★ 内层脚本为什么是"重新执行本文件"，而不是把函数文本塞进去：
-    #   旧写法用 `declare -f` 转储函数 —— 那是 **bash 专有**内置命令，而 unshare 里
-    #   起来的是一个新 shell 进程（设备上是 /system/bin/sh = mksh），于是真机上
-    #   必然 "declare: inaccessible or not found"。改成落一个几行的引导脚本
-    #   （导出环境 → exec 本文件 --inner-run）：函数永远来自同一份源码，
-    #   没有引号拼装风险，也不再要求 bash。落文件（而不是 -c 字符串）依然保留，
-    #   便于失败后直接重放调试。
+    # ★ 内层脚本为什么是"带着同样的命令行参数重新执行本文件"：
+    #   ① 旧写法用 `declare -f` 转储函数 —— bash 专有，mksh 下必然
+    #      "declare: inaccessible or not found"；
+    #   ② 改成"导出环境变量"后又踩了第二个坑：转义要用 `printf %q`，而
+    #      **Android 的 mksh 没有 %q**（真机实测 `printf: bad %q@20`，部署就此终止；
+    #      容器里的 mksh 有 %q，所以本地怎么测都测不出来）。
+    #   ③ 现在：**原样重放命令行参数**（外加 --inner-run）。既不需要 %q，也不需要
+    #      猜"哪些值要传过去" —— 用户用环境变量给的值本来就会被继承，命令行给的值
+    #      由参数重放覆盖。函数与常量都来自同一份源码。
     local inner="$CACHE_DIR/.provision-inner.sh"
     {
         printf '#!/system/bin/sh\n'
         printf '# 由 device-provision.sh 生成：在 unshare -m 内部执行的引导脚本\n'
-        printf '# 只做两件事：把外层算好的环境交给内层，然后重新执行本脚本（--inner-run）。\n'
-        printf '# 每层都从同一 Ubuntu base 解包（干净起点），用清单比对切出增量。\n'
+        printf '# 只做一件事：带着**同样的命令行参数**重新执行本脚本（外加 --inner-run）。\n'
+        printf '# 刻意不导出变量：Android 的 mksh 不支持 printf 的百分号转义格式\n'
+        printf '# （真机实测报 "printf: bad ...@20"），而重放参数既准确又不需要任何转义技巧。\n'
         printf 'set -eu\n'
-        printf '# 只用 set -eu：pipefail 由重新执行的那个脚本自己设（这里少一层依赖）。\n'
-        printf 'export LINUX_HOME=%q\n' "$LH"
-        printf 'export BUILD_DIR=%q\n' "$BUILD_DIR"
-        printf 'export LAYER_FORMAT=%q\n' "$LAYER_FORMAT"
-        printf 'export LOG_FILE=%q\n' "$LOG_FILE"
-        printf 'export FORCE=%q SKIP_BASE=%q SKIP_RUNTIME=%q SKIP_DSH=%q\n' \
-               "$FORCE" "$SKIP_BASE" "$SKIP_RUNTIME" "$SKIP_DSH"
-        printf 'export NODE_VERSION=%q DSH_NPM_TAG=%q DSH_PACKAGE=%q\n' \
-               "$NODE_VERSION" "$DSH_NPM_TAG" "$DSH_PACKAGE"
-        printf 'export PKG_LIST_BASE=%q PKG_LIST_RUNTIME=%q\n' "$PKG_LIST_BASE" "$PKG_LIST_RUNTIME"
-        printf 'export WEB_PROFILE_TEMPLATE=%q INSTALL_WEB_PROFILE=%q\n' "$WEB_PROFILE_TEMPLATE" "$INSTALL_WEB_PROFILE"
-        printf 'export UBUNTU_MIRROR=%q SEEDS_DIR=%q CACHE_DIR=%q LAYERS_DIR=%q\n' \
-               "${UBUNTU_MIRROR:-}" "$SEEDS_DIR" "$CACHE_DIR" "$LAYERS_DIR"
-        printf 'export UBUNTU_BASE_TARBALL=%q UBUNTU_BASE_URL=%q\n' "$UBUNTU_BASE_TARBALL" "$UBUNTU_BASE_URL"
-        printf 'export BASE_VERSION=%q RUNTIME_VERSION=%q DSH_VERSION=%q\n' "$BASE_VERSION" "$RUNTIME_VERSION" "$DSH_VERSION"
-        printf 'export LAYER_SPEC_VERSION=%q LAYER_EXT=%q EROFS_COMPRESS=%q EROFS_BLOCK_SIZE=%q\n' \
-               "$LAYER_SPEC_VERSION" "$LAYER_EXT" "$EROFS_COMPRESS" "${EROFS_BLOCK_SIZE:-4096}"
-        printf 'export TRANSPORT_COMPRESS_PRIMARY=%q TRANSPORT_COMPRESS_FALLBACK=%q\n' \
-               "$TRANSPORT_COMPRESS_PRIMARY" "$TRANSPORT_COMPRESS_FALLBACK"
-        printf 'export LAYER_RUNTIME_ENTRY_DIR=%q\n' "$LAYER_RUNTIME_ENTRY_DIR"
-        printf 'export LAYER_RUNTIME_ENTRY=%q LAYER_RUNTIME_SUPERVISE=%q LAYER_DSH_PROFILE_DIR=%q\n' \
-               "$LAYER_RUNTIME_ENTRY" "$LAYER_RUNTIME_SUPERVISE" "$LAYER_DSH_PROFILE_DIR"
-        printf 'export LAYER_NAMES_ORDER=%q\n' "${LAYERS_ORDER[*]}"
-        printf 'export UPPER_SIZE_MB=%q SUNSETLINUX_PORT=%q\n' "$UPPER_SIZE_MB" "${SUNSETLINUX_PORT:-3080}"
-        printf 'export SELF_DIR=%q SELF_PATH=%q\n' "$SELF_DIR" "$SELF_PATH"
-        printf 'export MANIFEST_BEFORE=%q\n' "$MANIFEST_BEFORE"
-        printf 'export INNER_RUN=1 CHROOT_MOUNTED=0\n'
+        printf 'exec %s %s --inner-run' "$(squote "$SH_BIN")" "$(squote "$SELF_PATH")"
+        for _a in "$@"; do
+            # 这两个只对外层有意义，别重放给内层
+            case "$_a" in --dump-inner|--inner-run) continue ;; esac
+            printf ' %s' "$(squote "$_a")"
+        done
         printf '\n'
-        # 交棒：重新执行同一个文件。函数、常量、层规格都来自那份源码本身。
-        printf 'exec %s %q --inner-run\n' "$SH_BIN" "$SELF_PATH"
     } > "$inner"
     chmod 0755 "$inner"
 

@@ -207,7 +207,7 @@ if [ -f "$PROV_BIN" ]; then
   else
     bad "device-provision.sh 用 mksh 跑不起来（装的还是旧版？）：
        $(printf '%s' "$PROV_OUT" | sed -n '1,2p' | tr '\n' ' ')
-       修：把模块升到 ≥1.0.5（新版 device-provision.sh 是 mksh 原生的）"
+       修：把模块升到 ≥1.0.6（新版是 mksh 原生 + profiles/ 随包；1.0.5 之前两者都缺）"
   fi
 else
   c_info "device-provision.sh 不在（模块没装？），跳过 mksh 探测"

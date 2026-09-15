@@ -11,6 +11,9 @@
  *      `tb: parameter not set` 死在**每个阶段的第一步**。这个 bug 只有真跑一次才会露头。
  *   3. 真机上既没有 Termux 也没有 `/system/bin/bash`：以前那个"没有 BASH_VERSION 就
  *      exec bash，否则 exit 1"的守卫，等于把设备侧首次部署彻底堵死。
+ *   4. **Android 的 mksh 没有 `printf %q`**（真机 `printf: bad %q@20`）：生成内层引导脚本
+ *      那一段当场把部署打死。容器里的 mksh（R59）**有** %q，所以本地怎么测都测不出来 ——
+ *      这类"宿主有、设备没有"的差异只能靠静态断言 + 不依赖它的写法一起守。
  *
  * ## 它断言什么
  *   · 静态：不再有 `declare -f`、不再有 bash 自我再执行守卫、文件头写明 mksh 原生；
@@ -68,6 +71,9 @@ console.log('\n== 静态：不再依赖 bash 的写法 ==');
   // 只看**代码**：注释里会提到这些旧写法（那是在解释为什么不能再用），不算违例
   const code = src.split('\n').filter((l) => !/^\s*#/.test(l)).join('\n');
   ok(!/declare -f/.test(code), '代码里没有 `declare -f`（bash 专有，mksh 下 not found）');
+  // Android 的 mksh **没有 printf %q**（真机实测 "printf: bad %q@20"），本地 mksh 有 —— 
+  // 所以这条只能静态守：代码里出现 %q 就等于"真机上会死"。
+  ok(!/%q/.test(code), '代码里没有 `printf %q`（Android 的 mksh 不支持它）');
   ok(!/BASH_VERSION/.test(code), '代码里没有 BASH_VERSION 自我再执行守卫');
   ok(!/exec\s+[^\n]*\/bash\b/.test(code), '没有 exec 到 /system/bin/bash');
   ok(/mksh/.test(src), '文件头写明了 mksh 要求（后来的人不会再"顺手"用回 bash）');
@@ -102,8 +108,13 @@ try {
   ok(!/declare -f/.test(inner), '引导脚本里没有函数转储（没有 declare -f）');
   ok(inner.split('\n').length < 80, `引导脚本很短（实际 ${inner.split('\n').length} 行；旧写法是 1300 行）`);
   // ★ 再执行会丢掉命令行意图：--seeds / --force 必须原样导出过去
-  ok(new RegExp(`SEEDS_DIR=${customSeeds}`).test(inner), '命令行 --seeds 穿过了再执行（SEEDS_DIR 已导出）');
-  ok(/export FORCE=1/.test(inner), '命令行 --force 穿过了再执行（FORCE=1 已导出）');
+  // ★ 内层靠"原样重放命令行参数"继承意图（不是导出环境变量 —— 那需要 %q 转义，
+  //   而 Android 的 mksh 没有 %q）。所以这里断言的是参数本身出现在引导脚本里。
+  ok(inner.includes(customSeeds), '命令行 --seeds 穿过了再执行（原样重放参数）');
+  ok(/--force/.test(inner), '命令行 --force 穿过了再执行（原样重放参数）');
+  const innerCode = inner.split('\n').filter((l) => !/^\s*#/.test(l)).join('\n');
+  ok(!/%q/.test(innerCode), '引导脚本里没有 %q 转义（Android mksh 不支持；注释里提到不算）');
+  ok(!/^export /m.test(inner), '引导脚本不再导出一堆变量（改成参数重放）');
   ok(/语法自检（.*）-n/.test(out.replace(/\u001b\[[0-9;]*m/g, '')) || /-n）/.test(out), '--dump-inner 顺带做了语法自检');
 } finally {
   /* 保留到内层测试之后再删 */
@@ -128,6 +139,25 @@ for (const shell of ['mksh', 'bash']) {
   ok(bad.length === 0, bad.length
     ? `${shell}：出现了 shell 级错误：\n       ${bad.slice(0, 4).join('\n       ')}`
     : `${shell}：没有任何 shell 级错误（not found / parameter not set / syntax error…）`);
+}
+
+// ---------------------------------------------------------------------------
+// ★ 参数重放必须**原样**穿过：含空格 + 单引号的种子目录是最容易被打碎的那种值。
+//   真机踩过的是"转义方式本身在设备上不存在"（%q），所以这里连"转义结果对不对"一起验：
+//   跑一遍生成的引导脚本，看它报错时说的路径是不是**一模一样**。
+console.log('\n== 参数重放：含空格与单引号的路径（转义必须原样穿过） ==');
+{
+  const odd = join(tmp, "od'd seeds 目录");
+  mkdirSync(odd, { recursive: true });
+  const { code } = run('mksh', ['--seeds', odd, '--dump-inner'], { LINUX_HOME: lh });
+  ok(code === 0, `--dump-inner 支持怪路径（退出码 ${code}）`);
+  const inner = readFileSync(innerPath, 'utf8');
+  ok(inner.includes("od'\\''d seeds"), '引导脚本里对单引号做了 POSIX 转义');
+  const r = spawnSync('mksh', [innerPath], { encoding: 'utf8', env: { ...process.env, LINUX_HOME: lh } });
+  const out = `${r.stdout ?? ''}${r.stderr ?? ''}`.replace(/\u001b\[[0-9;]*m/g, '');
+  ok(out.includes(odd), `内层拿到的种子目录与命令行完全一致（没有被转义打碎）`);
+  ok(/缺少 Ubuntu base tarball/.test(out), '仍以可读的缺种子错误收场（说明参数真的走到了 extract_base）');
+  rmSync(odd, { recursive: true, force: true });
 }
 
 rmSync(tmp, { recursive: true, force: true });

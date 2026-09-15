@@ -147,6 +147,25 @@ done
 [ "$missing" -eq 0 ] || die "有必需脚本缺失，拒绝打包（否则模块装上去是残缺的）"
 log "bin/ 由目录派生：$bin_count 个 runtime/root 脚本 + layer-spec.sh + $((${#BIN_COMMON[@]})) 个 common"
 
+# ---- profiles/：设备侧构建的"素材"（包清单 / web profile 模板 / 安装脚本）----
+# ★ 为什么必须进包（真机实测，2026-09-16）：`device-provision.sh` 在设备上就是靠
+#   `$SELF_DIR/../profiles/…` 找这些素材的。1.0.5 及更早**没有打包它们**，于是真机上：
+#     · `素材：base.packages=未找到` → base 层退化成内置最小集
+#     · `素材：runtime.packages=未找到`
+#     · 跑到 dsh 阶段才 `die "缺少 profile 素材"` —— 用户已经白等 20 分钟。
+#   所以这里既复制、也**断言**（跟 bin/ 的必需项断言同一个道理：残包不许流出去）。
+PROFILES_SRC="$REPO_DIR/rootfs/profiles"
+[ -d "$PROFILES_SRC" ] || die "找不到 $PROFILES_SRC —— 模块必须随包携带 profiles/"
+mkdir -p "$STAGE/profiles"
+cp -rf "$PROFILES_SRC"/. "$STAGE/profiles/"
+chmod -R a+rX "$STAGE/profiles" 2>/dev/null || true
+for f in base.packages runtime.packages install-web-profile.sh; do
+    [ -f "$STAGE/profiles/$f" ] || { log "profiles/ 缺文件：$f"; missing=1; }
+done
+[ -d "$STAGE/profiles/web-profile" ] || { log "profiles/ 缺目录：web-profile/"; missing=1; }
+[ "$missing" -eq 0 ] || die "profiles/ 不全（设备侧构建会失败/退化），拒绝打包"
+log "profiles/ 铺入 $(find "$STAGE/profiles" -type f | wc -l) 个文件（base.packages / runtime.packages / web-profile / install-web-profile.sh）"
+
 # ---- WebUI（KernelSU 模块 WebUI：模块根必须有 webroot/index.html）-----------
 # KernelSU 管理器会在模块详情页打开 webroot/index.html（Magisk 需 MMRL 等第三方宿主）。
 # **必须有**：没有它 WebUI 入口就不存在，而"不开 App 也能启停/看状态/更新"是用户明确要的能力。

@@ -17,8 +17,10 @@ android {
         // 0.2.0：内置终端、DSH 入口上顶栏、更新进侧边栏、内置官方频道。
         // 0.2.1：部署向导缺层时会去跑 device-provision.sh（此前只调 linuxctl provision，
         //        而那个命令**不构建层** —— 真机上向导必然以 "provision 失败" 收场）。
-        versionCode = 3
-        versionName = "0.2.1"
+        // 0.2.2：把模块版本提示从 ≥1.0.5 更正为 ≥1.0.6（1.0.5 在真机上还有两个坑：
+        //        mksh 没有 printf %q、profiles/ 没随包）。
+        versionCode = 4
+        versionName = "0.2.2"
     }
 
     // ────────────────────────────────────────────────────────────────────────

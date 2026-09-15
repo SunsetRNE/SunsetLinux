@@ -92,8 +92,9 @@ sh /data/adb/modules/sunsetlinux/bin/device-provision.sh --seeds /data/sunsetlin
 
 - 种子（`ubuntu-base-*.tar.gz` + Node 官方 arm64 包）放 `--seeds` 指的目录；
   没有的话脚本会打印下载 URL，或直接用 `oneshot-setup.sh --run`（它会先下种子）。
-- ★ **不需要 bash、不需要 Termux**（模块 1.0.5 起 `device-provision.sh` 是 mksh 原生的，
-  设备自带的 `sh` 直接跑）。装的是旧模块会看到「需要 bash」——升到 1.0.5 即可。
+- ★ **不需要 bash、不需要 Termux**（模块 1.0.6 起 `device-provision.sh` 是 mksh 原生的，
+  设备自带的 `sh` 直接跑）。装的是旧模块会有两种表现：**1.0.5 及更早**报「需要 bash」；
+  **1.0.5** 还能一路跑到 `printf: bad %q`（Android 的 mksh 没有 `%q`）——升到 1.0.6 即可。
 - 这一步要跑 apt + npm，**十几分钟到半小时**；日志在 `/data/sunsetlinux/cache/provision.log`。
 
 ### 方式 C：从已发布的层安装（最快）

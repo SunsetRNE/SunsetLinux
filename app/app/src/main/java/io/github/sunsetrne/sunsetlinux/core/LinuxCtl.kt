@@ -246,7 +246,7 @@ class LinuxCtl(private val context: Context, val mode: EnvMode) {
      * - **只有 root 模式**：它要真 chroot + mount + `unshare -m`，proot 里做不到；
      * - 用 `sh <脚本>` 而不是直接 `exec` 它：脚本住在 `/data/adb/modules/...`（vfat/mount
      *   不一定带执行位），而它本身第一行就是 `#!/system/bin/sh`；设备上**没有 bash**
-     *   （1.0.5 起脚本已 mksh 原生，见根目录脚本的文件头）。
+     *   （1.0.6 起脚本是 mksh 原生 + profiles/ 随包，见那个脚本的文件头）。
      * - 种子目录：默认 `$LINUX_HOME/seeds`（`device-provision.sh` 的默认值也是它，
      *   两边一致）；脚本对已有层是幂等的（存在即跳过），所以向导可以放心一直调它。
      *
@@ -280,7 +280,7 @@ class LinuxCtl(private val context: Context, val mode: EnvMode) {
             candidates.forEach { append(' ').append(shQuote(it)) }
             append("; do [ -f \"\$c\" ] && { prov=\"\$c\"; break; }; done; ")
             append("if [ -z \"\$prov\" ]; then ")
-            append("echo '找不到 device-provision.sh：请先安装/升级 KernelSU 模块（≥1.0.5），或检查模块是否被禁用' >&2; ")
+            append("echo '找不到 device-provision.sh：请先安装/升级 KernelSU 模块（≥1.0.6），或检查模块是否被禁用' >&2; ")
             append("exit 127; fi; ")
             append("echo \"# device-provision.sh：\$prov（种子目录：").append(seeds).append("）\"; ")
             append("exec /system/bin/sh \"\$prov\" --seeds ").append(shQuote(seeds))

@@ -9,9 +9,9 @@
 ## 〇、一分钟版
 
 - 分支：`main` = `beta` = **本次那个提交**；`channel` = `0d1efff`；`gh-pages` 由 CI 独占。
-- 发布：`/stable/` **run 44**、`/beta/` **run 45**，都是 **`4d53d02`**：
-  **模块 1.0.5**（mksh 原生）+ **App 0.2.1**（向导会真的建层）。
-  上一格 `abb321f` 是 run 42/43（模块 1.0.5 + App 0.2.0）。
+- 发布：`/stable/` **run 44**、`/beta/` **run 45**，都是 **`4d53d02`**：模块 **1.0.5** + App **0.2.1**。
+  再往前一格 `abb321f` 是 run 42/43（模块 1.0.5 + App 0.2.0）。
+  **本次再推一格：模块 `1.0.6` + App `0.2.2`**（真机第一跑暴露的两个坑，见 §一 第 14 条）。
 - **下载页（别点 GitHub Releases，那里永远是空的）**：
   <https://sunsetrne.github.io/SunsetLinux/> → `/stable/`（正式）· `/beta/`（预发布）。
 - **内置官方频道的公开指纹**（与 `core/Prefs.kt` 里写死的那把是同一把，App 自带的
@@ -62,6 +62,7 @@ CI 四条线路：① `ci.yml` 回归门禁（shell / node / android 三并行�
 | 11 | `bfabbc8` | 把"CI 不产出 proot bundle"**说出来**（不再静默跳过） | job summary 有 ⚠️/✅ 分支 |
 | 12 | *(本次)* | **`device-provision.sh` mksh 化 —— 拆掉设备侧首次部署的 bash 依赖**（下一节详述） | 新增 `tools/provision-selftest.mjs`（28 条，进 CI）；mksh+bash 下真跑内层到「准备 base 阶段」；模块 **1.0.5** |
 | 13 | *(本次)* | **修 App「首次部署向导」：缺层时真的去建层** —— 它原先只调 `linuxctl provision`，而那个命令只建目录/可写层/配置、**从不构建层**，于是真机上向导必然以"provision 失败"收场；现在缺层时改调 `device-provision.sh`（root 模式），proot 模式明确指向频道 | 新增 `ProvisionPlanTest`（9 条）+ `ProvisionWiringTest`（3 条）；顺带修 `Proc.stream` 把 stdout 丢掉的老毛病（`missing_layers` 就在 stdout）；App 单测 **74/0**；App 0.2.1/3 |
+| 14 | *(本次)* | **真机第一跑（05:36）暴露的两个坑**：① **Android 的 mksh 没有 `printf %q`** → 生成内层引导脚本那一段当场 `printf: bad %q@20`，整个部署就此终止（容器里的 mksh R59 **有** %q，所以本地测不出来）；② **模块从来没打包 `rootfs/profiles/`** → 真机日志 `素材：base.packages=未找到`，会跑到 dsh 阶段才 die（白等 20 分钟） | 改法：内层改成**原样重放命令行参数**（彻底不依赖 %q）；mkmodule 打包 profiles/ 并加必需项断言；preflight 对素材做 **fail-fast**；顺带加 `find -exec … {} +` 的**能力探测+降级**；新增 `squote()`（POSIX 单引号转义，sed 实现）。provision 冒烟 **35 条**；模块 **1.0.6**、App **0.2.2/4** |
 
 ### 第 12 条到底修了什么 —— 一句话：**真机上根本跑不了首次部署**
 
@@ -85,6 +86,53 @@ CI 四条线路：① `ci.yml` 回归门禁（shell / node / android 三并行�
 | `declare -f` 转储函数生成内层构建脚本 | `declare` 是 bash 内建；mksh 下 `declare: inaccessible or not found`，而 `unshare -m` 里跑的正是 mksh | 内层引导脚本改成 **`exec 本文件 --inner-run`**（函数永远来自同一份源码；29 行，不再有引号拼装风险） |
 | 裸 `local tb` + `set -u` | **mksh 的 `local x` 是"未设置"，bash 的是"空"** → `[ -n "$tb" ]` 在 mksh 下 `tb: parameter not set`，**每个阶段第一步就死** | 30 处裸 `local` 全部补 `=""`（这类问题只在真跑时暴露，语法闸门看不见） |
 
+### 真机第一跑（2026-09-16 05:36，模块 1.0.5）暴露的第三个坑：**Android 的 mksh 没有 `printf %q`**
+
+用户按 §二·1 跑了（好消息：**bash 那道坎确实过去了** —— 前置检查、建目录树、找种子全过），
+然后死在：
+
+```
+说明：每个层阶段都会重新解包 base，保证起点干净（共 3 次，约 1-2 分钟）
+printf: bad %q@20
+```
+
+`@20` 正好是 `printf 'export LINUX_HOME=%q\n'` 里 `%q` 的位置 —— **生成内层引导脚本那一段**。
+也就是说：容器/CI 里的 mksh（R59）**有** `%q`，Android 自带的 mksh **没有**。这类"宿主有、设备没有"
+的差异，`mksh -n` 和本地跑全部测不出来（本地跑得好好的）。
+
+改法：**不再导出任何变量，改成"原样重放命令行参数"** ——
+引导脚本只有 8 行：`exec '/system/bin/sh' '<脚本>' --inner-run <原始参数…>`。
+- 不需要 `%q`：参数用 `squote()`（POSIX 单引号转义，sed 实现）逐个别起来；
+- 不需要猜"哪些值要传过去"：命令行给的值由参数重放覆盖，环境变量给的值本来就会被继承；
+- `--dump-inner`/`--inner-run` 两个只对外层有意义的开关不重放。
+
+回归里加了**含空格 + 单引号的种子目录**来回跑一遍，断言内层拿到的路径与命令行**逐字一致**
+（"转义在设备上不存在"这类问题，只有把怪值真的送过去一次才能钉住）。
+
+### 同一个日志里还有第二个坑：模块**从来没打包 `profiles/`**
+
+```
+素材：base.packages=未找到
+素材：runtime.packages=未找到
+素材：web-profile=未找到
+```
+
+`device-provision.sh` 的素材（包清单 / web profile 模板 / 安装脚本）在 `rootfs/profiles/`，
+它按 `$SELF_DIR/../profiles/` 找 —— 而 `mkmodule.sh` **只铺了 bin/、lib/、webroot/**，
+`profiles/` 从来没进过模块包。后果：base 层退化成"内置最小集"、runtime 层只装 Node+pnpm，
+最后在 dsh 阶段因为缺 web-profile 才 `die`（那时已经跑了 20 分钟）。
+
+改法三件：
+1. `mkmodule.sh` 打包 `profiles/`（并像 bin/ 一样做**必需项断言**，残包不许流出去）；
+2. `preflight` 对素材做 **fail-fast**：缺了当场 die，并写明"重装 ≥1.0.6 的模块 zip"；
+3. `sync_scripts` 顺手把 `profiles/` 也落到 `$LINUX_HOME/profiles`，
+   这样"已安装副本"（`$LH/bin/device-provision.sh`）也自足；`locate_assets` 的候选路径补上
+   `$LH`、`$LH/profiles`、模块根。
+
+顺带加固一处同类风险：文件清单用的 `find -exec … {} +` 在 toybox 上**版本差异**，
+真不认 `+` 的话清单会是空的（三层全空 → 再白等半小时）。现在启动时**探测一次**，
+不认就降级成逐个 `stat`（慢但正确），并把选择打进日志。
+
 顺带修掉一个**再执行传参**缺陷：内层是重新执行本文件，`--seeds/--force/--skip-*` 必须能从环境继承
 （原来 `SEEDS_DIR="$LH/seeds"` 是**无条件赋值**，会把 `--seeds` 静默吞掉）。
 
@@ -103,13 +151,13 @@ CI 四条线路：① `ci.yml` 回归门禁（shell / node / android 三并行�
 ## 二、需要你操作的（按优先级）
 
 1. **真机把层建出来**（唯一挡着 root 模式 + 终端/DSH 全链路验收的事）：
-   - 先装**模块 1.0.5**（KernelSU 管理器）：`…/stable/sunsetlinux-module-1.0.5.zip`，装完**重启一次**；
-     （设备上现在还是 1.0.3 —— 上一轮说要装 1.0.4 但没装成；1.0.5 才是"能在真机上跑"的那一版）
+   - 先装**模块 1.0.6**（KernelSU 管理器）：`…/stable/sunsetlinux-module-1.0.6.zip`，装完**重启一次**；
+     （设备上 05:39 跑的是 **1.0.5** —— 它能过前置检查，但会死在下面第 14 条那两个坑上；**1.0.6 才是真能跑完的**）
    - 然后**在 root 终端里**跑（KernelSU 管理器的终端 / MT 管理器「以 root 执行」/ `adb shell su`）：
      ```bash
      sh /data/adb/modules/sunsetlinux/bin/device-provision.sh --seeds /data/sunsetlinux/seeds
      ```
-     ★ **不需要 bash、不需要 Termux**（1.0.5 起是 mksh 原生的；设备上实测两个都没有）。
+     ★ **不需要 bash、不需要 Termux**（1.0.6 起是 mksh 原生 + profiles/ 随包；设备上实测 bash/Termux 都没有）。
      种子**已经下好了**（ubuntu-base 29.9 MB + Node 29.8 MB 都在 `/data/sunsetlinux/seeds/`）；
      跑完 `linuxctl start`，再 `linuxctl doctor`。
    - 或者用 `sh $MODDIR/bin/oneshot-setup.sh --run`（体检 → 缺种子就下 → 再跑上面那条）。
@@ -210,6 +258,14 @@ curl -s https://sunsetrne.github.io/SunsetLinux/stable/index.json
 - **别再假设设备上有 bash 或 Termux**：这台机器两个都实测没有。设备侧脚本一律按
   `/system/bin/sh`（mksh）写，`mksh -n` 只是最低门槛，**必须真跑一次**（`tools/provision-selftest.mjs` 就是干这个的）。
 - **只看 `mksh -n` 不够**：`/dev/tcp`、`local x` + `set -u` 都属于"语法过、运行时废"。
+- **别信"本地 mksh 能跑"**：容器/CI 的 mksh（R59）**有** `printf %q`，**Android 的没有**
+  （真机 `printf: bad %q@20`）。凡是"宿主有、设备没有"的能力，一律**别用**，或先探测再降级
+  （`find -exec … {} +` 就是这么处理的）。判据永远是真机日志，不是本地绿灯。
+- **模块包缺素材 = 20 分钟白等**：`device-provision.sh` 要的 `profiles/` 是模块的一部分，
+  漏打包时不要"警告一下继续跑" —— 要么打进包（`mkmodule.sh` 的必需项断言），
+  要么在 **preflight 就 die**。真机实测：1.0.5 缺 profiles，用户跑到 dsh 阶段才失败。
+- **"已安装副本"要自足**：脚本被拷到 `$LINUX_HOME/bin` 后再跑一次时，`$SELF_DIR/..` 已经不是
+  模块根了 —— 素材要么一起同步过去，要么把模块根也列进候选路径（本次两条都做了）。
 - **`linuxctl provision` 不会构建层**：它只建目录 / upper.img / 写 config，层要么来自频道、
   要么来自 `device-provision.sh`。App 的「首次部署向导」现在走的正是它 → 见 §三·0。
 - **`dist/` 是 gitignore 的** → CI 拿不到本地产物；发布步骤里依赖本地构建物的，必须显式说"本次没有"，
