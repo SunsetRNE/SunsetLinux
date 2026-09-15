@@ -104,7 +104,11 @@ jobs:
               *) echo "  [跳过] 相对 URL：$u"; continue ;;
             esac
             # 用 Range 请求只取 1 字节：比 HEAD 更可靠（有些 CDN 不支持 HEAD）
-            code="$(curl -s -o /dev/null -w '%{http_code}' -r 0-0 --max-time 30 "$u" || echo 000)"
+            # ★ 必须带 -L：GitHub Release 资产地址（/releases/download/<tag>/<file>）会
+            #   302 跳到 release-assets.githubusercontent.com，不带 -L 时拿到的是 **302**
+            #   而不是 206 —— 会把完全正常的清单判成"层下载不到"而拒发（实测：
+            #   同一 URL 无 -L 得 302、加 -L 得 206）。托管在对象存储/CDN 时 -L 也无害。
+            code="$(curl -sL -o /dev/null -w '%{http_code}' -r 0-0 --max-time 30 "$u" || echo 000)"
             case "$code" in
               200|206) echo "  [可下载] $code  $u" ;;
               *)       echo "  [不可用] $code  $u"; fail=1 ;;
