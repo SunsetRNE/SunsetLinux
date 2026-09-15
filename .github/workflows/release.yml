@@ -386,13 +386,26 @@ jobs:
             echo "_本说明由 CI 生成（每次发布重写）；commit \`${{ github.sha }}\`，run #${{ github.run_number }}。_"
           } > dist/_release-notes.md
 
+          # 资产清单：`dist/_publish/` 里除下载页 HTML 之外的全部（index.html 是给 Pages 的，
+          # 挂到 Release 上只会让人困惑；下面那句 delete-asset 是给老 Release 清历史的）
+          ASSETS=""
+          for f in "$OUT"/*; do
+            [ -f "$f" ] || continue
+            case "$(basename "$f")" in index.html) continue ;; esac
+            ASSETS="$ASSETS $f"
+          done
+          if [ -z "${ASSETS# }" ]; then echo "::error::没有可发布的资产（dist/_publish 是空的？）"; exit 1; fi
+
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "Release $TAG 已存在 → 覆盖资产 + 刷新说明（幂等，不新建条目）"
-            gh release upload "$TAG" "$OUT"/* --clobber
+            # shellcheck disable=SC2086
+            gh release upload "$TAG" $ASSETS --clobber
             gh release edit "$TAG" --title "$TITLE" --notes-file dist/_release-notes.md
+            gh release delete-asset "$TAG" index.html --yes >/dev/null 2>&1 || true
           else
             echo "新建 Release $TAG"
-            gh release create "$TAG" --title "$TITLE" --notes-file dist/_release-notes.md "$OUT"/*
+            # shellcheck disable=SC2086
+            gh release create "$TAG" --title "$TITLE" --notes-file dist/_release-notes.md $ASSETS
           fi
           echo "- Release：https://github.com/$REPO/releases/tag/$TAG" >> "$GITHUB_STEP_SUMMARY"
 
