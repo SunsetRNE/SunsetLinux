@@ -9,8 +9,9 @@
 ## 〇、一分钟版
 
 - 分支：`main` = `beta` = **本次那个提交**；`channel` = `0d1efff`；`gh-pages` 由 CI 独占。
-- 发布：`/stable/` **run 42**、`/beta/` **run 43** 已发布 `abb321f`，**模块 1.0.5**；
-  随后 App 侧修复再推一次 → **App 0.2.1**（run 号见下载页）。
+- 发布：`/stable/` **run 44**、`/beta/` **run 45**，都是 **`4d53d02`**：
+  **模块 1.0.5**（mksh 原生）+ **App 0.2.1**（向导会真的建层）。
+  上一格 `abb321f` 是 run 42/43（模块 1.0.5 + App 0.2.0）。
 - **下载页（别点 GitHub Releases，那里永远是空的）**：
   <https://sunsetrne.github.io/SunsetLinux/> → `/stable/`（正式）· `/beta/`（预发布）。
 - **内置官方频道的公开指纹**（与 `core/Prefs.kt` 里写死的那把是同一把，App 自带的
@@ -18,10 +19,17 @@
   - URL：`https://sunsetrne.github.io/SunsetLinux/channel/channel.json`
   - ed25519 公钥：`YXoAcwa3clZCRd7+DlIHMS3cQ40HlyXVSKblvX5Ye1M=`
   - 指纹：`ed25519:06:d0:c4:4d:29:1c:ef:66`
-- **你自己那台机器（2026-09-16 05:10 实测）**：模块还是 **1.0.3**；`/data/sunsetlinux/` 里
-  `layers/` **是空的**、`upper.img`（8 GiB 稀疏）与 `etc/state.json` 是 `linuxctl provision` 建的
-  （它不构建层）、`seeds/` 里两个种子**都已下好**（29.9 MB + 29.8 MB）→ root 模式起不来、
-  内置终端没环境可连；**下一步就是 §二·1 那两条命令**（装 1.0.5 → 用自带 `sh` 跑 device-provision.sh）。
+- **你自己那台机器（2026-09-16 05:10~05:30 实测，root shell 逐条核过）**：
+  - 模块 **1.0.3**、App **0.2.0/2**（都该升：1.0.5 + 0.2.1）；
+  - `/data/sunsetlinux/layers/` **是空的**；`upper.img`（8 GiB 稀疏）与 `etc/state.json`
+    是 `linuxctl provision` 建的（那个命令**不构建层**）；
+  - `seeds/` 里两个种子**都在、且与官方校验和逐字节一致**：
+    `ubuntu-base-24.04.3-base-arm64.tar.gz` = `7b2dced6…b048`、`node-v24.21.0-linux-arm64.tar.xz`
+    = `6ad1325e…9ad2`（对着 cdimage.ubuntu.com / nodejs.org 的 SHA256SUMS 核的）；
+  - 构建要用的设备侧工具**齐全**：`unshare`/`chroot`/`mount`（toybox）、`mkfs.erofs`、`mke2fs`、
+    `tar`、`sha256sum`、`awk` 都在；**只有 zstd 没有**（所以分发走 `.gz` 回退，这是预期）；
+  - → **下一步就是 §二·1**：装模块 1.0.5 → 重启 → 装 App 0.2.1 → 点「首次部署向导」
+    （或自己敲那条 `sh …/device-provision.sh --seeds /data/sunsetlinux/seeds`）。
 
 **分支与 CI 拓扑**（细节见 `docs/release-ci.md` §二·五）：
 
