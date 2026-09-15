@@ -215,6 +215,60 @@ tools/channel/sunsetlinux-channel keygen --out-dir ~/.sunsetlinux-keys
 * 私钥用 openssl 生成的也行（PKCS#8 Ed25519 PEM 即可，`sign.mjs` 能读）。
 * **私钥不要提交进 git、不要贴群里**。备份到离线介质。
 
+#### ★ 两个 key 分别放在哪（最容易混的一件事）
+
+频道体系里有**两个都叫 "key" 的东西**，一个必须保密、一个必须公开：
+
+| | 私钥 | 公钥 |
+|---|---|---|
+| 文件 | `channel.key`（PKCS#8 PEM，0600） | `channel.pub`（raw 32 字节 base64） |
+| 放哪 | **GitHub Secret `CHANNEL_SIGNING_KEY`**（只有 CI 要用到时）＋ 你的**离线备份** | **提交进仓库**：`channel` 分支的 `channel/channel.pub`；并随 URL 一起**发给用户** |
+| 能进仓库吗 | ❌ 绝对不行（`.gitignore` 已挡 `*.key` / `channel.key` / `*.pem` / `.sunsetlinux-keys/`） | ✅ 本来就要进（它**不是**秘密；用户拿它当信任根） |
+| 用途 | 签 `channel.json` 的原始字节 | 验签；用户核对**指纹**防中间人 |
+
+一句话记法：**Secret 里放私钥，仓库里放公钥，指纹发给人。**
+
+#### 公钥"怎么获取"（私钥进了 Secret / 丢了 channel.pub 时）
+
+公钥**可以从私钥推导出来**，不需要重新生成密钥对 —— 重新生成等于换了身份，
+所有用户手里的旧公钥会立刻失效（他们会收到"签名者变了"）。
+
+```bash
+# 打印公钥与指纹（stdout 只给公钥一行，方便脚本取用）
+tools/channel/sunsetlinux-channel pub-of --key ~/.sunsetlinux-keys/channel.key
+
+# 顺便写回文件（补回丢失的 channel.pub）
+tools/channel/sunsetlinux-channel pub-of --key ~/.sunsetlinux-keys/channel.key \
+    --write ~/.sunsetlinux-keys/channel.pub
+
+# 机器可读
+tools/channel/sunsetlinux-channel pub-of --key channel.key --json
+# → {"pubkey":"…","fingerprint":"ed25519:a8:e2:…","key_file":"…"}
+```
+
+> ⚠️ 实现细节（踩过）：不能把**私钥对象**直接丢给 `keyObjectToRawPub()` ——
+> 它导出的是 SPKI（公钥编码），私钥只能导出 PKCS#8，会报
+> `options.type is invalid. Received 'spki'`。必须先 `crypto.createPublicKey(priv)`。
+
+#### 核对"CI 里的私钥"与"仓库里的公钥"是不是同一对
+
+这一步很关键：**两者不匹配的话，CI 签出来的清单用户一个都验不过**，而报错只会显示"验签失败"，
+很难联想到是密钥对不上。核对办法就是比指纹：
+
+```bash
+# ① 仓库里公钥的指纹（channel 分支上那份）
+tools/channel/sunsetlinux-channel pub-of --pub channel/channel.pub
+
+# ② 你手里私钥的指纹（应完全一致）
+tools/channel/sunsetlinux-channel pub-of --key ~/.sunsetlinux-keys/channel.key 2>&1 | grep 指纹
+```
+
+两条命令打印的 `ed25519:xx:xx:…` 必须**一模一样**；不一致就说明 Secret 里的私钥与仓库里的
+公钥不是同一对，先换掉其中一个再发布。
+
+CI 侧（`channel` 分支的工作流）本来就会做这件事：它用 Secret 里的私钥签名，再用仓库里的
+`channel/channel.pub` **走另一条代码路径独立验签** —— 对不上就直接失败，不会发出坏频道。
+
 ### 2.2 构建要发布的层
 
 * 想发**自己的 DSH 版本**：在 Linux 主机/CI 上跑
@@ -590,6 +644,7 @@ tools/channel/sunsetlinux-channel publish-channel \
 | `sunsetlinux-channel keygen` | 生成 Ed25519 频道密钥对（`channel.key` 0600 / `channel.pub` base64） |
 | `sunsetlinux-channel gen-manifest` | 扫描层文件 → 生成冻结 schema 的 `channel.json`（主/回退产物的 sha256+size、裸镜像 `sha256_raw`/`size_raw`） |
 | `sunsetlinux-channel sign` | 对 `channel.json` 原始字节签名 → `channel.json.sig` |
+| `sunsetlinux-channel pub-of` | 从**私钥**推导公钥与指纹（`--key`），或只查一个公钥的指纹（`--pub`）；用于"私钥进了 Secret/丢了 channel.pub"以及核对密钥对 |
 | `sunsetlinux-channel verify` | 验签 + 主/回退产物 sha256/size + **解压复算** `sha256_raw`/`size_raw` + zstd 窗口合规；退出码 0/1（`--no-raw-recompute` 可跳过复算，会明确提示） |
 | `sunsetlinux-channel channels …` | `list/add/remove/set/enable/disable/check/init` 管理 `channels.json` |
 | `sunsetlinux-channel publish-check` | 发布前体检（`--strict` 语义）：层两种产物齐备 + 验签 + sha256 + 解压复算 + zstd 窗口 |

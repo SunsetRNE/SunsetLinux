@@ -49,6 +49,7 @@ sunsetlinux-channel —— sunsetlinux 频道（更新源）工具链
 
 子命令：
   keygen            生成 Ed25519 频道密钥对：channel.key(0600) + channel.pub(base64)
+  pub-of            从**私钥**推导公钥与指纹（私钥进了 CI Secret / 丢了 channel.pub 时用）
   gen-manifest      扫描目录里的 base-*/runtime-*/dsh-*.erofs[.zst|.gz]，生成 channel.json
   sign              用私钥对 channel.json 原始字节签名，产出 channel.json.sig
   publish-channel   一条命令发布：整理发布目录(硬链层文件) → gen-manifest → sign → verify
@@ -167,11 +168,12 @@ main() {
   local cmd="$1"; shift
 
   case "$cmd" in
-    keygen|gen-manifest|manifest|sign|verify|channels|channels-edit|npm-resolve|npm-pack|publish-channel)
+    keygen|pub-of|gen-manifest|manifest|sign|verify|channels|channels-edit|npm-resolve|npm-pack|publish-channel)
       need_node
       local script
       case "$cmd" in
         keygen)       script="keygen.mjs" ;;
+        pub-of)       script="pub-of.mjs" ;;
         gen-manifest|manifest) script="gen-manifest.mjs" ;;
         sign)         script="sign.mjs" ;;
         publish-channel)
