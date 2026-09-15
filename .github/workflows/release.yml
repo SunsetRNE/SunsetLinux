@@ -22,7 +22,10 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: release-${{ github.ref }}
+  # ★ 与 channel.yml **共用同一个组**：两个工作流都会写 gh-pages。
+  #   各用各的组名时，两者可能同时在 checkout→写→force push，后到者会覆盖先到者的目录
+  #   （keep_files 也救不了：它保护的是"运行开始时已经存在的文件"）。
+  group: gh-pages
   cancel-in-progress: false      # 发布不并发跑，避免两个运行同时写 gh-pages
 
 jobs:

@@ -125,6 +125,56 @@ tools/channel/sunsetlinux-channel publish-channel \
 > `channel.json` 与 `.sig` 放哪都行**（清单里的 `url` 是绝对地址，可以指向另一个域名）。
 > 用户只信公钥，跟你用什么托管无关。
 
+### 5.2 `CHANNEL_SIGNING_KEY` 到底怎么弄（两种模型，二选一）
+
+它就是一个 **Ed25519 私钥（PKCS#8 PEM，即 `channel.key` 的全部内容）**，存进
+仓库 Secret，让 CI 能在没有你本机参与的情况下签 `channel.json`。
+
+**先生成一次密钥对**（在你自己的机器上，且只做一次）：
+
+```bash
+tools/channel/sunsetlinux-channel keygen --out-dir ~/.sunsetlinux-keys
+#   ~/.sunsetlinux-keys/channel.key  私钥（0600）—— 离线备份好，丢了就签不出"同一个频道"
+#   ~/.sunsetlinux-keys/channel.pub  公钥（base64）—— 发给用户
+#   指纹 ed25519:xx:xx:…              —— 让用户核对，防中间人
+```
+
+**写进 Secret**（二选一）：
+
+| 方式 | 命令/路径 |
+|---|---|
+| 网页 | 仓库 → Settings → Secrets and variables → **Actions** → New repository secret；名字 `CHANNEL_SIGNING_KEY`，值 = `channel.key` 的**全部内容**（含 `-----BEGIN/END-----` 两行） |
+| 命令行 | `gh secret set CHANNEL_SIGNING_KEY < ~/.sunsetlinux-keys/channel.key` |
+
+> ⚠️ Secret 是**只写**的：网页上再也读不出来，只能覆盖。所以私钥的**唯一权威副本是你的离线备份**，
+> 不要把它当成"存在 GitHub 上了"。
+
+**两种签名模型**（本仓库两条都实现了，按需选）：
+
+| | A. 本机签名（默认可用） | B. CI 签名（`channel` 分支） |
+|---|---|---|
+| 命令 | `sunsetlinux-channel publish-channel --key ~/.sunsetlinux-keys/channel.key …` | 本机只跑 `gen-manifest`（**不需要私钥**）→ 把清单推到 `channel` 分支 → CI 用 Secret 签名 |
+| 私钥在哪 | 你的机器 | GitHub Secret + 你的离线备份（**日常机器上可以没有**） |
+| 需要 Secret | 不需要 | 需要 `CHANNEL_SIGNING_KEY` |
+| 适合 | 一个人、一台机器，想最短路径 | 多台机器/多人协作，或不想让私钥常年待在日常机器上 |
+| 风险 | 私钥在那台机器的磁盘上 | **任何能改本仓库工作流的人都能签频道** → 请给 `main`/`channel` 开分支保护 |
+
+**为什么"清单必须在有层镜像的机器上生成"**：`sha256_raw`/`size_raw` 要真解压算（曾经手算差 28672 字节），
+而层产物 244 MB 且需要 arm64 + 真 chroot。CI 拿不到层文件就生成不了清单 —— 所以 CI 只做
+"签名 + 发布"，不假装能生成。B 模型正是照这个边界切的：**本机出清单（无私钥），CI 持私钥签名**。
+
+**CI 签名做了什么**（`.github/workflows/channel.yml`，触发条件：推送到 `channel` 分支且 `channel/channel.json` 变化）：
+
+1. 检查 `channel.json` 与 `channel.pub` 都在、且 `CHANNEL_SIGNING_KEY` 已配置（**缺失就失败，绝不跳过签名**）；
+2. **逐层检查 URL 现在就能下载**（Range 请求取 1 字节）——防止"清单先发了、层还没传"；
+   确需绕过时可设仓库变量 `CHANNEL_SKIP_URL_CHECK=1`；
+3. 把 Secret 写成 0600 的临时文件 → `sign.mjs` 签原始字节 → 用 `verify.mjs` **另一条代码路径**独立验签；
+4. 清掉私钥（`if: always()`）→ 提交 `channel.json.sig` 回 `channel` 分支 → 发到 gh-pages `/channel/`；
+5. 在运行摘要里输出**清单 URL + 公钥 + 指纹**，直接复制去发给用户。
+
+> ⚠️ **两个工作流共用并发组 `gh-pages`**（`release.yml` 与 `channel.yml`）：它们都会写 gh-pages，
+> 各用各的组名就可能并发 force push 互相覆盖（`keep_files: true` 只能保住"运行开始时已存在的文件"）。
+
 **为什么签名密钥必须是 Secret**：频道的安全模型是"npm/HTTP 只是传输，信任根是公钥验签"。
 私钥一旦泄漏，任何人都能签出"你的"频道，**整个更新体系失效**（这一点已实测：篡改与冒签都会被拒，
 但那是建立在私钥不外泄的前提上）。

@@ -477,6 +477,13 @@ tools/channel/sunsetlinux-channel publish-channel \
 > 💡 层的日常更新是**增量**的：只改 DSH 时用户只下 `dsh` 层（31.2 MiB），
 > 所以别把"全量 244 MiB"当成每次发布的成本 —— 但**首次部署**与**回归旧版本**是真要这么多。
 
+### 想让 CI 持私钥签名？（可选，`channel` 分支）
+
+私钥不想常年放在日常机器上时，可以走"本机出清单 → CI 签名"这条：
+本机只跑 `gen-manifest`（**不需要私钥**），把 `channel.json` + `channel.pub` 推到
+`channel` 分支，CI 用 Secret `CHANNEL_SIGNING_KEY` 签名、验签、发到 gh-pages `/channel/`。
+完整步骤与两种模型的取舍见 [`docs/release-ci.md`](release-ci.md) §5.2。
+
 ### 让用户用上你的频道
 
 有两种做法，**当前代码里的默认是第一种**：
