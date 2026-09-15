@@ -956,6 +956,34 @@ squashfs-tools xz-utils"
 build_runtime() {
     step "4. runtime 层：Node $NODE_VERSION + pnpm + runtime.packages"
 
+    # --- 先装 runtime.packages（**顺序是硬要求，真机踩过**）------------------
+    #   Node 那一步要 `xz -t` / `xz -dc | tar -x` 解官方 .tar.xz，而 runtime 阶段是从
+    #   **裸 ubuntu-base** 重新解包开始的（每个阶段都用同样干净的起点，见 run_stages），
+    #   而裸 base **不带 xz-utils**（只有 liblzma 供 dpkg 用）。
+    #   后果：种子的 sha256 与 nodejs.org 完全一致，也会被判成"不是完整 xz 包"——
+    #   真机 2026-09-16 06:09 就死在这里，base 层都建好了却卡在 runtime 第一步。
+    #   curl（没有种子时要下 Node）同理：它也在 runtime.packages 里。
+    #   ★ 另外：裸 base 的 /var/lib/apt/lists 是**空的**，install 之前必须先 apt-get update，
+    #     否则直接报"找不到包"（同样是"只在真机上才暴露"的一类）。
+    local pkgs=""
+    [ -n "$PKG_LIST_RUNTIME" ] && pkgs="$(parse_packages "$PKG_LIST_RUNTIME" | tr '\n' ' ')"
+    if [ -n "$pkgs" ]; then
+        pkgs="$(printf '%s' "$pkgs" | tr ' ' '\n' | awk 'NF>0 && !seen[$0]++' | tr '\n' ' ')"
+        log "安装 runtime.packages 工具：$(printf '%s' "$pkgs" | wc -w) 个（Node 解包依赖其中的 xz-utils）"
+        in_chroot /usr/bin/apt-get update -o Acquire::Retries=3 \
+            || die "apt-get update 失败（runtime 阶段；详见 $LOG_FILE）"
+        in_chroot /usr/bin/apt-get install -y --no-install-recommends -o Acquire::Retries=3 $pkgs \
+            || die "runtime.packages 安装失败（详见 $LOG_FILE）"
+        # 装完就清 apt 缓存（层里不留 deb / 索引）
+        rm -rf "$BUILD_DIR/var/cache/apt/archives"/*.deb 2>/dev/null || true
+        rm -rf "$BUILD_DIR/var/lib/apt/lists"/* 2>/dev/null || true
+        mkdir -p "$BUILD_DIR/var/lib/apt/lists/partial" 2>/dev/null || true
+        in_chroot /usr/bin/test -x /usr/bin/xz \
+            || die "runtime.packages 里应当包含 xz-utils（Node 官方包是 .tar.xz，没有它解不开）"
+    else
+        warn "runtime.packages 为空：Node 解包需要 chroot 里已有 xz（裸 base 没有），可能失败"
+    fi
+
     # --- Node 官方 arm64 tarball（比 apt 的 node 新且可控）------------------
     local node_tar="$SEEDS_DIR/node-$NODE_VERSION-linux-arm64.tar.xz"
     local node_url="https://nodejs.org/dist/$NODE_VERSION/node-$NODE_VERSION-linux-arm64.tar.xz"
@@ -1029,22 +1057,6 @@ build_runtime() {
     in_chroot /bin/sh -c "test -x $LAYER_RUNTIME_ENTRY && test -x $LAYER_RUNTIME_SUPERVISE" \
         || die "复制后 $LAYER_RUNTIME_ENTRY / $LAYER_RUNTIME_SUPERVISE 不可执行"
     log "入口脚本就绪：$LAYER_RUNTIME_ENTRY、$LAYER_RUNTIME_SUPERVISE（随 runtime 层发布）"
-
-    # --- 其它运行期工具（runtime.packages 的工具组）------------------------
-    local pkgs=""
-    [ -n "$PKG_LIST_RUNTIME" ] && pkgs="$(parse_packages "$PKG_LIST_RUNTIME" | tr '\n' ' ')"
-    if [ -n "$pkgs" ]; then
-        pkgs="$(printf '%s' "$pkgs" | tr ' ' '\n' | awk 'NF>0 && !seen[$0]++' | tr '\n' ' ')"
-        log "安装 runtime.packages 工具：$(printf '%s' "$pkgs" | wc -w) 个"
-        in_chroot /usr/bin/apt-get install -y --no-install-recommends -o Acquire::Retries=3 $pkgs \
-            || die "runtime.packages 安装失败（详见 $LOG_FILE）"
-        # 装完再清一次 apt 缓存（层里不留 deb）
-        rm -rf "$BUILD_DIR/var/cache/apt/archives"/*.deb 2>/dev/null || true
-        rm -rf "$BUILD_DIR/var/lib/apt/lists"/* 2>/dev/null || true
-        mkdir -p "$BUILD_DIR/var/lib/apt/lists/partial" 2>/dev/null || true
-    else
-        warn "runtime.packages 为空，只装 Node 与 pnpm"
-    fi
 
     build_layer runtime "$MANIFEST_BEFORE"
 }
@@ -1325,33 +1337,57 @@ summary() {
 
 # ===========================================================================
 # 17. 三层阶段编排（只在内层 --inner-run 里跑）
-#   ★ 每一步都"重新解包同一个 base"再构建，保证每层的 before 基线是干净起点，
-#     层与层之间不会互相污染（这是"层可比对"的前提）。
-#   ★ 以前这段是作为 heredoc 文本拼进内层脚本的；现在内层就是本文件本身，
-#     所以它就是普通函数 —— 改这里等于改设备上真正执行的代码，不需要两头同步。
+#   ★ 三条层与宿主侧 build-layers.sh 的 make_layer_stage **完全同口径**：
+#       base    = 与"空层"比 → **完整 rootfs**
+#       runtime = 与 base 阶段结束时的状态比 → 只含 Node+pnpm+runtime.packages
+#       dsh     = 与 runtime 阶段结束时的状态比 → 只含 dsh+profile
+#   ★ 所以三个阶段**必须累积**（同一个 BUILD_DIR 一路往下做），不能每层都重新解包 base：
+#       ① base 层若与"裸 base"比，会漏掉 3400 多个**没改动过**的文件（bash、coreutils…），
+#          而 start.sh 的 lowerdir 只有这三层、没有任何"裸 base"兜底 → 合并视图里它们直接消失；
+#       ② dsh 阶段要跑 npm，而 npm 来自 runtime 阶段的 /opt/node；重新解包 base 的话
+#          它根本不存在（真机一定会卡在 dsh 第一步）。
 # ===========================================================================
-prepare_stage() {
-    local name="$1"
-    step "准备 $name 阶段的干净起点（重新解包 base）"
+prepare_stage_full() {
+    step "准备 base 阶段的干净起点（解包 base；基线与\"空层\"比对 → 完整层）"
     extract_base
+    chroot_mounts
+    # 空基线 = 整个 rootfs 都算本层内容（宿主侧 prev 为空时也是整层打包）
+    : > "$MANIFEST_BEFORE"
+    log "before 清单：0 条（base 是完整层）"
+}
+
+# runtime / dsh：**沿用上一阶段的 chroot**，只重取基线（当前状态）
+prepare_stage_incremental() {
+    local name="$1"
+    step "准备 $name 阶段的起点（沿用上一阶段环境；基线=当前状态）"
     chroot_mounts
     write_manifest "$MANIFEST_BEFORE"
     log "before 清单：$(wc -l < "$MANIFEST_BEFORE" | tr -d ' ') 条"
 }
 
+# 设备侧是累积构建：跳层会让后面产物的基线错位，所以明确拒绝（而不是产出一堆看着正常的错层）
+reject_skip() {
+    die "设备侧构建是**累积**的（base → runtime → dsh 共用一个 chroot），$1 会让后面两层产物错误。
+      要只更新某一层，请用：linuxctl update <层> <裸.erofs>（或从频道安装）。"
+}
+
 run_stages() {
     if [ "$SKIP_BASE" != "1" ]; then
-        prepare_stage base
+        prepare_stage_full
         build_base
         chroot_umounts
     fi
     if [ "$SKIP_RUNTIME" != "1" ]; then
-        prepare_stage runtime
+        [ "$SKIP_BASE" = "1" ] && reject_skip "--skip-base"
+        prepare_stage_incremental runtime
         build_runtime
         chroot_umounts
     fi
     if [ "$SKIP_DSH" != "1" ]; then
-        prepare_stage dsh
+        if [ "$SKIP_BASE" = "1" ] || [ "$SKIP_RUNTIME" = "1" ]; then
+            reject_skip "--skip-base / --skip-runtime"
+        fi
+        prepare_stage_incremental dsh
         build_dsh
         chroot_umounts
     fi

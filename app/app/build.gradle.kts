@@ -19,8 +19,10 @@ android {
         //        而那个命令**不构建层** —— 真机上向导必然以 "provision 失败" 收场）。
         // 0.2.2：把模块版本提示从 ≥1.0.5 更正为 ≥1.0.6（1.0.5 在真机上还有两个坑：
         //        mksh 没有 printf %q、profiles/ 没随包）。
-        versionCode = 4
-        versionName = "0.2.2"
+        // 0.2.3：修**一打开就闪退**：zstd 能力探测走 aircompressor 的 direct-ByteBuffer/Unsafe
+        //        快路径，在 Android 上 SIGSEGV（进程直接死，catch 不住）。改成流式解码。
+        versionCode = 5
+        versionName = "0.2.3"
     }
 
     // ────────────────────────────────────────────────────────────────────────

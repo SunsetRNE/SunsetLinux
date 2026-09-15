@@ -176,6 +176,58 @@ console.log('\n== 参数重放：含空格与单引号的路径（转义必须�
 
 
 // ---------------------------------------------------------------------------
+// ★ 三层**层口径**回归：base 必须是完整层，runtime/dsh 必须是相对上一阶段的增量。
+//   宿主侧 build-layers.sh 的 make_layer_stage 就是这个口径（prev 为空 → 整层打包）。
+//   真机推理出来的两个后果（都不是"应该没事"）：
+//     · base 若与"裸 base"比 → 漏掉 3400 多个未改动文件（bash/coreutils…），
+//       而 start.sh 的 lowerdir 只有 base:runtime:dsh 三层，没有裸 base 兜底 → 合并视图里它们消失；
+//     · 每层都重新解包 base → dsh 阶段没有 npm（它来自 runtime 阶段的 /opt/node）→ 必死。
+console.log('\n== 层口径：base 完整、runtime/dsh 增量、且累积 ==');
+{
+  const src = readFileSync(SCRIPT, 'utf8');
+  const full = extractFunc(src, 'prepare_stage_full');
+  const inc = extractFunc(src, 'prepare_stage_incremental');
+  const stages = extractFunc(src, 'run_stages');
+  const code = (t) => t.split('\n').filter((l) => !/^\s*#/.test(l)).join('\n');
+
+  ok(/: > "\$MANIFEST_BEFORE"/.test(code(full)),
+    'base 阶段把基线清空（→ 完整层，与宿主侧 prev 为空一致）');
+  ok(/extract_base/.test(code(full)), '只有完整层那一阶段解包 base');
+  ok(!/extract_base/.test(code(inc)),
+    'runtime/dsh 不再重新解包 base（累积构建：dsh 要用 runtime 装好的 /opt/node）');
+  ok(/write_manifest "\$MANIFEST_BEFORE"/.test(code(inc)), '增量阶段重取当前状态作为基线');
+  ok(/reject_skip/.test(stages) && /--skip-base/.test(stages),
+    '跳层被明确拒绝（累积构建下跳层会产出错层，不许静默）');
+  ok(!/prepare_stage\b(?!_)/.test(code(stages)), '旧的"每层都重新解包"入口已不再被编排调用');
+}
+
+// ---------------------------------------------------------------------------
+// ★ 阶段内的**顺序**回归：runtime 阶段必须先装 runtime.packages，再解 Node 的 .tar.xz。
+//   真机踩过（2026-09-16 06:09）：runtime 阶段从**裸 ubuntu-base** 重新解包开始，
+//   裸 base 不带 xz-utils → `xz -t` 把一份 sha256 与 nodejs.org 完全一致的种子判成
+//   "不是完整 xz 包"，base 层建好了却卡在 runtime 第一步。
+//   这类"工具由本阶段自己装、但装晚了"的顺序错，只有把顺序写进断言才能防住。
+console.log('\n== 阶段顺序：runtime.packages 必须先于 Node 解包 ==');
+{
+  const src = readFileSync(SCRIPT, 'utf8');
+  // ★ 只看代码：注释里专门解释了这些命令为什么必须按这个顺序出现，
+  //   不剥掉注释的话 indexOf 会先命中注释里的字样（这个坑今天已经踩第三次了）。
+  const fn = extractFunc(src, 'build_runtime')
+    .split('\n').filter((l) => !/^\s*#/.test(l)).join('\n');
+  const at = (needle) => fn.indexOf(needle);
+  const aptUpdate = at('apt-get update');
+  const aptInstall = at('apt-get install');
+  const xzCheck = at('xz -t');
+  const nodeExtract = at('xz -dc');
+
+  ok(aptUpdate > 0, 'runtime 阶段有 apt-get update（裸 base 的 lists 是空的）');
+  ok(aptInstall > 0, 'runtime 阶段装了 runtime.packages（xz-utils / curl 在里面）');
+  ok(aptUpdate < aptInstall, 'apt-get update 在 install 之前');
+  ok(aptInstall < xzCheck, 'runtime.packages 装完才用 `xz -t` 校验 Node 包');
+  ok(aptInstall < nodeExtract, 'runtime.packages 装完才解 Node 的 .tar.xz（xz 来自本阶段安装）');
+}
+
+// ---------------------------------------------------------------------------
 // ★ make_erofs 的**行为**回归 —— 这一节存在的唯一原因，是真机上真的死在这里：
 //   mksh 里 `zargs=()` 并**不生成空数组**，随后 `"${zargs[@]}"` 在 `set -u` 下直接
 //   `zargs[@]: parameter not set`。而默认 EROFS_COMPRESS=none 恰好走那条分支，

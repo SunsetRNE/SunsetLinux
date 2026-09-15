@@ -4,9 +4,7 @@ import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.IOException
-import java.io.RandomAccessFile
-import java.nio.ByteBuffer
-import java.nio.channels.FileChannel
+import io.airlift.compress.zstd.ZstdInputStream
 import java.security.MessageDigest
 import java.util.zip.GZIPInputStream
 
@@ -67,18 +65,27 @@ class LayerDecompressException(val stage: String, message: String, cause: Throwa
  * 把传输产物解压成裸镜像。**纯 Java，不引用任何 Android API**，
  * 因此可以直接在 JVM 单测里拿真实产物验证（见 `src/test/.../LayerDecompressorTest.kt`）。
  *
- * 两条路的内存策略：
- * - gzip：`GZIPInputStream` 流式边读边写，**常量内存**。
- * - zstd：aircompressor（纯 Java 解码器）+ **输入/输出都用 mmap 的 direct ByteBuffer**，
- *   解码器只写堆外内存，堆内只有约 128 KB 工作区 —— 200 MB 级镜像不会造成堆峰值。
+ * 两条路**同构**：都是从 `InputStream` 流式读、边读边写 `FileOutputStream`，
+ * 只用一个 1 MiB 的堆内数组 —— **常量内存**，200 MB 级镜像也没有堆峰值。
+ *
+ * ★ 为什么 zstd 也必须是流式（真机事故，2026-09-16）：
+ *   原先走 `ZstdDecompressor().decompress(ByteBuffer, ByteBuffer)` + mmap direct buffer，
+ *   那条路在 Android 上会 **SIGSEGV**（crash dump：`art::Unsafe_getInt` ←
+ *   `ZstdFrameDecompressor.verifyMagic`）—— aircompressor 用
+ *   `UnsafeUtil.getAddress(buffer)` 取裸地址再 `Unsafe.getInt`，Android 上拿到的地址不可用。
+ *   SIGSEGV 杀的是整个进程，`try/catch` 拦不住：`LauncherViewModel.init` 里的能力探测
+ *   直接把 App 变成"一打开就闪退"。**桌面 JVM 上这条路径是好的**，所以只有真机会暴露。
+ *   守住它的：`LayerTransportUnsafePathTest`（源码级契约，禁止 direct buffer / mmap 回来）。
  */
 object LayerDecompressor {
 
     private const val COPY_BUFFER = 1 shl 20 // 1 MiB
 
     /**
-     * @param expectRaw 期望的解压后大小；null/≤0 时尝试从 zstd 帧头读取。
-     * @return 解压后镜像的 sha256 与实际大小（由调用方与 `sha256_raw` 比对）
+     * @param expectRaw 清单里声明的解压后大小，**仅供参考**：它是**不会**用来预分配缓冲的
+     *   （实测清单出现过笔误，拿它预分配会让解码在中途失败），真正的完整性判据是
+     *   解压后镜像的 sha256，由调用方与 `sha256_raw` 比对。
+     * @return 解压后镜像的 sha256 与实际大小
      */
     fun decompress(
         src: File,
@@ -87,7 +94,7 @@ object LayerDecompressor {
         expectRaw: Long?,
     ): DecompressOutcome = when (transport) {
         LayerTransport.GZIP -> decompressGzip(src, dst)
-        LayerTransport.ZSTD -> decompressZstd(src, dst, expectRaw)
+        LayerTransport.ZSTD -> decompressZstd(src, dst)
         LayerTransport.RAW -> copyRaw(src, dst)
     }
 
@@ -119,102 +126,37 @@ object LayerDecompressor {
     // ---------------------------------------------------------------- zstd
 
     /**
-     * zstd 解码走 aircompressor（`io.airlift:aircompressor`，纯 Java，无 native）。
+     * zstd 解析走 aircompressor 的**流式**解码器（`ZstdInputStream`），与 gzip 路径完全同构：
+     * 堆内 1 MiB 缓冲、常量内存、不碰 direct buffer（原因见 [LayerDecompressor] 的说明）。
      *
-     * 为什么不用 `com.github.luben:zstd-jni`：它的 jar 里只有 aix/darwin/freebsd/linux/win
-     * 的原生库，**没有任何 Android ABI**；它的 `linux/aarch64/libzstd-jni.so` 是 glibc 链接的，
-     * 在 Android 的 bionic 上无法 dlopen —— 能编译、能在桌面 JVM 上跑通，但到设备上必
-     * `UnsatisfiedLinkError`。纯 Java 解码器没有这个问题，代价是窗口上限 8 MiB（见下）。
+     * 为什么以前要用 mmap + direct buffer：想避免 200 MB 级镜像进堆。现在改成流式，
+     * 内存更低（1 MiB）而且没有 direct buffer 那条会 SIGSEGV 的路。
      *
-     * 已知限制：aircompressor 的 `MAX_WINDOW_SIZE = 1 << 23`（8 MiB）。`zstd` CLI 默认
-     * level≤19 的 windowLog 就是 23，所以默认产出的产物可用；若发布侧用了 `--long`/`-22`
-     * 等更大窗口，这里会抛异常 —— 调用方会**自动退回 gzip 产物**并把原因写进日志。
+     * aircompressor 的窗口上限 `MAX_WINDOW_SIZE = 1 << 23`（8 MiB）：`zstd` CLI 默认
+     * level≤19 的 windowLog 就是 23，所以默认产物可用；若发布侧用了 `--long`/`-22`
+     * 等更大窗口，这里会抛异常 —— 调用方会自动退回 gzip 产物并把原因写进日志。
      */
-    private fun decompressZstd(src: File, dst: File, expectRaw: Long?): DecompressOutcome {
-        // **产物自己的帧头是权威尺寸来源**：清单里的 size_raw 只是提示，可能是笔误
-        // （实测 dist 里那份产物的真实解压大小是 211259392，而清单样例写的是 211288064）。
-        // 因此先按帧头尺寸分配输出，再让调用方去比对 size_raw —— 绝不能反过来，
-        // 否则一条笔误就会让 zstd 路径在解码中途失败。
-        val frameSize = readHeaderBytes(src, 64)?.let { header ->
-            try {
-                io.airlift.compress.zstd.ZstdDecompressor.getDecompressedSize(header, 0, header.size)
-            } catch (_: Throwable) {
-                -1L
-            }
-        } ?: -1L
-
-        val declaredSize = expectRaw?.takeIf { it > 0 } ?: -1L
-        // 分配用两者较大值（防止清单偏小时把解码器的输出写穿），
-        // 但**校验用帧头值**：帧头才是产物自身的真相。
-        val allocSize = maxOf(frameSize, declaredSize)
-        val expectedSize = if (frameSize > 0) frameSize else declaredSize
-        if (allocSize <= 0 || expectedSize <= 0) {
-            throw LayerDecompressException("解压", "无法确定解压后镜像大小（帧头无 content size 且清单缺 size_raw）")
-        }
-
-        var inChannel: FileChannel? = null
-        var outRaf: RandomAccessFile? = null
+    private fun decompressZstd(src: File, dst: File): DecompressOutcome {
+        val digest = MessageDigest.getInstance("SHA-256")
+        var written = 0L
         try {
-            inChannel = FileChannel.open(src.toPath(), java.nio.file.StandardOpenOption.READ)
-            val input: ByteBuffer = inChannel.map(FileChannel.MapMode.READ_ONLY, 0, src.length())
-
-            // 先把输出文件撑到目标大小，再 mmap：解码器直接写堆外内存
-            outRaf = RandomAccessFile(dst, "rw").apply {
-                setLength(0)
-                setLength(allocSize)
+            ZstdInputStream(FileInputStream(src).buffered(COPY_BUFFER)).use { input ->
+                FileOutputStream(dst).buffered(COPY_BUFFER).use { output ->
+                    val buf = ByteArray(COPY_BUFFER)
+                    while (true) {
+                        val n = input.read(buf)
+                        if (n < 0) break
+                        digest.update(buf, 0, n)
+                        output.write(buf, 0, n)
+                        written += n
+                    }
+                }
             }
-            val output: java.nio.MappedByteBuffer = outRaf.channel.map(FileChannel.MapMode.READ_WRITE, 0, allocSize)
-
-            io.airlift.compress.zstd.ZstdDecompressor().decompress(input, output)
-
-            val written = output.position().toLong()
-            output.force()
-            if (written != expectedSize) {
-                throw LayerDecompressException(
-                    "解压",
-                    "解压后大小与产物帧头不符：实际 $written 字节，帧头声明 $expectedSize 字节" +
-                        if (declaredSize > 0 && declaredSize != expectedSize) {
-                            "（清单 size_raw=$declaredSize 与帧头不一致，已按帧头为准）"
-                        } else {
-                            ""
-                        },
-                )
-            }
-            // 文件实际长度按真实解码结果收敛，避免比镜像长的尾巴
-            outRaf.setLength(written)
-        } catch (t: LayerDecompressException) {
-            dst.delete()
-            throw t
         } catch (t: Throwable) {
             dst.delete()
-            throw LayerDecompressException(
-                "解压",
-                "zstd 解压失败（${t.javaClass.simpleName}: ${t.message ?: "无详情"}）",
-                t,
-            )
-        } finally {
-            runCatching { inChannel?.close() }
-            runCatching { outRaf?.close() }
+            throw LayerDecompressException("解压", "zstd 解压失败：${t.message ?: t.javaClass.simpleName}", t)
         }
-
-        // 解压成功后再读一遍算 sha256：这一步是顺序读，代价可控，换来内存零峰值
-        return DecompressOutcome(Digest.sha256Hex(dst), dst.length())
-    }
-
-    /** 只读文件头若干字节（避免为了拿帧头把 30 MB 全读进内存）。 */
-    private fun readHeaderBytes(src: File, n: Int): ByteArray? = try {
-        FileInputStream(src).use { input ->
-            val buf = ByteArray(n)
-            var off = 0
-            while (off < n) {
-                val r = input.read(buf, off, n - off)
-                if (r < 0) break
-                off += r
-            }
-            if (off == 0) null else buf.copyOf(off)
-        }
-    } catch (_: Throwable) {
-        null
+        return DecompressOutcome(hex(digest.digest()), written)
     }
 
     // ---------------------------------------------------------------- raw
@@ -248,12 +190,19 @@ object LayerDecompressor {
 /**
  * zstd 能力探测。
  *
- * **必须探测而不是"编译通过就认为可用"**：纯 Java 解码器依赖 `sun.misc.Unsafe` 去取
- * direct ByteBuffer 的裸地址，这在 Android 上属于"平台有但不在公开 API 里"的灰色地带；
- * 一旦设备上不可用，我们要**当场知道**并改用 gzip 产物，而不是等用户更新到一半崩掉。
+ * **必须探测而不是"编译通过就认为可用"**：aircompressor 是纯 Java，但它的
+ * direct-ByteBuffer 快路径依赖 `sun.misc.Unsafe` 取裸地址 —— 而那条路在 Android 上
+ * 会 **SIGSEGV**（真机事故，见 [LayerDecompressor] 的说明）。所以：
  *
- * 探测方式：把一段真实的 zstd 帧（内嵌 base64，由 `zstd -19` 生成）走**完整解码路径**
- * （含 mmap + direct ByteBuffer）解出来比对原文。任何 Throwable 都视为不可用。
+ * 1. 解码路径已经改成**只用堆内数组的流式解码**（`ZstdInputStream`），不碰 direct buffer；
+ * 2. 这里仍然**探测**一遍，且走的是与生产**完全相同**的那条路 —— 将来若某台设备
+ *    连堆内路径都不可用（比如窗口上限），我们要**当场知道**并改用 gzip 产物，
+ *    而不是等用户更新到一半崩掉；
+ * 3. 任何 Throwable 都视为不可用。⚠️ 但 SIGSEGV **不是 Throwable**：进程直接死，
+ *    `catch` 拦不住 —— 所以真正的防线是"不碰那条路" + 源码级契约测试，
+ *    这也是为什么 `runProbe` 必须一直跟生产路径同构。
+ *
+ * 探测方式：把一段真实的 zstd 帧（内嵌 base64，由 `zstd -19` 生成）走完整解码路径解出来比对原文。
  */
 object TransportSupport {
 

@@ -19,7 +19,10 @@ import java.io.File
  * 产物不在时整类**跳过**（assumeTrue），这样在别的机器上跑测试不会误报失败。
  *
  * 注意：这里的 zstd 走的是与 App 运行时**完全相同**的代码路径
- * （[LayerDecompressor] → aircompressor + mmap direct ByteBuffer）。
+ * （[LayerDecompressor] → aircompressor 的流式解码器 `ZstdInputStream`，只用堆内数组）。
+ * ⚠️ 在**桌面 JVM** 上，旧的 direct-ByteBuffer 快路径同样是好的 —— 所以这类测试
+ * 跑绿**说明不了**真机没问题（真机曾因此一打开就闪退）。守 direct buffer 不许回来的
+ * 是 `LayerTransportUnsafePathTest`。
  */
 class LayerDecompressorTest {
 
