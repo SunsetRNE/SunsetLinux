@@ -58,7 +58,7 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - uses: android-actions/setup-android@v3
+      - uses: android-actions/setup-android@v4
 
       - name: 关掉 Gradle 守护进程
         run: echo "org.gradle.daemon=false" >> app/gradle.properties
