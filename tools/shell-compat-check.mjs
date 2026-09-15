@@ -18,6 +18,20 @@
  *      （带原因），否则算违例；反过来，一旦某个文件已经能过 mksh，就必须把它从
  *      名单里删掉 —— 免得名单腐烂成"反正都在名单里"。
  *
+ * ## 第二层：`mksh -n` **看不见**的陷阱（真机上一条条踩出来的）
+ *   `mksh -n` 只证明"能解析"。下面这些是"解析得过、真机照死"的，所以单独做成**模式闸门**
+ *   （每条都对应一次真机失败，注释里写了为什么）：
+ *
+ *   | 模式 | 真机表现 | 为什么本地测不出来 |
+ *   |---|---|---|
+ *   | `printf %q` | `printf: bad %q@20`，整个部署终止 | 容器/CI 的 mksh **有** %q，Android 的**没有** |
+ *   | `local x=(…)` | `syntax error: unexpected '('` | mksh 全系都不支持，但 host 侧 `bash -n` 会过 |
+ *   | `[[ x =~ re ]]` | `syntax error: unexpected operator/operand '=~'` | 同上 |
+ *
+ *   还有一类**语法闸门永远管不了**的：`x=()` 在 mksh 里**不是空数组**，
+ *   `set -u` 下展开 `"${x[@]}"` 会 `parameter not set`（真机第二次失败的原因）。
+ *   这种只能靠**行为级单测**兜（见 tools/provision-selftest.mjs 的 make_erofs 一节）。
+ *
  * ## 用法
  *   node tools/shell-compat-check.mjs [--verbose]
  *   MKSHS="mksh" node tools/shell-compat-check.mjs      # 指定解释器（CI 里可装 mksh）
@@ -99,6 +113,43 @@ function parseCheck(rel) {
   }
 }
 
+/**
+ * `mksh -n` 管不住的陷阱：逐行扫（**跳过注释行** —— 项目里到处在注释里解释这些坑）。
+ * 返回 [{ line, text, why }]。
+ */
+const TRAPS = [
+  {
+    re: /printf[^\n]*%q|%q/,
+    why: 'Android 的 mksh **没有** `printf %q`（真机 `printf: bad %q@20`）。' +
+         '要转义请用单引号 + sed（见 device-provision.sh 的 squote），或干脆别拼字符串。',
+  },
+  {
+    re: /^\s*local\s+[A-Za-z_][A-Za-z0-9_]*=\(/,
+    why: '`local x=(…)` 在 mksh 里是**语法错误**：数组要先 `local x` 再 `x=(…)`。',
+  },
+  {
+    re: /\[\[.*=~/,
+    why: '`[[ x =~ re ]]` 在 mksh 里是**语法错误**：用 `case` 的字符类等价的写法。',
+  },
+  {
+    re: /\bx=\(\)/,
+    why: '',
+  },
+];
+
+function trapScan(rel) {
+  const hits = [];
+  const lines = readFileSync(join(REPO, rel), 'utf8').split('\n');
+  lines.forEach((raw, i) => {
+    if (/^\s*#/.test(raw)) return;                    // 注释行：项目里常在这里解释这些坑
+    for (const t of TRAPS) {
+      if (!t.why) continue;
+      if (t.re.test(raw)) hits.push({ line: i + 1, text: raw.trim(), why: t.why });
+    }
+  });
+  return hits;
+}
+
 function shellKind(rel) {
   const first = readFileSync(join(REPO, rel), 'utf8').split('\n', 1)[0].trim();
   return first;
@@ -115,8 +166,13 @@ for (const dir of DEVICE_SIDE) {
         `       提示：去掉 bash 专有语法（declare -a / local -a / for (( )) / =\~ 等），` +
         `或用 POSIX 字符串替代数组。`,
       );
-    } else if (VERBOSE) {
-      notations.push(`${rel} ✅ ${shellKind(rel)}`);
+    } else {
+      for (const h of trapScan(rel)) {
+        problems.push(
+          `${rel}:${h.line} 命中"mksh 解析得过、真机照死"的陷阱：${h.text}\n       ${h.why}`,
+        );
+      }
+      if (VERBOSE) notations.push(`${rel} ✅ ${shellKind(rel)}`);
     }
   }
 }
