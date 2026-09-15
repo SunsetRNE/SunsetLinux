@@ -45,7 +45,12 @@ jobs:
       - name: 取频道清单并逐层下载 + 校验
         run: |
           set -euo pipefail
-          SITE="https://${{ github.repository_owner }}.github.io/${{ github.repository }}"
+          # ⚠️ 注意：`${{ github.repository }}` 是 "owner/repo"，直接拼到 host 后面会变成
+          #    https://Owner.github.io/Owner/Repo（多一段）→ 404。这里按 channel.yml 的做法
+          #    owner 转小写 + 只取仓库名。
+          OWNER_LC="$(printf '%s' "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
+          REPO_NAME="${GITHUB_REPOSITORY#*/}"
+          SITE="https://${OWNER_LC}.github.io/${REPO_NAME}"
           mkdir -p dist/bundles
           curl -fsSL "$SITE/channel/channel.json"     -o dist/channel.json
           curl -fsSL "$SITE/channel/channel.json.sig" -o dist/channel.json.sig

@@ -346,7 +346,8 @@ jobs:
           TAG="v$APP_VER"
           TITLE="SunsetLinux $APP_VER（模块 $MODULE_VERSION）"
           REPO="${{ github.repository }}"
-          SITE="https://${{ github.repository_owner }}.github.io/${{ github.repository }}"
+          OWNER_LC="$(printf '%s' "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
+          SITE="https://${OWNER_LC}.github.io/${GITHUB_REPOSITORY#*/}"
 
           {
             echo "Android 上的原生 DSH 运行环境：真 chroot + overlayfs 的 Ubuntu 24.04，跑原生 DSH。"
