@@ -1,0 +1,21 @@
+# SunsetLinux 三层产物清单（全部为实测值，禁止手填）
+# 生成时间: 2026-09-15T14:31:58Z
+
+## 压缩产物（分发用）
+文件                                           字节  sha256
+base-24.04.3-l1.erofs.zst                      19478637  edc4994dc130b3bf3a938239a75fe9ab654a680f3089b7e416b2e11df240df09
+base-24.04.3-l1.erofs.gz                       27762420  5fff653c2e85c32e9017398ff4062331361b11c265d5438f58ddb1877805bf71
+runtime-1.0.0.erofs.zst                        48736940  a336d278a8abd9b26e9252ab1e3bbf16ecf2b57d5e0e08e80fafbbc64c8825a5
+runtime-1.0.0.erofs.gz                         77067997  a22ff26aa5a2aa3ebee9d2fe94148327172826a56ccd9c73a51a960a100934df
+dsh-0.1.5-rc.2.erofs.zst                       32753059  04ddce5f5edee710fc7466d46db40c70b06b11cbdc3d4bad0e2b9d8b9e25e820
+dsh-0.1.5-rc.2.erofs.gz                        50146411  30333242466252e5b0099bf1e14a34003b1d58fb93c8541b20fd18e4c247c1d9
+
+## 解压后的裸镜像（App 解压后校验 sha256_raw / size_raw）
+镜像                                           字节  sha256
+base-24.04.3-l1.erofs                          99893248  ff47c96aa94e0dddb579c65cdf51e7b852d33ebb9fd81b8bc4643100669b5e7d
+runtime-1.0.0.erofs                           240828416  e6571af1585fed7e6f95b73fe00ca910a10e914f44e5bf2aa3f89292350e4cfe
+dsh-0.1.5-rc.2.erofs                          211259392  d9674df77923341e39759750c36f57bb53e481296129dd4e1cb80864faa60c29
+
+## 合计下载体积
+  zstd 全量: 18.6 + 46.5 + 31.2 = 96.3 MB
+  DSH 单层升级: 31.2 MB (zstd) / 47.8 MB (gzip)
