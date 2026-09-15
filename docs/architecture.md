@@ -529,8 +529,11 @@ sunsetlinux/
   app/                     # Android 工程（Gradle + Kotlin + Compose）
   tools/
     channel/               # 频道清单生成 + 签名 + 校验 CLI（Ed25519）
+                           #   publish-channel.mjs = 一条命令发布（含发布目录整理 + 体检）
+                           #   shell-compat-check.mjs 在 tools/ 下：设备侧脚本的 mksh 闸门
     seed/                  # 离线种子制作
     proot-bundle/          # proot 二进制自带打包（GPLv2 合规）
+    proot-runtime/         # proot 运行时脚本打包（sunsetlinux-proot-runtime/bin/*）
     contract-check.mjs     # status JSON 契约一致性断言（两套运行时都要过）
   build/fixtures/          # 层格式探测的回归测试夹具（3×2KB 的 magic 头）
   dist/                    # 产物

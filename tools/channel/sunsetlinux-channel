@@ -51,6 +51,7 @@ sunsetlinux-channel —— sunsetlinux 频道（更新源）工具链
   keygen            生成 Ed25519 频道密钥对：channel.key(0600) + channel.pub(base64)
   gen-manifest      扫描目录里的 base-*/runtime-*/dsh-*.erofs[.zst|.gz]，生成 channel.json
   sign              用私钥对 channel.json 原始字节签名，产出 channel.json.sig
+  publish-channel   一条命令发布：整理发布目录(硬链层文件) → gen-manifest → sign → verify
   verify            用公钥验签 + 校验层文件 sha256；退出码 0 通过 / 1 失败
   channels <动作>   管理 channels.json：list | add | remove | set | enable | disable | check | init
   npm-resolve       解析 npm 形态的频道：拉 packument → 下载 tarball → 解出 → **验签** → 落盘
@@ -66,6 +67,10 @@ sunsetlinux-channel —— sunsetlinux 频道（更新源）工具链
       --base-url https://example.org/sunsetlinux --dsh-dist-tag next
   sunsetlinux-channel sign  --in dist/layers/channel.json --key ~/.sunsetlinux-keys/channel.key
   sunsetlinux-channel verify --pub ~/.sunsetlinux-keys/channel.pub --in dist/layers/channel.json
+  # 一键版（推荐）：整理发布目录 + 生成 + 签名 + 体检，最后打印上传清单与给用户的信息
+  sunsetlinux-channel publish-channel --base-url https://example.org/sunsetlinux \
+      --key ~/.sunsetlinux-keys/channel.key --pub ~/.sunsetlinux-keys/channel.pub
+  # 手工版：
   # 上传 channel.json / channel.json.sig / *.erofs.zst / *.erofs.gz
   # （.zst 给 App，.gz 给设备侧纯 CLI —— 设备上没有 zstd），然后把 URL + 公钥 + 指纹发给用户
 
@@ -162,13 +167,15 @@ main() {
   local cmd="$1"; shift
 
   case "$cmd" in
-    keygen|gen-manifest|manifest|sign|verify|channels|channels-edit|npm-resolve|npm-pack)
+    keygen|gen-manifest|manifest|sign|verify|channels|channels-edit|npm-resolve|npm-pack|publish-channel)
       need_node
       local script
       case "$cmd" in
         keygen)       script="keygen.mjs" ;;
         gen-manifest|manifest) script="gen-manifest.mjs" ;;
         sign)         script="sign.mjs" ;;
+        publish-channel)
+                      exec node "$SCRIPT_DIR/publish-channel.mjs" "$@" ;;
         verify)       script="verify.mjs" ;;
         channels|channels-edit) script="channels-edit.mjs" ;;
         npm-resolve)  script="npm-resolve.mjs" ;;

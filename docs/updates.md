@@ -427,6 +427,69 @@ sunsetlinux-channel channels add --id your-id --name "你的频道" \
 
 ---
 
+## 2.9 官方频道怎么部署（本项目自用，一条命令）
+
+前面 §2 是"任何第三方发布者"的通用流程。如果你要发的是**自己项目的官方频道**，
+照下面走即可 —— 工具已经把易错点（挑版本、真解压复算 `sha256_raw`、签原始字节、
+发布目录里层文件齐备）收进一条命令：
+
+```bash
+# 0) 一次性：生成频道密钥（私钥只留在你自己机器上，绝不提交）
+tools/channel/sunsetlinux-channel keygen --out-dir ~/.sunsetlinux-keys
+#    私钥 ~/.sunsetlinux-keys/channel.key  (PKCS#8 PEM, 0600)
+#    公钥 ~/.sunsetlinux-keys/channel.pub  (raw 32 字节 base64 —— 发给用户)
+#    指纹 ed25519:87:1f:86:f3:60:21:bd:1f   ← 让用户核对这个，防中间人
+
+# 1) 构建三层（需要 arm64 + 真 chroot；约 244 MiB 产物）
+bash rootfs/build-layers.sh --out-dir dist --runtime-dir runtime/root --dsh-dist-tag next
+
+# 2) 生成 + 签名 + 体检 + 整理发布目录（一条命令）
+tools/channel/sunsetlinux-channel publish-channel \
+    --base-url https://<托管前缀>/sunsetlinux \
+    --name "SunsetLinux 官方" --dsh-dist-tag next
+
+#    它会：把 *.erofs.zst / *.erofs.gz **硬链**进 dist/channel（不额外占空间）
+#          → gen-manifest（真解压复算 sha256_raw）
+#          → sign（签 channel.json 原始字节）
+#          → verify --strict（独立验签 + 逐层 + 解压复算）
+#          → 打印「要上传的文件清单 + 总量 + 给用户的 URL/公钥/指纹 + 订阅命令」
+
+# 3) 把 dist/channel 里的**全部文件**上传到 --base-url；channel.json 上传后一个字节都别再改
+```
+
+### 托管放哪：先算体积再选
+
+实测一次全量频道 **244 MiB**：
+
+| 层 | `.erofs.zst`（App 走这条） | `.erofs.gz`（设备侧纯 CLI 走这条） |
+|---|---|---|
+| base | 18.6 MiB | 26.5 MiB |
+| runtime | 46.5 MiB | **73.5 MiB** |
+| dsh | 31.2 MiB | 47.8 MiB |
+
+| 载体 | 适配度 | 说明 |
+|---|---|---|
+| **对象存储 / CDN**（R2、S3、OSS…） | ✅ 推荐 | 没有单文件/仓库体积限制，快、便宜；清单里 `url` 是绝对地址，可以只把 `channel.json` 放在别处 |
+| npm 包（`npm-pack`） | ⚠️ 仅适合小频道 | 省事、自带版本与完整性，但要注意 npm 对包体积的限制，244 MiB 很容易撞墙 |
+| GitHub Pages / gh-pages | ⚠️ 会满 | 单文件上限 **100 MB**、仓库软上限 **1 GB** → 全量目录约 **4 次**就撑满，而 `runtime-*.erofs.gz` 已经 73.5 MB 贴着上限 |
+| GitHub Releases | ❌ 与当前发布模型冲突 | 它需要 **tag**，而本项目刻意用**分支式发布**（beta/stable）不用 tag |
+
+> 💡 层的日常更新是**增量**的：只改 DSH 时用户只下 `dsh` 层（31.2 MiB），
+> 所以别把"全量 244 MiB"当成每次发布的成本 —— 但**首次部署**与**回归旧版本**是真要这么多。
+
+### 让用户用上你的频道
+
+有两种做法，**当前代码里的默认是第一种**：
+
+1. **用户手填**（现状）：App「设置 → 频道管理 → 添加」，填 `channel.json` 的 URL + 公钥；
+   命令行等价：`sunsetlinux-channel channels add --id official --url … --pub …`。
+   好处是零信任内置、完全去中心化；代价是**新用户要自己粘两串东西**。
+2. **内置默认频道**（⏳ 未实现，需要你定）：把 URL + 公钥写进 App（`BuildConfig` 或环境播种），
+   首启就带一个「官方」频道且不可删除。要做的话给我 `--base-url` 对应的
+   `channel.json` URL 与公钥即可 —— 指纹会一起写进 `docs/`，用户可以核对。
+
+---
+
 ## 3. 安全模型（请读完再发频道）
 
 ### 3.1 信任边界
@@ -523,6 +586,7 @@ sunsetlinux-channel channels add --id your-id --name "你的频道" \
 | `sunsetlinux-channel verify` | 验签 + 主/回退产物 sha256/size + **解压复算** `sha256_raw`/`size_raw` + zstd 窗口合规；退出码 0/1（`--no-raw-recompute` 可跳过复算，会明确提示） |
 | `sunsetlinux-channel channels …` | `list/add/remove/set/enable/disable/check/init` 管理 `channels.json` |
 | `sunsetlinux-channel publish-check` | 发布前体检（`--strict` 语义）：层两种产物齐备 + 验签 + sha256 + 解压复算 + zstd 窗口 |
+| `sunsetlinux-channel publish-channel` | **一条命令发布**：整理发布目录（硬链层文件）→ `gen-manifest` → `sign` → `verify --strict` → 打印上传清单与给用户的信息（`tools/channel/publish-channel.mjs`） |
 | `tools/seed/mkseed.sh` | 制作离线种子包 `dist/sunsetlinux-seed-<日期>.tar.zst` |
 | `tools/seed/verify-seed.sh` | 校验种子包（整包 sha256 + MANIFEST + 文件魔数） |
 | `rootfs/build-layers.sh` | 宿主/CI 上用真 chroot 构建三层 EROFS 镜像 + 生成 `.erofs.zst` 与 `.erofs.gz` 双分发产物 |

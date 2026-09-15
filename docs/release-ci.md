@@ -95,9 +95,35 @@ https://<用户名>.github.io/<仓库名>/stable/channel.json
 
 | Secret | 用途 | 缺失时 |
 |---|---|---|
-| `CHANNEL_SIGNING_KEY` | Ed25519 私钥，签 `channel.json` | **发布工作流直接失败**，绝不"跳过签名" |
+| `CHANNEL_SIGNING_KEY` | Ed25519 私钥，签 `channel.json` | ⚠️ **当前工作流并未使用它**：`release.yml` 只发布 APK + 模块 + `index.json`；**层与频道清单是手工发布的**（见 §六与 `docs/updates.md` §3）。配不配都不影响 CI 通过 —— 这条以前写成"缺失即失败"，是文档与实现的漂移，已更正 |
 | `ANDROID_KEYSTORE_BASE64` | 正式签名 keystore（base64） | 未配置时只出 **debug 包**，并在 Release 说明里标注 |
 | `ANDROID_KEYSTORE_PASSWORD` / `ANDROID_KEY_ALIAS` / `ANDROID_KEY_PASSWORD` | 签名口令 | 同上 |
+
+### 5.1 层产物与频道清单：**不在 CI 里，走 `publish-channel`**
+
+三层两式合计约 **244 MB**（实测：base 18.6+26.5 / runtime 46.5+73.5 / dsh 31.2+47.8 MiB），
+且构建需要 **arm64 + 真 chroot**（GitHub runner 是 x86-64，要 qemu/binfmt）。所以它们**不进 CI**，
+而是在有 arm64 的机器上构建后，用一条命令发布：
+
+```bash
+# 1) 构建层（arm64 + 真 chroot；本工作容器没有 CAP_SYS_ADMIN，chroot 会报 Function not implemented）
+bash rootfs/build-layers.sh --out-dir dist --runtime-dir runtime/root --dsh-dist-tag next
+
+# 2) 生成 + 签名 + 体检 + 打印上传清单（层文件用硬链整理进发布目录，不额外占空间）
+tools/channel/sunsetlinux-channel publish-channel \
+    --base-url https://<你的托管前缀>/sunsetlinux \
+    --key ~/.sunsetlinux-keys/channel.key \
+    --pub ~/.sunsetlinux-keys/channel.pub \
+    --name "SunsetLinux 官方" --dsh-dist-tag next
+
+# 3) 把打印出来的文件清单整体上传到 <base-url>，然后把 URL + 公钥 + 指纹发给用户
+```
+
+> ⚠️ **托管选型有个硬约束**：GitHub Pages 单文件上限 **100 MB**、仓库软上限 **1 GB**。
+> 一次全量频道 244 MB → gh-pages 大约 **4 次**就撑满，而且单文件 73.5 MB（`runtime-*.erofs.gz`）
+> 已经贴着 100 MB 上限。**建议：层文件放对象存储/CDN（R2、S3、OSS…），
+> `channel.json` 与 `.sig` 放哪都行**（清单里的 `url` 是绝对地址，可以指向另一个域名）。
+> 用户只信公钥，跟你用什么托管无关。
 
 **为什么签名密钥必须是 Secret**：频道的安全模型是"npm/HTTP 只是传输，信任根是公钥验签"。
 私钥一旦泄漏，任何人都能签出"你的"频道，**整个更新体系失效**（这一点已实测：篡改与冒签都会被拒，
