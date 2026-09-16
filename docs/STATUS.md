@@ -498,6 +498,27 @@ su -c '/data/sunsetlinux/bin/linuxctl doctor'
 | 已装状态读不到时 | —— | **不给刷入按钮**，先让用户修 root 授权（与"读不到 ≠ 没装"一致） |
 | 重启 | —— | 只报告"重启后生效"（KernelSU 落 `modules_update/`），**App 不替用户重启**，脚本里有单测断言不许出现 `reboot` |
 
+### 3.10.20 无 loop 层模式（dir）+ doctor §1e（App 0.2.10 / 模块 1.0.15）
+
+用户选了「A. 加"无 loop 目录模式"（作兼容开关）」。真机上最容易出问题的不是 overlayfs，
+而是它上游那条链（losetup → erofs → upper.img(ext4 loop) → overlay）；"目录 + overlayfs"
+是内核确认支持、依赖最少的基本用法。
+
+| | loop（默认） | dir（新） |
+|---|---|---|
+| 只读层 | losetup + erofs 挂载 ×3 | `fsck.erofs --extract` 解成 `dirs/{base,runtime,dsh}` |
+| 可写层 | upper.img（ext4+loop） | `dirs-upper/`（真目录，**不需要 upper.img**） |
+| 内核资源 | 4 loop + 3 erofs + 1 ext4 | **0 loop、0 镜像挂载** |
+| 代价 | 省磁盘（550 MB） | +1.6 GB、首次解包几分钟（有戳，之后幂等） |
+
+- 开关优先级：`--layer-mode` > `SUNSETLINUX_LAYER_MODE` > `etc/config.json` 的 `layer_mode` > 默认 loop；
+  非法值在参数解析后**立刻报错**。
+- App：「设置 → 层模式」可切（透传环境变量），「关于」与 `status` 显示**本次 start 实际用的**（`run/layer-mode` → `layer_mode` 字段）。
+- 安全边界：解包前校验 erofs；解包器缺失**明确失败**（`SUNSETLINUX_EROFS_EXTRACT` 可覆盖）；解包按"文件名+字节数"打戳，幂等，换层只重解那一层。
+- doctor 新增 **§1e 层模式**：当前模式、解包器可用性、三层戳是否与层文件一致、解包占用；loop 模式缺 `upper.img` 时提示可切 dir。
+- 测试：`runtime/root/selftest.sh` 新增 14 条（解析优先级 6 条 + 目录模式解包 5 条 + doctor 结论等），
+  bash+mksh 双跑 **34/0**。
+
 ### 3.10.19 挂载冲突检查（§1d，模块 1.0.14）
 
 用户的问题：「我主要是怕挂载冲突的问题，模块本身就有自动挂载机制，项目的模块再写个挂载，怕不是会冲突哟。」

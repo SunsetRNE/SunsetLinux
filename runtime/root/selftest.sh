@@ -217,6 +217,134 @@ if LINUX_HOME="$LH2" "$SH_BIN" "$SELF_DIR/linuxctl.sh" update dsh "$FIXTURES/ero
 fi
 
 # ---------------------------------------------------------------------------
+# 层模式（loop / dir）：解析顺序 + 目录模式解包（幂等/重解/失败）
+#
+# dir 模式的动机：真机上 loop/erofs 这条链最容易出问题（toybox 选项、loop 数量、
+# 挂载权限），而"把层解包成目录 + 目录 overlay"完全不碰 loop。这几条断言钉住它的契约：
+# 解析优先级、幂等（版本没变不重解）、换层要重解、解包器缺失要明确失败。
+# ---------------------------------------------------------------------------
+head_ "层模式解析与目录模式解包"
+
+# 抽取要测的函数（不能 source 整个 start.sh —— 那会执行它的主体）
+lm="$TMP/layermode.sh"; : > "$lm"
+for fn in resolve_layer_mode materialize_dirs; do
+    sed -n "/^$fn()/,/^}/p" "$SELF_DIR/start.sh" >> "$lm"
+        grep -q "^$fn()" "$lm" || bad "抽取失败：start.sh 里找不到 $fn()"
+done
+# 目录模式解包的调用封装（放进同一个文件里，source 一次即可用）
+cat >> "$lm" <<'EOS'
+
+lm_materialize() {
+    (
+        LINUX_HOME="$LMH"; LH="$LMH"; ETC_DIR="$LMH/etc"; RUN_DIR="$LMH/run"
+        LAYER_MODE=dir; LAYER_NAMES="base runtime dsh"
+        DIRS_DIR="$LMH/dirs"; DIRS_UPPER="$LMH/dirs-upper"; DIRS_WORK="$LMH/dirs-work"
+        DAEMON_LOG="$LMH/run/linux.log"; EROFS_EXTRACT="$EXTRACT"; CALLS_FILE="$CALLS"
+        log() { :; }; warn_soft() { :; }; die() { echo "DIE:$*" >&2; exit 3; }
+        layer_format() { printf "erofs"; }
+        find_layer() { for _f in "$LMH/layers/$1-"*.erofs; do [ -f "$_f" ] && { printf "%s" "$_f"; return; }; done; }
+        export CALLS_FILE
+        materialize_dirs
+    )
+}
+EOS
+# shellcheck disable=SC1090
+. "$lm"
+
+# 桩环境：临时 LINUX_HOME + 假层文件 + 假解包器（记录每次调用）
+LMH="$TMP/lm-env"; mkdir -p "$LMH/layers" "$LMH/etc" "$LMH/run"
+printf "{}\n" > "$LMH/etc/config.json"
+for l in base runtime dsh; do : > "$LMH/layers/$l-1.0.erofs"; done
+CALLS="$TMP/extract-calls"; : > "$CALLS"
+EXTRACT="$TMP/fake-fsck"; cat > "$EXTRACT" <<'EOS'
+#!/bin/sh
+for a in "$@"; do case "$a" in --extract=*) d="${a#--extract=}";; esac; done
+echo "$d" >> "$CALLS_FILE"
+mkdir -p "$d/etc" "$d/usr/bin"
+echo "ID=sunsetlinux" > "$d/etc/os-release"
+exit 0
+EOS
+chmod +x "$EXTRACT"
+
+lm_run() { # lm_run <mode-flag> <env-mode> <config-json>  → 打印 "mode|die消息"
+    (
+        LINUX_HOME="$LMH"; LH="$LMH"; ETC_DIR="$LMH/etc"; RUN_DIR="$LMH/run"
+        CONFIG_JSON="$LMH/etc/config.json"; LAYER_NAMES="base runtime dsh"
+        DIRS_DIR="$LMH/dirs"; DIRS_UPPER="$LMH/dirs-upper"; DIRS_WORK="$LMH/dirs-work"
+        DAEMON_LOG="$LMH/run/linux.log"; CALLS_FILE="$CALLS"
+        EROFS_EXTRACT="$EXTRACT"
+        LAYER_MODE=""; LAYER_MODE_FLAG="$1"; SUNSETLINUX_LAYER_MODE="$2"
+        printf "%s\n" "$3" > "$CONFIG_JSON"
+        DIED=""
+        log() { :; }; warn_soft() { :; }
+        die() { echo "DIE:$*"; exit 3; }
+        layer_format() { printf "erofs"; }
+        find_layer() { for _f in "$LMH/layers/$1-"*.erofs; do [ -f "$_f" ] && { printf "%s" "$_f"; return; }; done; }
+        export CALLS_FILE
+        resolve_layer_mode || exit 7
+        printf "%s|%s\n" "$LAYER_MODE" "$DIED"
+    )
+}
+
+e="$(lm_run dir "" "{}")"
+case "$e" in dir\|*) ok "命令行 --layer-mode dir 生效" ;; *) bad "flag 不生效：$e" ;; esac
+e="$(lm_run "" dir "{}")"
+case "$e" in dir\|*) ok "环境变量 SUNSETLINUX_LAYER_MODE=dir 生效" ;; *) bad "env 不生效：$e" ;; esac
+e="$(lm_run "" "" '{"layer_mode":"dir"}')"
+case "$e" in dir\|*) ok "config.json 的 layer_mode 生效" ;; *) bad "config 不生效：$e" ;; esac
+e="$(lm_run "" "" "{}")"
+case "$e" in loop\|*) ok "三处都没写 → 默认 loop（省磁盘）" ;; *) bad "默认值不对：$e" ;; esac
+e="$(lm_run loop dir "{}")"
+case "$e" in loop\|*) ok "命令行优先于环境变量" ;; *) bad "优先级不对：$e" ;; esac
+e="$(lm_run dirr "" "{}")"
+case "$e" in *"未知的层模式"*) ok "非法层模式明确报错" ;; *) bad "非法值没报错：$e" ;; esac
+
+# --- 目录模式解包：三次运行的调用次数与戳 ---
+: > "$CALLS"
+cat >> "$lm" <<'EOS'
+
+lm_materialize() {
+    (
+        LINUX_HOME="$LMH"; LH="$LMH"; ETC_DIR="$LMH/etc"; RUN_DIR="$LMH/run"
+        LAYER_MODE=dir; LAYER_NAMES="base runtime dsh"
+        DIRS_DIR="$LMH/dirs"; DIRS_UPPER="$LMH/dirs-upper"; DIRS_WORK="$LMH/dirs-work"
+        DAEMON_LOG="$LMH/run/linux.log"; EROFS_EXTRACT="$EXTRACT"; CALLS_FILE="$CALLS"
+        log() { :; }; warn_soft() { :; }; die() { echo "DIE:$*" >&2; exit 3; }
+        layer_format() { printf "erofs"; }
+        find_layer() { for _f in "$LMH/layers/$1-"*.erofs; do [ -f "$_f" ] && { printf "%s" "$_f"; return; }; done; }
+        export CALLS_FILE
+        materialize_dirs
+    )
+}
+EOS
+if lm_materialize 2>"$TMP/lm.err"; then ok "目录模式：首次解包成功" ; else bad "首次解包失败：$(tail -1 "$TMP/lm.err")" ; fi
+n1="$(wc -l < "$CALLS" | tr -d ' ')"
+[ "$n1" = "3" ] && ok "首次解包 3 层（调用 3 次）" || bad "首次解包次数不对：$n1"
+[ -f "$LMH/dirs/base/etc/os-release" ] && ok "解出的目录内容就位" || bad "解出的目录里没有内容"
+lm_materialize >/dev/null 2>&1 || true
+n2="$(wc -l < "$CALLS" | tr -d ' ')"
+[ "$n2" = "$n1" ] && ok "第二次：层没变 → 不重复解包（幂等）" || bad "重复解包了：$n1 → $n2"
+# 换层（文件名/大小变化）→ 只重解那一层
+cp "$LMH/layers/runtime-1.0.erofs" "$LMH/layers/runtime-1.1.erofs"; : > "$LMH/layers/runtime-1.1.erofs"
+printf "12345" > "$LMH/layers/runtime-1.1.erofs"; rm -f "$LMH/layers/runtime-1.0.erofs"
+lm_materialize >/dev/null 2>&1 || true
+n3="$(wc -l < "$CALLS" | tr -d ' ')"
+[ "$n3" = "$(( n2 + 1 ))" ] && ok "换了 runtime 层 → 只重解它（+1 次）" || bad "重解次数不对：$n2 → $n3"
+# 解包器不存在 → 明确失败（不能静默跳过）
+e="$(
+    (
+        LINUX_HOME="$LMH"; ETC_DIR="$LMH/etc"; RUN_DIR="$LMH/run"
+        LAYER_MODE=dir; LAYER_NAMES="base runtime dsh"; DIRS_DIR="$LMH/dirs"
+        DAEMON_LOG="$LMH/run/linux.log"; EROFS_EXTRACT="$TMP/definitely-missing"
+        log() { :; }; warn_soft() { :; }; die() { echo "DIE:$*"; exit 3; }
+        layer_format() { printf "erofs"; }
+        find_layer() { printf "%s" "$LMH/layers/$1-1.0.erofs"; }
+        materialize_dirs 2>&1 || true
+    )
+)"
+case "$e" in *"需要 erofs 解包器"*) ok "解包器缺失 → 明确报错（不静默跳过）" ;; *) bad "缺解包器时行为不对：$e" ;; esac
+
+# ---------------------------------------------------------------------------
 # 挂载冲突检查（§1d）必须存在且能给出结论
 #
 # 背景：KernelSU 的模块挂载由 metamodule 在启动时完成（把常规模块的 system/ overlay

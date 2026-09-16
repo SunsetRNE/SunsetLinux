@@ -76,6 +76,8 @@ data class DshStatus(
      * 为什么单列：`mode` 对外仍是 `proot`（§3.1 冻结的契约不动），
      * 但"到底跑的是 proroot 还是降级的 proot"对排障与性能预期都是关键信息。
      */
+    /** 本次 start 用的层模式（`loop` / `dir`）；没启动过是 null。 */
+    val layerMode: String? = null,
     val rootlessKind: String? = null,
     val rootlessVersion: String? = null,
     val raw: String,
@@ -169,6 +171,7 @@ data class DshStatus(
             }
 
             return DshStatus(
+                layerMode = o.str("layer_mode"),
                 rootlessKind = rootless?.str("kind"),
                 rootlessVersion = rootless?.str("version"),
                 schema = o.num("schema")?.toInt(),

@@ -20,6 +20,37 @@
 | 0.2.7 | 9 | **修"层都在、却永远挂不上"**（模块 **1.0.11**）：开机自启用裸 `sh` 发起 → 撞上 busybox ash（`${BASH_SOURCE[0]}` 直接 `syntax error: bad substitution`），而且 `linuxctl` 用 `bash start.sh` 去挂载 —— 而 Android 上没有 bash。现在统一走 `$SH_BIN`（宿主/CI 用 bash，设备用 `/system/bin/sh`），并加了三条回归闸门。App 本身无代码改动，只是与模块 1.0.11 一起发 |
 | 0.2.8 | 10 | **免 root 模式换 proroot 首选 + proot 降级**：proroot（LD_PRELOAD，无 ptrace 开销）随 APK 的 jniLibs 打包，proot 仍随包内嵌；`SUNSETLINUX_ROOTLESS=auto|proroot|proot`（App 设置里可选），`status`/`doctor`/App 都如实报实际用了谁。proroot 是专有许可 —— 只随 APK 分发、不得再分发修改版，带许可原文 + 关于页 attribution，并有合规闸门 |
 | 0.2.9 | 11 | **终端接上原生 PTY**：`/dev/ptmx` + forkpty 路线（NDK 编译的小 `.so` 随 APK），Ctrl-C/Ctrl-D/Tab/方向键真的生效，`vim`/`htop` 这类全屏程序能跑，窗口大小按控件尺寸发 `TIOCSWINSZ`；输出用最小 VT 模拟器渲染（`\r` 覆盖、`ESC[K`、定位、SGR 剥离）；原生库不可用时**优雅降级**回行缓冲并明说 |
+| 0.2.10 | 12 | **加"无 loop 层模式"开关（dir）**：把三层解包成目录 + 目录 overlayfs，**完全不碰 loop / erofs / upper.img**；「设置 → 层模式」可切、也读 `SUNSETLINUX_LAYER_MODE` 与 `etc/config.json` 的 `layer_mode`（默认 loop 省磁盘）。模块 **1.0.15**：dir 模式实现 + doctor §1e 层模式检查 |
+
+## 0.2.10 —— 加一条"不碰 loop"的层模式（兼容开关）
+
+**动机**：真机上最容易出问题的不是 overlayfs，而是它上游那条链 —— `losetup` → erofs 挂载 →
+`upper.img`(ext4 loop) → 再 overlay。每一步都依赖 toybox 的选项面/loop 设备数量/挂载权限。
+而"目录 + overlayfs"是内核确认支持（`CONFIG_OVERLAY_FS=y`）、也最少依赖的基本用法。
+
+**做法**：`runtime/root/start.sh` 新增 `--layer-mode loop|dir`：
+
+| | loop（默认） | dir（新） |
+|---|---|---|
+| 只读层 | `losetup` + `mount -t erofs` 三层 | `fsck.erofs --extract=DIR`（Android 自带）解成 `$LINUX_HOME/dirs/{base,runtime,dsh}` |
+| 可写层 | `upper.img`（ext4 + loop） | `$LINUX_HOME/dirs-upper`（真目录，**不需要 upper.img**） |
+| 合并 | overlayfs（镜像挂出来的目录） | overlayfs（目录） |
+| 内核资源 | 4 个 loop + 3 个 erofs 挂载 + 1 个 ext4 挂载 | **0 个 loop、0 个镜像挂载** |
+| 磁盘 | 550 MB（层镜像） | 550 MB（层镜像）+ 约 1.6 GB（解开的目录） |
+| 首次启动 | 秒级 | 解包几分钟（有戳文件，之后幂等跳过） |
+
+开关三处（优先级：命令行 > 环境变量 > config.json > 默认 loop）：
+`--layer-mode dir`、`SUNSETLINUX_LAYER_MODE=dir`、`etc/config.json` 的 `"layer_mode": "dir"`。
+App「设置 → 层模式」可切换（透传环境变量），「关于」页与 `linuxctl status` 的 `layer_mode` 字段
+会显示**本次 start 实际用的是哪个**（start.sh 写 `run/layer-mode`，status/doctor 是另一个进程只能读文件）。
+
+**为什么不是"把挂载交给 KernelSU"**：KernelSU 的模块挂载由 metamodule 负责，契约是"模块目录 →
+Android 系统路径"的 overlay/重定向，没有通用挂载服务，且 metamodule 单实例（自带一个会顶掉用户的
+magic_mount_rs）。详见 `docs/mount-conflict.md`。
+
+**安全边界**：dir 模式解包前会校验是 erofs 层；解包器缺失时**明确失败**（`SUNSETLINUX_EROFS_EXTRACT`
+可覆盖路径），不静默降级；解包按"文件名+字节数"打戳，层没变就跳过（幂等），换层只重解那一层。
+
 
 ## 0.2.9 —— 终端：从「按行管道」换成「原生 PTY」
 

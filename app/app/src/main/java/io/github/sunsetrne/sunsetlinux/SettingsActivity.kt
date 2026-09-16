@@ -101,6 +101,9 @@ class SettingsActivity : ComponentActivity() {
 
     /** 免 root 运行时偏好：null = auto（优先 proroot），也可固定 proroot / proot。 */
     private val rootlessRuntime = mutableStateOf<String?>(null)
+
+    /** 层模式偏好：null/loop = 默认；dir = 解包成目录（不碰 loop/erofs）。 */
+    private val layerMode = mutableStateOf<String?>(null)
     private val suAvailable = mutableStateOf<Boolean?>(null)
     private val effectiveMode = mutableStateOf(EnvMode.ROOT)
     private val port = mutableStateOf("3080")
@@ -129,6 +132,7 @@ class SettingsActivity : ComponentActivity() {
 
         modeOverride.value = prefs.modeOverride
         rootlessRuntime.value = prefs.rootlessRuntime
+        layerMode.value = prefs.layerMode
         port.value = prefs.port.toString()
         bootStart.value = prefs.bootStartService
         autoStart.value = prefs.autoStartEnv
@@ -140,6 +144,15 @@ class SettingsActivity : ComponentActivity() {
                     section = section,
                     modeOverride = modeOverride.value,
                     rootlessRuntime = rootlessRuntime.value,
+                    layerMode = layerMode.value,
+                    onPickLayerMode = { picked ->
+                        layerMode.value = picked
+                        prefs.layerMode = picked
+                        notice.value = when (picked) {
+                            "dir" -> "层模式已切到 dir：下次启动会把三层解包成目录（首次几分钟、约 +1.6 GB），全程不碰 loop/erofs"
+                            else -> "层模式：默认 loop（losetup + erofs + upper.img，省磁盘）"
+                        }
+                    },
                     onPickRootless = { picked ->
                         rootlessRuntime.value = picked
                         prefs.rootlessRuntime = picked
@@ -310,6 +323,8 @@ private fun SettingsScreen(
     modeOverride: EnvMode?,
     rootlessRuntime: String?,
     onPickRootless: (String?) -> Unit,
+    layerMode: String?,
+    onPickLayerMode: (String?) -> Unit,
     suAvailable: Boolean?,
     effectiveMode: EnvMode,
     port: String,
@@ -428,6 +443,37 @@ private fun SettingsScreen(
                             Text(
                                 text = "本次运行实际使用：$kind" +
                                     (status?.rootlessVersion?.let { " $it" } ?: ""),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Accent,
+                            )
+                        }
+                    }
+                }
+
+                Spacer(Modifier.height(12.dp))
+
+                // 层模式（loop / dir）—— root 模式专用
+                DshCard(Modifier.fillMaxWidth()) {
+                    Column(Modifier.fillMaxWidth()) {
+                        SectionLabel("层模式（root 模式）")
+                        Spacer(Modifier.height(10.dp))
+                        ModeRow("默认 loop：losetup + erofs + upper.img（省磁盘）", layerMode == null || layerMode == "loop") {
+                            onPickLayerMode(null)
+                        }
+                        ModeRow("dir：把层解包成目录，不碰 loop/erofs", layerMode == "dir") {
+                            onPickLayerMode("dir")
+                        }
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            text = "loop 省磁盘但要占 loop 设备与 erofs 挂载；dir 完全不碰它们（目录 + overlayfs），" +
+                                "代价是首次解包几分钟、磁盘约 +1.6 GB。真机上 loop/erofs 出问题时切到 dir 即可。",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = TextMuted,
+                        )
+                        status?.layerMode?.let {
+                            Spacer(Modifier.height(6.dp))
+                            Text(
+                                text = "本次 start 实际使用：$it",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = Accent,
                             )

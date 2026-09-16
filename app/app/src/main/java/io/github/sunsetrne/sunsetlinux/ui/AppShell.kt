@@ -734,6 +734,7 @@ private fun AboutDialog(ui: LauncherViewModel.UiState, onClose: () -> Unit, onEx
                     },
                 )
                 AboutLine("环境根", DshPaths.linuxHome(context, ui.mode))
+                AboutLine("层模式", ui.status?.layerMode ?: "—（未启动）")
                 AboutLine("Linux 侧接口", "linuxctl / status JSON（§3.1 冻结）")
                 AboutLine("当前阶段", ui.stage)
                 Spacer(Modifier.height(10.dp))

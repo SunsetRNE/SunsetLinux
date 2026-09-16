@@ -507,6 +507,55 @@ else
     add_finding warn mount_conflict "有可疑项，见上面 [warn]"
 fi
 
+head_ "1e. 层模式（loop / dir）"
+# loop = losetup + erofs 挂载 + upper.img(ext4) + overlay；dir = 层解包成目录 + 目录 overlay。
+# dir 是"不想碰 loop/erofs"时的兼容开关（见 docs/layer-mode.md）。
+LM=""
+if [ -f "$RUN_DIR/layer-mode" ]; then
+    LM="$(tr -d ' \n\r' < "$RUN_DIR/layer-mode" 2>/dev/null | head -c 16 || true)"
+fi
+if [ -n "$LM" ]; then
+    ok "当前（上次 start）层模式：$LM"
+else
+    info "run/layer-mode 不存在（环境还没启动过）→ 默认 loop"
+    LM=loop
+fi
+case "$LM" in
+    dir)
+        _ex="${SUNSETLINUX_EROFS_EXTRACT:-/system/bin/fsck.erofs}"
+        if [ -x "$_ex" ]; then ok "erofs 解包器可用：$_ex"
+        else warn "erofs 解包器不可执行：$_ex（dir 模式会直接失败；可设 SUNSETLINUX_EROFS_EXTRACT）"; fi
+        _n=0; _bad=""
+        for _l in base runtime dsh; do
+            _d="$LH/dirs/$_l"; _st="$LH/dirs/.$_l.stamp"
+            if [ -d "$_d" ] && [ -f "$_st" ]; then
+                _n=$((_n + 1))
+                _lf="$(find_layer "$_l" 2>/dev/null || true)"
+                if [ -n "$_lf" ]; then
+                    _want="$(basename "$_lf"):$(wc -c < "$_lf" 2>/dev/null | tr -d ' ')"
+                    [ "$_want" = "$(cat "$_st" 2>/dev/null)" ] || _bad="$_bad $_l(需重解)"
+                fi
+            else
+                _bad="$_bad $_l(未解包)"
+            fi
+        done
+        if [ -z "$_bad" ]; then
+            ok "三层都已解包且与当前层文件一致（$_n/3）"
+        else
+            warn "下列层需要解包/重解（下次 start 会自动做）：$_bad"
+        fi
+        _du="$(du -sk "$LH/dirs" 2>/dev/null | awk '{print $1}')"
+        [ -n "$_du" ] && info "解包后占用：$(( _du / 1024 )) MB（loop 模式只需层镜像本身）"
+        ;;
+    loop)
+        if [ -f "$LH/upper.img" ]; then
+            ok "loop 模式必需件齐全（layers/*.erofs + upper.img）"
+        else
+            warn "loop 模式缺 upper.img → 启动会失败；可改用 dir 模式（SUNSETLINUX_LAYER_MODE=dir）"
+        fi
+        ;;
+esac
+
 head_ "2. 三层只读镜像（erofs / squashfs）"
 # ★ 三态：/proc/filesystems 可读→按内容判定；不可读→ **skip**（信息不可得≠不支持）。
 #   被真实场景逼出来的：某次 /proc/filesystems 变成 Permission denied，旧写法把

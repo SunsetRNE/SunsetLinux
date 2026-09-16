@@ -47,9 +47,22 @@ LH="$LINUX_HOME"
 RUN_DIR="$LH/run"
 ETC_DIR="$LH/etc"
 STATE_JSON="$ETC_DIR/state.json"
+CONFIG_JSON="$ETC_DIR/config.json"   # resolve_layer_mode 要读它（此前只定义了 STATE_JSON）
 LAYERS_DIR="$LH/layers"
 LAYERS_MNT="$LH/layers-mnt"
 UPPER_DIR="$LH/upper"
+
+# ── 层模式（loop / dir）────────────────────────────────────────────────────
+#   loop（默认）：losetup + erofs 挂载 + upper.img(ext4) + overlayfs —— 省磁盘，但要用 loop 设备
+#   dir（兼容开关）：把层**解包成目录** + 目录 overlay —— 完全不碰 loop、不碰 erofs 挂载、
+#                     不需要 upper.img；代价是磁盘（解包后约 1.6 GB）与首次解包时间。
+#   为什么要有它：真机上 loop/erofs 这条链最容易出问题（toybox 选项、loop 数量、挂载权限），
+#   而 overlayfs 对目录是内核确认支持的最基本用法（CONFIG_OVERLAY_FS=y）。
+LAYER_MODE=""
+DIRS_DIR="$LH/dirs"            # 解出来的只读层
+DIRS_UPPER="$LH/dirs-upper"    # 可写层（真目录，替代 upper.img）
+DIRS_WORK="$LH/dirs-work"      # overlayfs 的 workdir
+EROFS_EXTRACT="${SUNSETLINUX_EROFS_EXTRACT:-/system/bin/fsck.erofs}"
 WORK_DIR="$LH/work"
 ROOTFS_DIR="$LH/rootfs"
 
@@ -77,16 +90,28 @@ UNSHARE=/system/bin/unshare
 MODE="start"
 FOREGROUND=0
 MAKE_PRIVATE=0
-for arg in "$@"; do
+# ★ 用 while + shift 解析，而不是 `for arg in "$@"`：后者在循环里 shift 不了下一个参数，
+#   `--layer-mode dir` 会被当成两个参数、报"未知参数 dir"（本地自测时踩到）。
+while [ $# -gt 0 ]; do
+    arg="$1"
     case "$arg" in
-        --inner)      MODE=inner ;;
-        --make-private) MODE=inner; MAKE_PRIVATE=1 ;;
-        --foreground) FOREGROUND=1 ;;
-        --check-ready) MODE=check_ready ;;
-        --probe-only)  MODE=probe_only ;;
+        --inner)      MODE=inner; shift ;;
+        --make-private) MODE=inner; MAKE_PRIVATE=1; shift ;;
+        --foreground) FOREGROUND=1; shift ;;
+        --check-ready) MODE=check_ready; shift ;;
+        --probe-only)  MODE=probe_only; shift ;;
+        --layer-mode)  LAYER_MODE_FLAG="${2:-}"; shift 2 ;;
+        --layer-mode=*) LAYER_MODE_FLAG="${arg#--layer-mode=}"; shift ;;
         *) echo "start.sh: 未知参数 $arg" >&2; exit 2 ;;
     esac
 done
+
+# --- 层模式：**尽早**解析（拼错要立刻报，而不是等到挂载阶段才发现）--------
+#   注意这里 log/die 还没定义，所以用一个最小的本地报错。
+case "${LAYER_MODE_FLAG:-}" in
+    ""|loop|dir) ;;
+    *) echo "start.sh: 未知的层模式：$LAYER_MODE_FLAG（只支持 loop / dir）" >&2; exit 2 ;;
+esac
 
 # --- 日志：一律走 stderr + 追加 run/linux.log（App 日志页读它）--------------
 log() {
@@ -217,8 +242,8 @@ probe_unshare_syntax() {
 #   但可以用它自己的动态加载器执行：
 #     /…/layers-mnt/base/lib/ld-linux-aarch64.so.1 --library-path <该层 lib 目录> <该层 mount> …
 #   base 层只需要**已经 loop 挂上**（在挂载树里它是最早挂的那批之一），所以这条回退可行。
-detect_util_mount() {
-    local base="$LAYERS_MNT/base" ld="" m=""
+detect_util_mount() { # detect_util_mount [base_dir]（默认 loop 模式下的 $LAYERS_MNT/base）
+    local base="${1:-$LAYERS_MNT/base}" ld="" m=""
     local cand
     for cand in "$base/lib/ld-linux-aarch64.so.1" "$base/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1"; do
         [ -x "$cand" ] && { ld="$cand"; break; }
@@ -525,6 +550,60 @@ cleanup_on_fail() {
 }
 
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# 层模式：命令行 --layer-mode > 环境变量 SUNSETLINUX_LAYER_MODE > config.json > loop
+# ---------------------------------------------------------------------------
+resolve_layer_mode() {
+    local m="${LAYER_MODE_FLAG:-}"
+    [ -n "$m" ] || m="${SUNSETLINUX_LAYER_MODE:-}"
+    if [ -z "$m" ] && [ -f "$CONFIG_JSON" ]; then
+        m="$(sed -n 's/.*"layer_mode"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$CONFIG_JSON" 2>/dev/null | head -n1)"
+    fi
+    [ -n "$m" ] || m=loop
+    case "$m" in
+        loop|dir) LAYER_MODE="$m" ;;
+        *) die "未知的层模式：$m（只支持 loop / dir）" ;;
+    esac
+    log "层模式：$LAYER_MODE（loop=losetup+erofs+upper.img；dir=解包成目录+overlay）"
+}
+
+# 目录模式：把每一层解包成目录（幂等：版本/大小没变就跳过）
+materialize_dirs() {
+    local l lf want got stamp
+    [ -x "$EROFS_EXTRACT" ] || die "目录模式需要 erofs 解包器：$EROFS_EXTRACT 不可执行。
+  可以用 SUNSETLINUX_EROFS_EXTRACT=<路径> 指定，或改用层模式 loop。
+  注：Android 自带 /system/bin/fsck.erofs（erofs-utils ≥1.6，支持 --extract=DIR）。"
+    mkdir -p "$DIRS_DIR" "$DIRS_UPPER" "$DIRS_WORK" || die "无法创建目录模式所需目录（$DIRS_DIR）"
+    for l in $LAYER_NAMES; do
+        lf="$(find_layer "$l" || true)"
+        [ -n "$lf" ] || die "缺少层文件 $LAYERS_DIR/$l.{erofs,squashfs}（先跑 linuxctl provision）"
+        case "$(layer_format "$lf" 2>/dev/null || echo unknown)" in
+            erofs) : ;;
+            *) die "目录模式只支持 erofs 层（$l 是 $(layer_format "$lf" 2>/dev/null || echo unknown)）：$lf。" ;;
+        esac
+        # 戳 = 文件名 + 字节数：层被替换（新版本）就会变；不用每层 1 GB 去算 sha256
+        [ -f "$lf" ] || die "层文件不存在（刚被删除？）：$lf"
+        want="$(basename "$lf"):$(wc -c < "$lf" 2>/dev/null | tr -d ' ')"
+        stamp="$DIRS_DIR/.$l.stamp"
+        got="$(cat "$stamp" 2>/dev/null || printf '')"
+        if [ "$got" = "$want" ] && [ -d "$DIRS_DIR/$l" ]; then
+            log "目录模式：$l 已解包且未变化（$want），跳过"
+            continue
+        fi
+        log "目录模式：解包 $l（$want）→ $DIRS_DIR/$l（首次可能要几分钟）"
+        rm -rf "$DIRS_DIR/$l"
+        mkdir -p "$DIRS_DIR/$l" || die "无法创建 $DIRS_DIR/$l"
+        if ! "$EROFS_EXTRACT" --extract="$DIRS_DIR/$l" "$lf" >>"$DAEMON_LOG" 2>&1; then
+            die "解包 $l 失败：$EROFS_EXTRACT --extract=$DIRS_DIR/$l $lf（详见 $DAEMON_LOG）"
+        fi
+        if [ ! -f "$DIRS_DIR/$l/etc/os-release" ] && [ ! -d "$DIRS_DIR/$l/usr" ]; then
+            warn_soft "层 $l 解出来后没看到 /usr 或 /etc/os-release（层内容可疑）"
+        fi
+        printf '%s' "$want" > "$stamp" 2>/dev/null || true
+        log "目录模式：$l 解包完成"
+    done
+}
+
 # 挂载树本体（即 §4 的 3–9 步；1/2 步由父进程的 unshare 完成，10 步是 chroot）
 # ---------------------------------------------------------------------------
 build_mount_tree() {
@@ -539,38 +618,49 @@ build_mount_tree() {
             *) die "层 $l 格式不可识别（magic=$fmt）：$lf" ;;
         esac
     done
-    [ -f "$LH/upper.img" ] || die "缺少可写层镜像 $LH/upper.img（先跑 linuxctl provision）"
-
     # 残留清理：上次异常退出可能留下 mounts 记录，先按记录卸一遍
     if [ -s "$MOUNTS_FILE" ]; then
         log "发现上次残留的挂载记录，先清理"
         unmount_recorded
     fi
 
-    # --- §4 步 3：ext4 可写层（loop）--------------------------------------
-    # 说明：这里用 `-o loop` 让内核自动分配 loop 设备。内核 CONFIG_EXT4_FS=y。
-    do_mount upper "$LH/upper.img" -t ext4 -o loop,rw,noatime
-    mkdir -p "$UPPER_DIR/upper" "$UPPER_DIR/work" || die "无法创建 overlay upper/work 目录"
+    local ovl_opts="" base_for_util=""
+    if [ "$LAYER_MODE" = "dir" ]; then
+        # ---- 目录模式：不碰 loop / 不挂 erofs / 不需要 upper.img ----
+        materialize_dirs
+        base_for_util="$DIRS_DIR/base"
+        mkdir -p "$DIRS_UPPER" "$DIRS_WORK" || die "无法创建目录模式 upper/work：$DIRS_UPPER"
+        ovl_opts="lowerdir=$DIRS_DIR/dsh:$DIRS_DIR/runtime:$DIRS_DIR/base"
+        ovl_opts="$ovl_opts,upperdir=$DIRS_UPPER,workdir=$DIRS_WORK"
+    else
+        [ -f "$LH/upper.img" ] || die "缺少可写层镜像 $LH/upper.img（先跑 linuxctl provision；或用 --layer-mode dir）"
 
-    # --- §4 步 4（前半）：把三层只读镜像 loop 挂成目录 ---------------------
-    # **对 architecture.md §4 的必要修正**：原文写 `lowerdir=layers/dsh:...`，
-    # 直接把镜像文件路径当 lowerdir。这要求镜像能被 overlayfs 直接当 lower，
-    # 而 overlayfs 的 lowerdir 必须是**目录**（squashfs/erofs 镜像是块设备内容，
-    # 不是目录）。因此先把每层 loop 挂到 $LAYERS_MNT/<name>，再用这些目录组 lowerdir。
-    # 代价：多 3 个 loop 挂载；收益：格式无关（erofs/squashfs 都行），且能对每层
-    # 单独做健康检查。
-    mkdir -p "$LAYERS_MNT"
-    for l in $LAYER_NAMES; do
-        mount_layer "$l" "$(find_layer "$l")"
-    done
-    # base 层挂上之后才可能取到 util-linux 的 mount，这里补一次探测，
+        # --- §4 步 3：ext4 可写层（loop）----------------------------------
+        # 说明：这里用 `-o loop` 让内核自动分配 loop 设备。内核 CONFIG_EXT4_FS=y。
+        do_mount upper "$LH/upper.img" -t ext4 -o loop,rw,noatime
+        mkdir -p "$UPPER_DIR/upper" "$UPPER_DIR/work" || die "无法创建 overlay upper/work 目录"
+
+        # --- §4 步 4（前半）：把三层只读镜像 loop 挂成目录 -----------------
+        # **对 architecture.md §4 的必要修正**：原文写 `lowerdir=layers/dsh:...`，
+        # 直接把镜像文件路径当 lowerdir。这要求镜像能被 overlayfs 直接当 lower，
+        # 而 overlayfs 的 lowerdir 必须是**目录**（squashfs/erofs 镜像是块设备内容，
+        # 不是目录）。因此先把每层 loop 挂到 $LAYERS_MNT/<name>，再用这些目录组 lowerdir。
+        # 代价：多 3 个 loop 挂载；收益：格式无关（erofs/squashfs 都行），且能对每层
+        # 单独做健康检查。
+        mkdir -p "$LAYERS_MNT"
+        for l in $LAYER_NAMES; do
+            mount_layer "$l" "$(find_layer "$l")"
+        done
+        base_for_util="$LAYERS_MNT/base"
+
+        # --- §4 步 4（后半）：overlay 合并层 -------------------------------
+        # 顺序：最右 = 最底层。dsh 在最上 → 更新 dsh 层即可换 DSH 版本。
+        ovl_opts="lowerdir=$LAYERS_MNT/dsh:$LAYERS_MNT/runtime:$LAYERS_MNT/base"
+        ovl_opts="$ovl_opts,upperdir=$UPPER_DIR/upper,workdir=$UPPER_DIR/work"
+    fi
+    # base 层挂上/解开之后才可能取到 util-linux 的 mount，这里补一次探测，
     # 让后面的 proc/sys/dev 挂载有真正的回退路径可用
-    detect_util_mount
-
-    # --- §4 步 4（后半）：overlay 合并层 -----------------------------------
-    # 顺序：最右 = 最底层。dsh 在最上 → 更新 dsh 层即可换 DSH 版本。
-    local ovl_opts="lowerdir=$LAYERS_MNT/dsh:$LAYERS_MNT/runtime:$LAYERS_MNT/base"
-    ovl_opts="$ovl_opts,upperdir=$UPPER_DIR/upper,workdir=$UPPER_DIR/work"
+    detect_util_mount "$base_for_util"
     # 挂载点先建好（overlay 要求目录存在且为空；非空会报 ENOTEMPTY）
     [ -d "$ROOTFS_DIR" ] || mkdir -p "$ROOTFS_DIR" || die "无法创建 $ROOTFS_DIR"
     if ! "$MOUNT" -t overlay overlay -o "$ovl_opts" "$ROOTFS_DIR" 2>>"$DAEMON_LOG"; then
@@ -916,6 +1006,7 @@ main() {
                 warn_soft "make-rprivate 失败（私有 ns 已由 unshare 保证，可继续）"
             fi
         fi
+        printf '%s\n' "$LAYER_MODE" > "$RUN_DIR/layer-mode" 2>/dev/null || true
         build_mount_tree
 
         # UTS：本 ns 内改主机名；不改宿主（findings §6）
@@ -958,7 +1049,11 @@ main() {
     for l in $LAYER_NAMES; do
         find_layer "$l" >/dev/null 2>&1 || die "缺少层文件 $LAYERS_DIR/$l.{erofs,squashfs}（先跑 linuxctl provision）"
     done
-    [ -f "$LH/upper.img" ] || die "缺少可写层镜像 $LH/upper.img（先跑 linuxctl provision）"
+    # 目录模式不需要 upper.img（可写层是 $DIRS_UPPER 真目录）——先解析模式再判
+    resolve_layer_mode
+    if [ "$LAYER_MODE" != "dir" ]; then
+        [ -f "$LH/upper.img" ] || die "缺少可写层镜像 $LH/upper.img（先跑 linuxctl provision；或用 --layer-mode dir）"
+    fi
     # 端口占用提前查（doctor 也会查；这里失败要 fail fast）
     local port; port="$(config_port)"
     if port_busy "$port"; then
@@ -977,7 +1072,11 @@ main() {
     run_probes 0
     local prop
     prop="$(probe_get unshare_propagation no)"
-    log "启动守护进程：unshare -m -u（propagation=$prop）$SELF_DIR/start.sh --inner"
+    # ★ 把已解析好的层模式 export 给守护进程：`--inner` 调用**不会**带 `--layer-mode`，
+    #   子进程靠 resolve_layer_mode 从环境变量读到同一个值（否则会退回 loop，白解析一场）。
+    SUNSETLINUX_LAYER_MODE="$LAYER_MODE"
+    export SUNSETLINUX_LAYER_MODE
+    log "启动守护进程：unshare -m -u（propagation=$prop, layer_mode=$LAYER_MODE）$SELF_DIR/start.sh --inner"
 
     local uc_ok=0
     if [ "$prop" = "yes" ]; then

@@ -136,6 +136,8 @@ object Diagnoser {
                 "挂载", "挂载点", "无法创建", "无法卸载", "overlay", "erofs", "squashfs",
                 "loop", "union", "upper.img", "可写层", "层文件", "只读", "devpts", "sdcard",
                 "bind ", "内核不支持", "格式不可识别", "magic", "mount",
+                // 层模式（loop/dir）：见 docs/layer-mode.md
+                "解包", "解包器", "层模式",
             )
         ) {
             return FailureKind.MOUNT

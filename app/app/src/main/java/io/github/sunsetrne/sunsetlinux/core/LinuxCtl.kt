@@ -363,6 +363,8 @@ class LinuxCtl(private val context: Context, val mode: EnvMode) {
             ?.let { put("SUNSETLINUX_NATIVE_LIB_DIR", it) }
         put("SUNSETLINUX_PROROOT_VERSION", BuildConfig.PROROOT_VERSION)
         Prefs(context).rootlessRuntime?.let { put("SUNSETLINUX_ROOTLESS", it) }
+        // 层模式（loop / dir）：用户可在「设置」里选，脚本读不到 App 的偏好，只能透传
+        Prefs(context).layerMode?.let { put("SUNSETLINUX_LAYER_MODE", it) }
         // linuxctl 自己会解析环境根：优先 LINUX_HOME，其次 SUNSETLINUX_APP_FILES。
         // 两个都给上，避免部署侧调整解析顺序时 App 侧失效。
         put("LINUX_HOME", home)

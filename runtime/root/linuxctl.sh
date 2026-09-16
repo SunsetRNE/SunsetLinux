@@ -387,6 +387,14 @@ gather_status() {
         esac
     done
 
+    # ---- 层模式（loop / dir）-----------------------------------------------
+    # start.sh 启动时写 run/layer-mode；status 是另一个进程，只能靠文件知道。
+    DSH_ST_LAYER_MODE=""
+    if [ -f "$RUN_DIR/layer-mode" ]; then
+        # 顺序要紧：`< file 2>/dev/null` 会把"文件不存在"的重定向错误漏到 stderr
+        DSH_ST_LAYER_MODE="$(tr -d ' \n\r' < "$RUN_DIR/layer-mode" 2>/dev/null | head -c 16 || true)"
+    fi
+
     # ---- storage ----------------------------------------------------------
     if [ -d "$UPPER_DIR" ] && mountpoint -q "$UPPER_DIR" 2>/dev/null; then
         local uu

@@ -188,6 +188,17 @@ class Prefs(context: Context) {
         set(value) = sp.edit { putString(KEY_NPM_REGISTRY, value) }
 
     /**
+     * 层模式（root 模式用）：null/`loop` = losetup+erofs+upper.img（省磁盘，默认）；
+     * `dir` = 把层解包成目录 + 目录 overlay（**完全不碰 loop/erofs**，代价约 +1.6 GB）。
+     *
+     * 为什么要有这个开关：真机上 loop/erofs 这条链最容易出问题（toybox 选项、loop 数量、
+     * 挂载权限），而"目录 + overlayfs"是内核确认支持的最基本用法。详见 docs/layer-mode.md。
+     */
+    var layerMode: String?
+        get() = sp.getString(KEY_LAYER_MODE, null)
+        set(value) = sp.edit { putString(KEY_LAYER_MODE, value?.trim()?.ifEmpty { null }) }
+
+    /**
      * 免 root（非 root）模式用哪个运行时：null/`auto` = 优先 proroot、缺则降级 proot；
      * `proroot` = 只用 proroot（缺件就明确失败）；`proot` = 只用 proot。
      *
@@ -206,6 +217,7 @@ class Prefs(context: Context) {
 
     private companion object {
         const val KEY_ROOTLESS = "rootless_runtime"
+        const val KEY_LAYER_MODE = "layer_mode"
         const val KEY_MODE = "mode_override"
         const val KEY_PORT = "port"
         const val KEY_BOOT_SERVICE = "boot_start_service"

@@ -283,6 +283,7 @@ dsh_status_var() {
         upper_used)  DSH_ST_UPPER_USED="$2" ;;
         upper_total) DSH_ST_UPPER_TOTAL="$2" ;;
         last_error)  DSH_ST_LAST_ERROR="$2" ;;
+        layer_mode)  DSH_ST_LAYER_MODE="$2" ;;
         *)           return 1 ;;
     esac
     return 0
@@ -349,6 +350,7 @@ dsh_status_emit_flat() {
     printf 'storage.upper_used\t%s\n'  "$(dsh_jnum "${DSH_ST_UPPER_USED:-}")"
     printf 'storage.upper_total\t%s\n' "$(dsh_jnum "${DSH_ST_UPPER_TOTAL:-}")"
     printf 'last_error\t%s\n'          "$(dsh_jstr "${DSH_ST_LAST_ERROR:-}")"
+    printf 'layer_mode\t%s\n'          "$(dsh_jstr "${DSH_ST_LAYER_MODE:-}")"
 }
 
 # ---------------------------------------------------------------------------
@@ -400,7 +402,10 @@ dsh_status_json() {
     printf '"storage":{"upper_used":%s,"upper_total":%s},' \
                 "$(dsh_jnum "${DSH_ST_UPPER_USED:-}")" \
                 "$(dsh_jnum "${DSH_ST_UPPER_TOTAL:-}")"
-    printf '"last_error":%s'       "$(dsh_jstr "${DSH_ST_LAST_ERROR:-}")"
+    printf '"last_error":%s,'       "$(dsh_jstr "${DSH_ST_LAST_ERROR:-}")"
+    # 层模式：loop（losetup+erofs+upper.img）还是 dir（解包成目录+overlay）。
+    # 由 start.sh 写进 run/layer-mode，linuxctl 读进来 —— 排障时"用的哪条挂载路径"必须一眼能看到。
+    printf '"layer_mode":%s'        "$(dsh_jstr "${DSH_ST_LAYER_MODE:-}")"
     printf '}\n'
 }
 
