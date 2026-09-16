@@ -498,6 +498,18 @@ su -c '/data/sunsetlinux/bin/linuxctl doctor'
 | 已装状态读不到时 | —— | **不给刷入按钮**，先让用户修 root 授权（与"读不到 ≠ 没装"一致） |
 | 重启 | —— | 只报告"重启后生效"（KernelSU 落 `modules_update/`），**App 不替用户重启**，脚本里有单测断言不许出现 `reboot` |
 
+### 3.10.13 发布完整性：APK 少内嵌 = 静默失效（2026-09-16 补）
+
+0.2.6 首次发布时四个 APK 里三个只有 12 MB —— `assets/offline-bundle.bin` 没进去。
+根因不是打包工具，而是 release 路径取 proot 运行时用了**无认证**的 releases API：
+它按 IP 限 60 次/小时，runner 共享 IP 偶发 403；403 在这里只让变量变空串、
+**一行 warning 都没有**，`mk-bundle --available` 于是把含 proot 的三个变体"合法地"跳过。
+现在：API 带 token、拿不到 proot 直接 `::error::` 退出、打包后强制 4 个 `.bin` 齐全，
+缺一个就红并打印已有的与频道清单里的层。本地用桩干跑了两条失败路径。
+
+**这条的教训值得单独记**：`|| true` + `--available` 这种"优雅降级"组合，
+在**发布路径**上等于"静默发出残缺产物"；发布路径宁可红。
+
 真机依据：设备上 `/data/adb/ksu/bin/ksud`（指向 `/data/adb/ksud`，5.6 MB）确实存在；
 `ksud module install <ZIP>` 的语法取自上游 `userspace/ksud/src/cli.rs` 的 `Module::Install`。
 线上 `/stable/index.json` 已含 `module_version=1.0.10` 与模块 zip 的 sha256，App 端能直接对上。
