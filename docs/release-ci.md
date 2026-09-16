@@ -161,9 +161,10 @@ pipeline.yml（推 main/beta 时**只有它跑**）           ← 2026-09-16 起
 
 | job | 检查 | 命令 | 断言数 |
 |---|---|---|---|
-| android | Android 单测（必须两条一起跑） | `./gradlew :app:assembleDebug :app:testDebugUnitTest` | 47 |
-| shell | root 运行时回归（bash） | `bash runtime/root/selftest.sh` | 20 |
-| shell | root 运行时回归（**mksh**，模拟设备侧） | `mksh runtime/root/selftest.sh` | 20 |
+| android | Android 单测（必须两条一起跑） | `./gradlew :app:assemble$<档位> :app:test$<变体>UnitTest` | 148 |
+| android | **内嵌离线包真的进了 APK**（0.3.0 新增，见 §三·一） | `tools/ci-assert-embed.sh <apk> <变体>` | 每个 APK 1 条 |
+| shell | root 运行时回归（bash） | `bash runtime/root/selftest.sh` | 42 |
+| shell | root 运行时回归（**mksh**，模拟设备侧） | `mksh runtime/root/selftest.sh` | 42 |
 | shell | proot 运行时回归 | `bash runtime/proot/selftest.sh` | 18 |
 | shell | **设备侧 shell 兼容性**（mksh 可解析 + shebang 正确） | `node tools/shell-compat-check.mjs` | 19 个脚本 |
 | shell | `.sh` 语法（全套） | `bash -n` 遍历 | — |
@@ -179,6 +180,30 @@ pipeline.yml（推 main/beta 时**只有它跑**）           ← 2026-09-16 起
 > 这一关失败意味着"本地 bash 全绿、真机一行都跑不了"（本轮就是这么发现 root 模式从来没跑起来过）。
 > 详见 `docs/architecture.md` §1.1 与 `docs/STATUS.md` §3.4。
 
+### 三·一、内嵌离线包的门禁：**必须打开 APK 看**（`tools/ci-assert-embed.sh`）
+
+0.2.6 发出去的那批 APK 是 **12 MB、里面没有 `assets/offline-bundle.bin`** —— 用户装完
+照样得联网下载环境，等于"完整离线版"这个卖点当场失效。而**当时 CI 全绿**，因为三道检查
+谁都没看 APK 内部：
+
+- bundles 节点只数了 `dist/bundles/*.bin` 够不够（够的，5 个）；
+- 编译节点只断言 edition 专属资源（root 的 `assets/module/`、proot 的 `assets/proot-runtime/`）；
+- Gradle 的 `EmbedOfflineBundle` 找不到包时**只记一行日志就跳过**（为了本机开发方便，
+  没打离线包也能编译）—— 于是"制品名对不上 ⇒ 一个都没内嵌"完全无声。
+
+现在两边都接上 `tools/ci-assert-embed.sh <apk> <变体> [--require]`，判定**完全由
+`tools/offline-bundle/variants.json` 的 `embed` 驱动**（单一事实源）：
+
+| `embed` | 期望 | 违反时 |
+|---|---|---|
+| 非空（如 `root-full = [base,runtime,dsh]`） | APK 里**必须有** `assets/offline-bundle.bin`，且与本地同名 `.bin` **严格等大** | `::error::`（等大还顺带抓住"内嵌错组合的包"） |
+| 空（`root-minimal`：root 层走频道） | **不该有** | `::error::`（白占体积，且与矩阵声明矛盾） |
+
+- 接在 **`build-apk.yml` 每个编译节点**（`--require`，因为该 run 确实产出了离线包）
+  与 **`ci.yml` 的独立门禁**（`dist/bundles/*.bin` 存在时才 `--require`）。
+- ⚠️ **别用"小于 1 MiB 就是占位"这种启发式**：`proot-minimal` 的包只有 **989224 字节**
+  （0.94 MiB，就是 proot 本体），一律按 MiB 也会显示成"0 MiB" —— 实测就会被误杀成假红。
+  真判据是"与本地同名包严格等大"；拿不到本地包时才退化成"> 4 KiB 不是空壳"。
 
 ---
 

@@ -404,6 +404,10 @@ jobs:
         run: |
           set -euo pipefail
           fail=0
+          # 本次**真的产出了**离线包吗？产出了才把「声明要内嵌、APK 里却没有」当红；
+          # 没产出（本机手编/门禁不带包）时脚本自己降级成提示。
+          REQ=""
+          if compgen -G 'dist/bundles/*.bin' >/dev/null 2>&1; then REQ=--require; fi
           for apk in $(find app/app/build/outputs/apk -name '*.apk'); do
             name="$(basename "$apk")"
             case "$name" in
@@ -424,6 +428,19 @@ jobs:
               *)
                 echo "::warning::认不出 edition 的 APK：$name（命名规则变了？）" ;;
             esac
+            # ★ 再补一道「该内嵌的离线包**真的进了 APK**」。0.2.6 漏过一次：那一批 APK
+            #   是 12 MB、没有 offline-bundle.bin（用户装完照样联网），而 CI 全绿 ——
+            #   bundles 节点只数了 dist/bundles/*.bin 够不够，编译节点只看 edition 专属
+            #   资源，**没人打开 APK 看**。EmbedOfflineBundle 找不到包是"记一行日志就跳过"
+            #   （本机开发方便），所以只有这里能兜住"制品名对不上 ⇒ 一个都没内嵌"。
+            variant="$(printf '%s' "$name" | sed -E 's/^SunsetLinux-[^-]+-(.+)-debug\.apk$/\1/')"
+            if [ "$variant" = "$name" ]; then
+              echo "::warning::从文件名推不出组合，跳过内嵌断言：$name"
+            elif [ -n "$REQ" ]; then
+              tools/ci-assert-embed.sh "$apk" "$variant" --require || fail=1
+            else
+              tools/ci-assert-embed.sh "$apk" "$variant" || fail=1
+            fi
           done
           [ "$fail" -eq 0 ] || exit 1
 

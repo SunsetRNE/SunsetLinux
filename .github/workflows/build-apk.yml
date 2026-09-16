@@ -180,6 +180,26 @@ jobs:
               ;;
           esac
 
+      # ★ 这一步是「装完到底用不用联网」的**唯一**回归保护。
+      #   0.2.6 发出去的那批 APK 是 12 MB、里面没有 offline-bundle.bin（用户装完照样
+      #   得联网），而当时 CI 全绿 —— 因为 bundles 节点只数了 dist/bundles/*.bin 够不够，
+      #   编译节点只断言了 edition 专属资源，**没人看 APK 内部**。
+      #   EmbedOfflineBundle 找不到包是"记一行日志就跳过"（本机开发方便），所以只有这里
+      #   能兜住"制品名对不上 ⇒ 一个都没内嵌"。判定由 variants.json 的 embed 决定。
+      - name: 断言 — 该内嵌的离线包真的进了 APK
+        run: |
+          set -euo pipefail
+          fail=0
+          for apk in $(find app/app/build/outputs/apk -name '*.apk'); do
+            if [ "${{ inputs.bundles_available }}" = "true" ]; then
+              # 本次**确实产出了**离线包 → 声明要内嵌的组合缺了就红
+              tools/ci-assert-embed.sh "$apk" "${{ inputs.variant }}" --require || fail=1
+            else
+              tools/ci-assert-embed.sh "$apk" "${{ inputs.variant }}" || fail=1
+            fi
+          done
+          exit $fail
+
       - name: 上传 ${{ inputs.variant }} 的 APK
         uses: actions/upload-artifact@v4
         with:
