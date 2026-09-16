@@ -37,12 +37,10 @@ on:
         options: [auto, stable, beta]
         default: auto
 
-# 与 channel.yml 共用同一个组：都会写 gh-pages。放在 **工作流级**，
-# 这样连"收集 + 生成 index"都在队列里，不会两个通道同时改 gh-pages。
-concurrency:
-  group: gh-pages
-  cancel-in-progress: false
-
+# ⚠️ 这里**刻意不放工作流级的 concurrency**：本文件是**可复用工作流**，
+#    工作流级 concurrency 在"被调用"时会被 GitHub 拒掉（表现是调用方那个 job
+#    0 秒失败、连 runner 都没起，日志里什么都没有）——串行改由 job 级承担
+#    （下面 publish job 的 concurrency: gh-pages，与 channel.yml 共用同一个组）。
 jobs:
   publish:
     # 这里**没有** needs：可复用工作流自己不带前置节点（以前 release.yml 里
