@@ -71,6 +71,7 @@ CI 四条线路：① `ci.yml` 回归门禁（shell / node / android 三并行�
 | 19 | *(本次)* | **零点击部署**（用户：还得点开 App 再点「执行部署」，有点麻烦）：模块 `service.sh` 原先只在「有层」时自启，没层就只记一行日志 | 开机发现没层就**自己建**（`autoprovision_decision` 纯函数定触发条件：已尝试过 / 种子不全 / 空间不足 / 开关关 → 都不跑，且**先落标记再启动**，绝不每次开机重来半小时）；另加 device-provision.sh 的**部署锁**（三条发起路径互斥）。provision 冒烟 **62 → 82 条**；模块 **1.0.9** |
 | 20 | *(本次)* | **root / 模块检测升级**（用户：对 root 授权的检测和模块的检测）：以前只有一个 `suAvailable: Boolean`，界面只能写「su 不可用」；模块状态 App 完全不知道 | 新增 `core/DeviceStatus.kt`：root 细分为 已授权 / 被拒 / 无 su / 超时（各带**下一步**），模块读出装没装 + 版本 + 停用 + **装了没重启**，首启引导与部署向导都显示；`needsInstallDecision` 修好「本地版本读不出来 ⇒ 永远看不到可更新层」（老 state.json 就是这情况）。App 单测 **78 → 94/0**；App **0.2.4** |
 | 21 | *(本次)* | **官方频道首次上线**：三层预构建镜像（base 27.8 MB / runtime 77.1 MB / dsh 50.1 MB，gzip 合计 155 MB / zstd 96 MB）推 `layers` 分支 → Release 资产 → `channel.json` 签名发布 | 签名用 App **内置公钥**验过（指纹 `ed25519:06:d0:c4:4d:29:1c:ef:66`）；层文件逐层**真解压复算** sha256_raw/size_raw，且 .zst/.gz 两条路结果一致 → **App「更新」页点两下装完，不用再等 30 分钟构建** |
+| 22 | *(本次)* | **内置（离线）包工具链落地**（用户：「后面开始做 ubuntu 内嵌等多个版本」）：`tools/offline-bundle/`（`variants.json` 是组合的**唯一事实源** + `mk-bundle.mjs` 容器打包/校验/解包 + `selftest.mjs` 26 条）＋ `.github/workflows/offline-bundle.yml`（从**签名频道清单**拉层、逐层校验、`--available` 打齐的组合、挂到产品 Release） | 实测：minimal **0.9 MiB** / ubuntu **65.1** / ubuntu-proot **66.0** / ubuntu-proot-dsh **97.2 MiB**；容器 `SLB1`+头 JSON+载荷，层部件带 `sha256_raw/size_raw`；回归含三类负例与**真产物逐字节回验**；CI 跑通后四个 `.bin` 已挂在 `v0.2.4` 上。顺带修掉新工作流的站点地址拼接 bug（owner/repo 当成了两层路径）|
 
 ### 第 12 条到底修了什么 —— 一句话：**真机上根本跑不了首次部署**
 
