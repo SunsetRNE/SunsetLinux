@@ -106,11 +106,12 @@ jobs:
           name: offline-bundles
           path: dist/bundles
 
-      - name: 把制品 APK 收进 dist/（四个内置组合各一份）
+      - name: 把制品 APK 收进 dist/（六个内置组合各一份）
         run: |
           set -euo pipefail
-          # 门禁那边上传的是**四个组合**的 debug APK（minimal / ubuntu / ubuntu-proot /
-          # ubuntu-proot-dsh），文件名由 build.gradle.kts 的 androidComponents.onVariants 生成：
+          # 门禁那边上传的是**六个组合**的 debug APK（2 个 App × 3 档：
+          # root/proot × minimal/base/full），文件名由 build.gradle.kts 的
+          # androidComponents.onVariants 生成：
           #   SunsetLinux-<版本>-<组合>-debug.apk
           # ★ 必须自己建 dist/：这一步跑在 mkmodule 之前，而 dist/ 是 mkmodule 建的。
           #   漏了这行会 `cp: cannot create regular file 'dist/...'`（实测踩过）。
@@ -130,7 +131,7 @@ jobs:
             echo "::error::没收到任何 APK 制品（apk-artifact/ 下没有 .apk；同步 ci.yml 的 upload-artifact 路径？）"
             exit 1
           }
-          # 组合清单从 variants.json 读（单一事实源；0.3.0 起是 root/proot × minimal/full 四个）
+          # 组合清单从 variants.json 读（单一事实源；0.3.0 起是 root/proot × minimal/base/full 六个）
           # 缺一个就明确报出来（不许静默少发一个包）
           for v in $(python3 -c 'import json;print(" ".join(json.load(open("tools/offline-bundle/variants.json",encoding="utf-8"))["variants"]))'); do
             ls dist/SunsetLinux-*-"$v"-debug.apk >/dev/null 2>&1 \
@@ -493,18 +494,43 @@ jobs:
           OWNER_LC="$(printf '%s' "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
           SITE="https://${OWNER_LC}.github.io/${GITHUB_REPOSITORY#*/}"
 
+          # 「推荐装哪个包」**由 variants.json 推**，不在这里写死组合名 ——
+          # 0.3.0 拆版时"写死了旧 flavor 名"的地方一共红过三次（单测任务名、变体数、
+          # 下载页），所以这里也走事实源：每个 edition 取 tier=full（装完零下载的那档），
+          # 找不到就退到该 edition 的任意一档。
+          # ⚠️ 必须用 **TAB 分隔**：label 里带空格（"Root 版" / "免 root 版"），
+          #    `read` 默认按空白分词会把字段切成两半（实测：APK 名拼成
+          #    "SunsetLinux-0.3.0-root root-full-debug.apk"），所以下面配 `IFS=$'\t'`。
+          python3 - <<'PY' > dist/_reco.tsv
+          import json
+          d = json.load(open('tools/offline-bundle/variants.json', encoding='utf-8'))
+          vs = d['variants']
+          for eid, e in d['editions'].items():
+              cand = [k for k, v in vs.items() if v['edition'] == eid and v['tier'] == 'full'] \
+                  or [k for k, v in vs.items() if v['edition'] == eid]
+              print(eid, e['label_short'], e.get('mode', eid), cand[0] if cand else '', sep='\t')
+          PY
+
           {
             echo "Android 上的原生 DSH 运行环境：真 chroot + overlayfs 的 Ubuntu 24.04，跑原生 DSH。"
             echo ""
             echo "| 组件 | 版本 | 说明 |"
             echo "|---|---|---|"
-            echo "| App（APK） | \`$APP_VER\` | 覆盖安装即可，数据不丢；签名固定（debug 密钥随仓库提交） |"
-            echo "| KernelSU 模块 | \`$MODULE_VERSION\` | 用 KernelSU 管理器安装，装完**重启一次** |"
+            echo "| App（APK） | \`$APP_VER\` | **两个可共存的 App**：Root 版 / 免 root 版（包名不同，可同时安装）。同一 App 内换内置档位＝覆盖安装，数据不丢；签名固定（debug 密钥随仓库提交） |"
+            echo "| KernelSU 模块 | \`$MODULE_VERSION\` | 用 KernelSU 管理器安装，装完**重启一次**（**只有 Root 版需要**） |"
             echo ""
             echo "### 安装顺序"
             echo ""
-            echo "1. 装 \`sunsetlinux-launcher-debug.apk\`（App）。"
-            echo "2. KernelSU 管理器里装 \`sunsetlinux-module-$MODULE_VERSION.zip\`，然后**重启一次**。"
+            echo "1. 按你的路线装对应的 App（两个包名不同，也可以都装上对比）："
+            while IFS=$'\t' read -r _eid _label _mode _v; do
+              [ -n "${_v:-}" ] || continue
+              _apk="$(ls "$OUT"/SunsetLinux-*"-${_v}-debug.apk" 2>/dev/null | head -n1 || true)"
+              _apk="${_apk##*/}"
+              [ -n "$_apk" ] || _apk="SunsetLinux-$APP_VER-${_v}-debug.apk"
+              echo "   - **$_label**（模式 $_mode）→ 推荐 \`$_apk\`：内嵌 Ubuntu + DSH，装完零下载。"
+            done < dist/_reco.tsv
+            echo "   （想要最小体积、层从频道装：选对应 App 的「最小版」；纯 root 流走 Root 版，纯免 root 流走免 root 版。）"
+            echo "2. **Root 版**：KernelSU 管理器里装 \`sunsetlinux-module-$MODULE_VERSION.zip\`，然后**重启一次**（免 root 版跳过这步）。"
             echo "3. **层镜像**（base / runtime / dsh）不用自己构建："
             echo "   打开 App →「更新」页 → 官方频道 → 一键安装（App 自己解 zstd，约 96 MB，几分钟）；"
             echo "   或从终端按 [Releases \`layers-*\`](https://github.com/$REPO/releases) 里的 gzip 产物手装。"
