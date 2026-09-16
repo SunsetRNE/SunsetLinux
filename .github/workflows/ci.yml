@@ -340,11 +340,15 @@ jobs:
           # ★ 单测任务名**从 variants.json 推**（别再写死某个 flavor：0.3.0 拆版后
           #   `ubuntu*` 这些 flavor 已经不存在，写死会直接"任务不存在"）。
           #   第一个变体的 Gradle 任务名 = 按 '-' 分段首字母大写 + DebugUnitTest。
-          FIRST="$(python3 -c 'import json;print(list(json.load(open("tools/offline-bundle/variants.json",encoding="utf-8"))["variants"])[0])')"
+          # ⚠️ 路径必须用 $GITHUB_WORKSPACE：本步骤的 working-directory 是 `app/`，
+          #    写相对路径 `tools/offline-bundle/variants.json` 会 FileNotFoundError
+          #    （0.3.0 第一次跑就是这样红的，白等一轮 CI）。
+          VJ="$GITHUB_WORKSPACE/tools/offline-bundle/variants.json"
+          FIRST="$(python3 -c 'import json,sys;print(list(json.load(open(sys.argv[1],encoding="utf-8"))["variants"])[0])' "$VJ")"
           # ⚠️ 任务名是 `test<变体>DebugUnitTest`（`test` 前缀别漏 —— 少一个前缀就是
           #    "Task ... not found"，而报错信息只会说任务不存在，看着像 flavor 配错了）
           TASK="test$(python3 -c "print(''.join(p[:1].upper()+p[1:] for p in '$FIRST'.split('-'))+'DebugUnitTest')")"
-          echo "· 单测任务：:app:$TASK（变体 $FIRST）"
+          echo "· 单测任务：:app:$TASK（变体 $FIRST，矩阵来自 $VJ）"
           if [ "${{ inputs.build_apks }}" = "false" ]; then
             echo "· 流水线模式：APK 由编译矩阵并行产出，这里只跑单测"
             ./gradlew --no-daemon ":app:$TASK"
