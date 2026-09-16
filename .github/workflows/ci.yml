@@ -244,15 +244,35 @@ jobs:
               printf '%s-%s.erofs  %s  %s\n' "$id" "$ver" "$rawsize" "$raw" >> dist/SHA256SUMS.layers.txt
             fi
           done < dist/layers.tsv
-          # proot 运行时（minimal / ubuntu-proot 组合要用）挂在 layers 存储 Release 上
-          PURL="$(curl -fsSL "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases?per_page=50" \
+          # ── proot 运行时（minimal / ubuntu-proot / 完整离线版都要）────────────
+          # ★ 必须带 token：无认证的 releases API 是 **60 次/小时的共享 IP 限额**，
+          #   runner 上经常撞到 403。而 403 在这里只会让 PURL 变成空字符串 ——
+          #   接着 mk-bundle --available 就把含 proot 的三个变体**静默跳过**：
+          #   0.2.6 发布时真的发生了（minimal / ubuntu-proot / ubuntu-proot-dsh 三个 APK
+          #   变成 12 MB，里面没有 offline-bundle.bin，用户装完照样得联网）。
+          PURL="$(curl -fsSL -H "Authorization: Bearer ${{ github.token }}" \
+                  -H 'Accept: application/vnd.github+json' \
+                  "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases?per_page=50" \
                   | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const rs=JSON.parse(s);for(const r of rs){if(!String(r.tag_name||"").startsWith("layers-"))continue;const a=(r.assets||[]).find(x=>/^proot-bundle-.*\.tar\.gz$/.test(x.name));if(a){console.log(a.browser_download_url);break}}})' || true)"
-          if [ -n "${PURL:-}" ]; then
-            curl -fsSL --retry 3 -o "dist/$(basename "$PURL")" "$PURL" || echo "::warning::proot 下载失败"
+          if [ -z "${PURL:-}" ]; then
+            echo "::error::拿不到 proot 运行时（layers-* Release 里没有 proot-bundle-*.tar.gz，或 API 返回 401/403）—— 内嵌不完整就不要发"
+            exit 1
           fi
-          node tools/offline-bundle/mk-bundle.mjs --available --dir dist --out dist/bundles \
-            || echo "::warning::离线包打包失败 → 本次 APK 不内嵌"
-          ls -l dist/bundles/*.bin 2>/dev/null || echo "::warning::没有可内嵌的离线包"
+          curl -fsSL --retry 3 -o "dist/$(basename "$PURL")" "$PURL"
+          echo "已取 proot：$(basename "$PURL")"
+
+          node tools/offline-bundle/mk-bundle.mjs --available --dir dist --out dist/bundles
+          ls -l dist/bundles/*.bin
+
+          # ★ 四个组合必须齐全，缺一个就红。宁可让发布失败（重跑一次就好），
+          #   也不要发出一个"装完还得联网"的「完整离线版」——那正是这一版要修的问题。
+          GOT="$(ls dist/bundles/*.bin 2>/dev/null | wc -l | tr -d ' ')"
+          if [ "$GOT" -ne 4 ]; then
+            echo "::error::离线包只打出 $GOT/4 个（缺的组合对应的 APK 会没有内嵌环境）"
+            echo "- 已有的：$(ls dist/bundles 2>/dev/null | tr '\n' ' ')"
+            echo "- 频道清单里的层：$(cut -f1,2 dist/layers.tsv 2>/dev/null | tr '\n' ' ')"
+            exit 1
+          fi
 
       - name: Android 构建 + 单测（★ 两条一起跑）
         id: android
