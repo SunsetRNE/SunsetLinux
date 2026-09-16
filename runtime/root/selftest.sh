@@ -345,6 +345,25 @@ e="$(
 case "$e" in *"需要 erofs 解包器"*) ok "解包器缺失 → 明确报错（不静默跳过）" ;; *) bad "缺解包器时行为不对：$e" ;; esac
 
 # ---------------------------------------------------------------------------
+# linuxctl start 的 --layer-mode：非法值要拒绝，dir 模式不该被 upper.img 预检拦住
+# （docs/layer-mode.md 把 `linuxctl start --layer-mode dir` 写成了官方切法，必须真的能用）
+# ---------------------------------------------------------------------------
+head_ "linuxctl start --layer-mode"
+LCE="$TMP/lc-env"; mkdir -p "$LCE/layers" "$LCE/etc" "$LCE/run"
+cp "$FIXTURES/erofs-head.bin" "$LCE/layers/base-1.0.erofs" 2>/dev/null || : > "$LCE/layers/base-1.0.erofs"
+printf "{\"schema\":1,\"layers\":{}}\n" > "$LCE/etc/state.json"
+out="$(LINUX_HOME="$LCE" "$SH_BIN" "$SELF_DIR/linuxctl.sh" start --layer-mode dirr 2>/dev/null | tail -n1 || true)"
+case "$out" in
+    *"未知的层模式"*) ok "非法层模式被 linuxctl 拒绝（附原因）" ;;
+    *) bad "非法层模式没被拒绝：$out" ;;
+esac
+out="$(LINUX_HOME="$LCE" "$SH_BIN" "$SELF_DIR/linuxctl.sh" start --layer-mode dir 2>/dev/null | tail -n1 || true)"
+case "$out" in
+    *"缺少可写层"*|*upper.img*) bad "dir 模式仍被 upper.img 预检拦住：$out" ;;
+    *) ok "dir 模式不再要求 upper.img（预检按模式分叉）" ;;
+esac
+
+# ---------------------------------------------------------------------------
 # 挂载冲突检查（§1d）必须存在且能给出结论
 #
 # 背景：KernelSU 的模块挂载由 metamodule 在启动时完成（把常规模块的 system/ overlay

@@ -584,6 +584,33 @@ write_default_state() {
 # start —— 幂等
 # ---------------------------------------------------------------------------
 cmd_start() {
+    # --layer-mode loop|dir：透传给 start.sh（docs/layer-mode.md 的三处开关之一）
+    local lm_flag=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --layer-mode)   lm_flag="${2:-}"; shift 2 ;;
+            --layer-mode=*) lm_flag="${1#--layer-mode=}"; shift ;;
+            *) warnl "start: 忽略未知参数 $1"; shift ;;
+        esac
+    done
+    case "${lm_flag:-}" in
+        ""|loop|dir) : ;;
+        *)
+            local bad="未知的层模式：$lm_flag（只支持 loop / dir）"
+            printf '%s\n' "$bad" > "$ERROR_FILE" 2>/dev/null || true
+            emit "{\"schema\":1,\"state\":\"error\",\"last_error\":\"$(jesc "$bad")\"}"
+            return 1
+            ;;
+    esac
+    # 解析顺序与 start.sh 保持一致：命令行 > env > config.json > loop
+    local lm="${lm_flag:-${SUNSETLINUX_LAYER_MODE:-}}"
+    if [ -z "$lm" ] && [ -f "$CONFIG_JSON" ]; then
+        lm="$(sed -n 's/.*"layer_mode"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$CONFIG_JSON" 2>/dev/null | head -n1)"
+    fi
+    [ -n "$lm" ] || lm=loop
+    SUNSETLINUX_LAYER_MODE="$lm"
+    export SUNSETLINUX_LAYER_MODE
+
     # 已在运行：直接返回 running（§3 契约：幂等、退出码 0）
     if env_ready; then
         log "环境已在运行（幂等）"
@@ -607,12 +634,14 @@ cmd_start() {
             return 1
         fi
     done
-    [ -f "$UPPER_IMG" ] || {
-        local msg="缺少可写层 $UPPER_IMG（先 provision）"
-        printf '%s\n' "$msg" > "$ERROR_FILE"; log "ERROR: $msg"
-        emit "{\"schema\":1,\"state\":\"error\",\"last_error\":\"$(jesc "$msg")\"}"
-        return 1
-    }
+    if [ "$lm" != "dir" ]; then
+        [ -f "$UPPER_IMG" ] || {
+            local msg="缺少可写层 $UPPER_IMG（先 provision；或用 --layer-mode dir）"
+            printf '%s\n' "$msg" > "$ERROR_FILE"; log "ERROR: $msg"
+            emit "{\"schema\":1,\"state\":\"error\",\"last_error\":\"$(jesc "$msg")\"}"
+            return 1
+        }
+    fi
 
     local starter="$SELF_DIR/start.sh"
     [ -x "$starter" ] || [ -f "$starter" ] || {
@@ -623,7 +652,7 @@ cmd_start() {
     }
 
     log "调用 start.sh（stdout 已丢弃，只保留 JSON 通道）"
-    if ! LINUX_HOME="$LH" "$SH_BIN" "$starter" >/dev/null 2>>"$LOGFILE"; then
+    if ! LINUX_HOME="$LH" SUNSETLINUX_LAYER_MODE="$lm" "$SH_BIN" "$starter" --layer-mode "$lm" >/dev/null 2>>"$LOGFILE"; then
         local msg
         msg="$(last_error_read || true)"
         [ -z "$msg" ] && msg="start.sh 失败，详见 $LOGFILE"

@@ -360,3 +360,50 @@ curl -s https://sunsetrne.github.io/SunsetLinux/stable/index.json
 - **签名必须固定**：授权按【包名+签名】记（KernelSU），换 key 会让已授的 root 全失效。
 - **`--link2symlink` 只有 proot ≥5.3 有**，喂给老 proot 会 fatal；启用后注意
   `NARB_DISABLE_NATIVE_CACHE=1` 那类缓存悬空问题（上游踩过）。
+
+---
+
+## 本轮收束（2026-09-16 晚）——现状、未验证项、下一步
+
+> 这一段是**交接用**的：下一次对话从这里开始读，不用翻上面的表。
+
+### 已经发布并验证过的
+
+| 交付 | 版本 | 验证方式 |
+|---|---|---|
+| 免 root 运行时换成 **proroot 主 / proot 降级** | App 0.2.8+ | 发布 APK 内 5 个 `.so` sha256 与上游一致；合规闸门 11/0（不得独立分发） |
+| **终端接原生 PTY** | App 0.2.9 | APK 内含 `libsunsetlinux_pty.so`；VT 模拟器 12 条单测；CI 断言每个 APK 都带它 |
+| 模块安装文案重排 + 截断句子修复 | 模块 1.0.12 | `tools/customize-selftest.mjs`（含"ui_print 参数只能有一对引号"静态判据） |
+| `start.sh` 被 `set -e` 带走（层永远挂不上） | 模块 1.0.13 | 本地 1:1 复现（cmdprobe 0 字节 → 六行齐全）；selftest 断言"探测必须跑完" |
+| 挂载碰撞检查 doctor §1d | 模块 1.0.14 | selftest 断言 doctor 给出 `mount_conflict` 结论 |
+| **无 loop 层模式（dir）** + doctor §1e | App 0.2.10 / 模块 1.0.16 | selftest 36/0（bash+mksh）：解析优先级、解包幂等/换层只重解/解包器缺失明确失败、`linuxctl start --layer-mode` 透传 |
+
+### 还没在真机上验证的一件事（**唯一的关键缺口**）
+
+root 模式的**挂载路径从未在真机上成功跑完过一次**。已修掉两个"shell 时代"的根因：
+
+1. 模块自启用裸 `sh` → busybox ash 在 `${BASH_SOURCE[0]:-$0}` 上语法错（1.0.11 修，改成 `$SH_BIN`/直接执行）；
+2. **探测命令（设计成失败）被 `set -e` 当致命错误** → `start.sh` 在第一步就退出（1.0.13 修，探测段 `set +e`）。
+
+下次真机验证要看的三个地方（按顺序）：
+
+```bash
+cat /data/sunsetlinux/run/cmdprobe        # 应有多行 + probed=  ← 证明探测跑完
+cat /data/sunsetlinux/run/layer-mode      # loop 或 dir         ← 本次用的哪条路径
+tail -40 /data/sunsetlinux/run/linux.log  # 现在会有内容了：卡在 loop/erofs/overlay 哪一步
+/data/sunsetlinux/bin/linuxctl doctor     # §1b 探测结果、§1d 冲突结论、§1e 层模式
+```
+
+- 若卡在 `losetup`/`mount -t erofs`/`upper.img`：**切 dir 模式**
+  （App「设置 → 层模式 → dir」，或 `linuxctl start --layer-mode dir`，或 `etc/config.json` 的
+  `"layer_mode":"dir"`）——它完全不碰 loop 与镜像挂载，只做"解包 + 目录 overlay + bind + chroot"。
+- 若卡在 `mount -t overlay`：说明内核/权限层面的 overlay 问题，把 linux.log 那几行发回来（这会是新问题）。
+
+### 其他已知未完成项（都不阻塞启动）
+
+- 设备上自我构建的层缺 **DSH web profile** 与 **pnpm**（doctor §7）→ 用 App「更新」页从**频道**装
+  dsh/runtime 层即可补齐，顺带升到 `0.1.5-rc.2`。
+- `doctor §6 proot 未找到`：root 模式下 proot bundle 不落地是正常的；proroot 在 APK 的
+  `nativeLibraryDir` 里（App 会透传），纯 root shell 看不到 —— 文案已说明，未再改。
+- `linuxctl start --layer-mode` 目前**不转发其它未知参数**（只认 `--layer-mode`，其余忽略并告警）。
+- 频道清单里的层仍按 erofs 分发（dir 模式在设备侧自己解包，无需改清单）。
