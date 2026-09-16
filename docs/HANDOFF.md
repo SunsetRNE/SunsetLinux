@@ -116,6 +116,27 @@ CI 四条线路：① `ci.yml` 回归门禁（shell / node / android 三并行�
 | "纯 Root、免 Root、然后各种内置感觉不止 4 种吧" | 内置矩阵**数据驱动**：`variants.json` 里 `editions` × `tiers`，现在是 6 个变体（minimal / base / full 三档 × 两个 edition）；**Gradle flavor 与部件表全部从 JSON 读**，加档只改一行 JSON |
 | "内置 DSH 的解耦（内置一个版本，运行时一个版本的情况判定，避免更新导致崩了）" | `core/DshPin.kt` 对账（6 种结论、纯函数 + 9 条单测）+「更新」页两个版本号与结论 + **一键回滚到内置版本** +「关于」页一行 |
 
+**补记（0.3.1，真机实测 + 发布路径复核）**：
+
+1. **两个 App 在桌面同名。** 0.3.0 只改了 `main/res` 的 `app_name`，而按 flavor 覆盖的
+   `src/<edition>/res/` **根本不存在**（我上一轮以为有）→ 真机上 root 版与免 root 版
+   图标都叫 "SunsetLinux"。修法：`resValue("string", "app_name", e.label)`（标签取自
+   `variants.json` 的 `editions[].label`）＋ 打开 **AGP 9 默认关闭**的
+   `buildFeatures.resValues`（不开是配置阶段直接失败）。`SigningContractTest` 补三条契约。
+2. **"该内嵌的离线包真的进了 APK"以前没人验。** `EmbedOfflineBundle` 找不到包只是记一行
+   日志就跳过（为了本机开发方便），而 bundles 节点只数 `dist/bundles/*.bin` 够不够、
+   编译节点只看 edition 专属资源 → "制品名对不上 ⇒ 一个都没内嵌"完全无声（0.2.6 就这么发的）。
+   新增 `tools/ci-assert-embed.sh`：判定由 `variants.json` 的 `embed` 驱动（非空必须有
+   `assets/offline-bundle.bin` 且与本地同名 `.bin` 严格等大；为空则不许有），接在
+   `build-apk.yml` 与 `ci.yml` 两条路径上。已用 v0.3.0 的**真实发布产物**验过四种情形。
+   ⚠️ 别用"小于 1 MiB 就是占位"的启发式：`proot-minimal` 的包只有 989224 字节（0.94 MiB）。
+3. **Release 说明第 1 步指向一个不存在的文件**（`sunsetlinux-launcher-debug.apk`，0.2.x 起
+   就没有了）。现在推荐包**由 `variants.json` 推**（每个 edition 取 `tier=full`）。
+   踩到的坑：label 带空格（"Root 版"），`read` 默认按空白分词会把 APK 名切坏 → `IFS=$'\t'`。
+4. **CI 里两处"拆版后写死旧值"**：单测步骤读 `variants.json` 时用相对路径而该步骤
+   `working-directory: app`（`FileNotFoundError`）；Gradle 任务名的 `test` 前缀漏了就是
+   "Task not found"（看着像 flavor 配错）。
+
 **为什么"锁死模式"比"保留切换"更安全**：Root 版没有 su 时若降级到 proot，它会去操作
 **另一个环境**（App 私有的 `files/sunsetlinux`）—— 用户以为在修 root 环境，其实动的是别处。
 现在只报原因 + 指向另一个 App（两个包名不同，装哪个就是哪条路）。

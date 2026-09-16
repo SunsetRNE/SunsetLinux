@@ -12,12 +12,13 @@
 ## 0. 准备
 
 ```bash
-# 装启动器（我做不了这一步）
-adb install -r dist/sunsetlinux-launcher-debug.apk
+# 装 App（我做不了这一步）。0.3.0 起是两个 App：有 root 装 root 版，没有装免 root 版
+adb install -r app/app/build/outputs/apk/rootFull/debug/SunsetLinux-*-root-full-debug.apk
 # 或把 APK 传到手机点击安装
 ```
 
-**首次启动会让你选运行模式**（这一步是设计好的，不是出错）：
+**0.3.0 起不再让你选运行模式**：装的是哪个 App，就跑哪条路（root / 免 root 各自锁死）——
+引导页只解释"本版是什么"：
 
 | 选择 | 后续 |
 |---|---|

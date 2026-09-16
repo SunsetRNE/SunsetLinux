@@ -32,12 +32,19 @@
 
 ## 1. 安装 APK
 
-产物：`dist/sunsetlinux-launcher-debug.apk`
+产物：**按 edition 分两个 App**（0.3.0 起，包名不同、可共存）——
+`app/app/build/outputs/apk/<组合>/debug/SunsetLinux-<版本>-<组合>-debug.apk`，
+组合清单见 `tools/offline-bundle/variants.json`（root/proot × minimal/base/full）。
 
 ```bash
-# 在电脑上（已配置 adb）
-adb install -r dist/sunsetlinux-launcher-debug.apk
+# 在电脑上（已配置 adb）。有 root → Root 版；没有 root → 免 root 版（也可以都装）
+(cd app && ./gradlew :app:assembleRootFullDebug :app:assembleProotFullDebug)
+adb install -r app/app/build/outputs/apk/rootFull/debug/SunsetLinux-*-root-full-debug.apk
+adb install -r app/app/build/outputs/apk/prootFull/debug/SunsetLinux-*-proot-full-debug.apk
 ```
+
+> 桌面标签分别是 **SunsetLinux Root** 与 **SunsetLinux 免root**（0.3.1 起；0.3.0 两个都一样，
+> 见 `app/VERSION-NOTES.md` 的 0.3.1 段）。
 
 或直接把 APK 传到手机点击安装。
 

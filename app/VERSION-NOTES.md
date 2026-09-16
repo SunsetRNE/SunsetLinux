@@ -23,6 +23,32 @@
 | 0.2.9 | 11 | **终端接上原生 PTY**：`/dev/ptmx` + forkpty 路线（NDK 编译的小 `.so` 随 APK），Ctrl-C/Ctrl-D/Tab/方向键真的生效，`vim`/`htop` 这类全屏程序能跑，窗口大小按控件尺寸发 `TIOCSWINSZ`；输出用最小 VT 模拟器渲染（`\r` 覆盖、`ESC[K`、定位、SGR 剥离）；原生库不可用时**优雅降级**回行缓冲并明说 |
 | 0.2.10 | 12 | **加"无 loop 层模式"开关（dir）**：把三层解包成目录 + 目录 overlayfs，**完全不碰 loop / erofs / upper.img**；「设置 → 层模式」可切、也读 `SUNSETLINUX_LAYER_MODE` 与 `etc/config.json` 的 `layer_mode`（默认 loop 省磁盘）。模块 **1.0.15**：dir 模式实现 + doctor §1e 层模式检查 |
 | 0.3.0 | 15 | **拆成两个可共存的 App（各锁一条路）+ 内置矩阵数据驱动（6 个变体）+ 内置 DSH 与运行时 DSH 解耦**：root 版 `…​.root`、免 root 版 `…​.proot`（不同包名、可同时安装、界面不再有"切换模式"）；内置档位从 2 档扩到 **3 档**（最小 / Ubuntu / 完整离线），矩阵与标签**全部读 `tools/offline-bundle/variants.json`**（加档只改 JSON，Gradle flavor 与 CI 矩阵自动跟上）；新增 `core/DshPin.kt` —— 「内置 DSH（随 APK 冻结）↔ 运行时 DSH（可被频道更新）」对账（纯函数 + 9 条单测），「更新」页给两个版本号与结论、并给**一键回滚到内置版本**（`linuxctl rollback dsh --to <版本>`；`update` 不删旧层文件，所以退路一直在），「关于」页也有一行。模块 **1.0.18**（本轮运行时无改动） |
+| 0.3.1 | 16 | **修「两个 App 桌面同名」**（真机实测）：0.3.0 只改了 `main/res` 的 app_name，`src/<edition>/res/` 根本不存在，于是 root 版与免 root 版在桌面上都叫 "SunsetLinux"，用户点哪个纯靠猜。现在按 edition 设 `app_name`（`resValue` 取 `variants.json` 的 `editions[].label`）：**SunsetLinux Root** / **SunsetLinux 免root**；并打开 AGP 9 默认关闭的 `buildFeatures.resValues`。同时修一批拆版后过时的文案（"四个组合同一个 App、换组合就是覆盖安装"→ "同 App 内换档位＝覆盖安装；root / 免 root 是两个不同的 App"），Release 说明里那个从 0.2.x 起就不存在的 `sunsetlinux-launcher-debug.apk` 也换成了按 `variants.json` 推出来的真实文件名 |
+
+## 0.3.1 —— 两个 App 的桌面标签分开（拆版漏掉的那一步）
+
+0.3.0 拆了两个 App，但**桌面上分不出来**：真机实测 root 版与免 root 版的图标都叫
+"SunsetLinux"。原因是只改了 `main/res/values/strings.xml` 的 `app_name`，而
+`src/<edition>/res/` 这个按 flavor 覆盖的目录**根本不存在**（我上一轮以为有）。
+
+- 按 edition 设 `app_name`：`resValue("string", "app_name", e.label)`，
+  标签取自 `tools/offline-bundle/variants.json` 的 `editions[].label`
+  → **SunsetLinux Root** / **SunsetLinux 免root**（改 JSON 就跟着变，不抄第二份）。
+- 同时打开 `buildFeatures { resValues = true }`：**AGP 9 起 `resValues` 默认关闭**，
+  不开的话 `productFlavors { resValue(...) }` 在配置阶段就失败
+  （`Product Flavor root contains custom resource values, but the feature is disabled.`）。
+- `SigningContractTest` 补三条契约：`resValue` 的写法、`resValues` 开关、
+  两个 edition 的 `label` 必须不同 —— 让"桌面同名"不能再静默回来。
+- 修一批拆版后过时的文案与注释（`version.properties` 头部、`build.gradle.kts` 的 flavor
+  注释、`OfflineBundle.kt` 类文档、`UpdatePane`/`AppShell` 注释，以及**给用户看的那句**
+  "四个内置组合是同一个 App"）。
+- `publish` 的 Release 说明：第 1 步从 `sunsetlinux-launcher-debug.apk`
+  （这个资产从 0.2.x 起就不存在了）换成**按 `variants.json` 推出来的真实文件名**，
+  并说清"两个可共存的 App / 模块只有 Root 版需要"。
+  （踩到的坑：`read` 按空格分词会切坏带空格的 label，必须 `IFS=$'\t'`。）
+
+> 同 `versionCode` 的 APK 覆盖更新不会被 Android 认作新版，所以这类**用户可见**的修复
+> 一定要 +1 —— 0.3.0 装过的用户这次能在 App 里直接看到 0.3.1。
 
 ## 0.3.0 —— 两个 App、一条路各一个；内置矩阵能继续长；内置 DSH 与运行时 DSH 解耦
 

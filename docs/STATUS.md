@@ -23,6 +23,11 @@
 
 ## 二、交付物（`dist/`，哈希见 `dist/MANIFEST.txt`）
 
+> ⚠️ 这一节是**早期轮次**的记录（当时的产物名是 `sunsetlinux-launcher-*`）。
+> 现在的形态看 §3.10.24：**两个 App（`…​.root` / `…​.proot`）× 三档内置 = 6 个
+> `SunsetLinux-<版本>-<组合>-debug.apk`**，由 CI 发到 Release `v<版本>` 与
+> `gh-pages` 的 `/stable/`、`/beta/`（见 `docs/release-ci.md`）。
+
 | 产物 | 说明 | 状态 |
 |---|---|---|
 | `sunsetlinux-launcher-debug.apk` | Android 启动器（Compose M3） | ⚠️ 单色化后**待重建**（源码已通过编译） |
@@ -521,6 +526,14 @@ proroot（省 ~830 KB 且不牵扯专有许可），免 root 版不带模块包�
 `"<edition>-<tier>"` 推 Gradle 任务名 → **加一档只改 JSON 一行**（构建脚本与 CI 都不用动）。
 `SigningContractTest` 的断言改成"构建脚本必须真的在读 JSON" + "两个 edition 包名必须不同、
 不能退回拆分前的老包名"（防身份漂移）。
+
+**②·补记（0.3.1）**：①的"两个 App"在真机上**桌面同名** —— 0.3.0 只改了 `main/res` 的
+`app_name`，按 flavor 覆盖的 `src/<edition>/res/` 不存在。已改为按 edition 设
+`resValue("string","app_name", e.label)`（SunsetLinux Root / SunsetLinux 免root）并打开
+AGP 9 默认关闭的 `buildFeatures.resValues`；契约测试补三条。同轮补了**"该内嵌的离线包真的
+进了 APK"**的门禁（`tools/ci-assert-embed.sh`，0.2.6 就漏在这里，见 §3.10.23 与
+`docs/release-ci.md` §三·一），并修 Release 说明里那个从 0.2.x 起就不存在的
+`sunsetlinux-launcher-debug.apk`。
 
 **③ 内置 DSH ↔ 运行时 DSH 解耦**：`core/DshPin.kt`（纯函数 + 9 条单测）把
 "内置（随 APK 冻结）"与"运行时（可被频道更新）"对账成 6 种结论；「更新」页给两个版本号 +

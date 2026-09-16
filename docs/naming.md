@@ -9,14 +9,15 @@
 > |---|---|
 > | 产品 / App 显示名 | **SunsetLinux** |
 > | 仓库 | **`SunsetLinux`** — <https://github.com/SunsetRNE/SunsetLinux>（本地目录 `/root/Q/SunsetLinux`） |
-> | Android applicationId / namespace | **`io.github.sunsetrne.sunsetlinux`**（两者一致，不存在第二个名字） |
+> | Android applicationId | **拆版后有两个**（0.3.0 起，两个 App 可共存）：`io.github.sunsetrne.sunsetlinux.root`（Root 版）/ `…​.proot`（免 root 版）。`io.github.sunsetrne.sunsetlinux` 是 0.2.x 的旧包名，**只作为历史**保留 —— 新包名刻意带后缀，老用户不会"装一个覆盖另一个" |
+> | Android namespace / 源码包路径 | **`io.github.sunsetrne.sunsetlinux`**（namespace 与源码路径仍然只有这一个；包名差异只体现在 `applicationId`） |
 > | 源码包路径 | `io/github/sunsetrne/sunsetlinux` |
 > | KernelSU 模块 id / name | **`sunsetlinux`** / **SunsetLinux** |
 > | 环境变量前缀 | **`SUNSETLINUX_`**（原 `DSHROID_`） |
 > | 环境根（root 模式） | **`/data/sunsetlinux`**（原 `/data/linux`） |
 > | 环境根（非 root / proot） | **`$APP_FILES/sunsetlinux`**（与 root 模式同名，见下方第 7 条映射） |
 > | 环境内入口脚本目录 | **`/opt/sunsetlinux`** |
-> | Release 资产命名 | `sunsetlinux-<组件>-<版本>.<扩展名>`（如 `sunsetlinux-module-0.1.0.zip`、`sunsetlinux-launcher-debug.apk`） |
+> | Release 资产命名 | 模块：`sunsetlinux-module-<版本>.zip`；App（0.3.0 起）：`SunsetLinux-<版本>-<组合>-debug.apk`，组合 = `<edition>-<tier>`（如 `root-full`、`proot-base`，清单见 `tools/offline-bundle/variants.json`）；离线包：`SunsetLinux-<版本>-<组合>.bin` |
 >
 > ⚠️ **与 §4 的偏差说明**：§4 原写"环境根刻意不含产品名"，但用户最终拍板用 `/data/sunsetlinux`。
 > 因此**环境根现在带产品名**：若将来再改名，就**必须写迁移脚本**把用户数据从
