@@ -489,6 +489,19 @@ su -c '/data/sunsetlinux/bin/linuxctl doctor'
 | 体积显示 | 状态页截图里出现过"dsh 1894 MB"（`etc/state.json` 里是 `198651904` 字节 = **189.4 MB**），当时无法复现 | 用真机三个层的真实字节数把 `formatBytes` 钉进单测（229.2 / 596.3 / 189.4 MB）——再有人把 1024 进制改动、多乘少除一个 1024，测试立刻红 |
 
 
+### 3.10.12 App 内更新 KernelSU 模块（App 0.2.6）
+
+| 事 | 之前 | 现在 |
+|---|---|---|
+| 关于页的模块信息 | 只有一行 `模块 1.0.9（已启用）`，**没有下一步**（要更新得自己去 GitHub 找 zip、再打开 KernelSU 管理器手装） | `ModuleRelease` 读官方 `index.json`（`/stable/` → 退 `/beta/`）拿 `module_version` / Release tag / `files[].sha256`；`ModuleInstaller` 下载 → sha256 → `su` 里复制到 `/data/local/tmp` → `ksud module install <zip>`，没有 ksud 退 `magisk --install-module` |
+| 版本比较 | 没有（不比较） | `compareModuleVersion` **逐段数字比**：`1.0.10 > 1.0.9`（字符串比会得出相反结论）；`1.0` 与 `1.0.0` 视为同版，避免假更新提示 |
+| 已装状态读不到时 | —— | **不给刷入按钮**，先让用户修 root 授权（与"读不到 ≠ 没装"一致） |
+| 重启 | —— | 只报告"重启后生效"（KernelSU 落 `modules_update/`），**App 不替用户重启**，脚本里有单测断言不许出现 `reboot` |
+
+真机依据：设备上 `/data/adb/ksu/bin/ksud`（指向 `/data/adb/ksud`，5.6 MB）确实存在；
+`ksud module install <ZIP>` 的语法取自上游 `userspace/ksud/src/cli.rs` 的 `Module::Install`。
+线上 `/stable/index.json` 已含 `module_version=1.0.10` 与模块 zip 的 sha256，App 端能直接对上。
+
 ### 3.11 ★ proot「能力缺失」审计：哪些是固有限制、哪些能补（2026-09-16 第五批）
 
 用户："解决后续的 proot 能力部分支持缺失问题（感觉这个坎绕不过去了）"。

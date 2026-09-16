@@ -48,6 +48,10 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
         /** 模块状态：`模块 1.0.9（已启用）` / `模块未装` / `模块状态未知`… */
         val moduleLabel: String? = null,
         val moduleHint: String? = null,
+        /** 模块状态**读到了没有**（读不到 ≠ 没装；关于页据此决定给不给"刷入"按钮）。 */
+        val moduleReadable: Boolean = false,
+        /** 已装模块版本（`1.0.9`），读不到就是 null。 */
+        val moduleVersion: String? = null,
         /** null = 还没探测出来 */
         val provisioned: Boolean? = null,
         val status: DshStatus? = null,
@@ -114,7 +118,8 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
             }
             _ui.update {
                 it.copy(rootLabel = root.label, rootHint = root.hint,
-                        moduleLabel = module.label, moduleHint = module.hint)
+                        moduleLabel = module.label, moduleHint = module.hint,
+                        moduleReadable = module.readable, moduleVersion = module.version)
             }
         }
         startPolling()

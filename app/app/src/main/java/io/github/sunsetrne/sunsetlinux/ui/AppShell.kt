@@ -708,7 +708,7 @@ private fun AboutDialog(ui: LauncherViewModel.UiState, onClose: () -> Unit, onEx
         dismissButton = { TextButton(onClick = onExport) { Text("导出排障包") } },
         title = { Text("关于 SunsetLinux") },
         text = {
-            Column {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
                 // ★ "关于"要能真的回答"我装的是哪个包、什么版本、环境缺不缺东西" ——
                 //   以前只有 VERSION_NAME，四个内置组合的名字都看不出来（真机反馈）。
                 AboutLine("应用版本", BuildConfig.STANDARD_VERSION)
@@ -723,6 +723,13 @@ private fun AboutDialog(ui: LauncherViewModel.UiState, onClose: () -> Unit, onEx
                 AboutLine("环境根", DshPaths.linuxHome(context, ui.mode))
                 AboutLine("Linux 侧接口", "linuxctl / status JSON（§3.1 冻结）")
                 AboutLine("当前阶段", ui.stage)
+                Spacer(Modifier.height(10.dp))
+                // ★ 模块更新要"实际可用"：以前只能看到版本号，下一步得自己去 GitHub 找 zip、
+                //   再打开 KernelSU 管理器手装。这里直接下载 + ksud 刷入（重启由用户决定）。
+                ModuleUpdateCard(
+                    installedVersion = ui.moduleVersion,
+                    installedReadable = ui.moduleReadable,
+                )
                 Spacer(Modifier.height(10.dp))
                 Text(
                     text = "本应用不解析 rootfs、不自行挂载：所有环境操作都只经 linuxctl。" +
