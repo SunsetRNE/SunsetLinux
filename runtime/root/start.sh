@@ -512,7 +512,13 @@ find_layer() {
 #   erofs 与 squashfs 的挂载选项基本一致（-t <fs> -o loop,ro）。
 #   失败原因要能诊断：内核不支持该 fs → 提示 doctor 第 1 节。
 mount_layer() {
-    local name="$1" file="$2" fmt="" dst="$LAYERS_MNT/$name" fssup=""
+    local name="$1" file="$2" fmt="" fssup=""
+    # ★ 必须**分成两条** local：mksh 与 bash 在同一条 `local` 里都取不到刚赋的变量
+    #   （`local a="X" b="[$a]"` → mksh: `a: parameter not set` / bash: unbound variable）。
+    #   真机事故（2026-09-17）：把 loop 写权限修好之后 start.sh **第一次真的走到这行**
+    #   → `start.sh[1477]: name: parameter not set`，整脚本死在这里（此前 loop 永远挂不上，
+    #   这行从未被执行过，所以一直没暴露）。
+    local dst="$LAYERS_MNT/$name"
     fmt="$(layer_format "$file" 2>/dev/null || echo unknown)"
     case "$fmt" in
         erofs|squashfs) ;;
@@ -986,8 +992,13 @@ build_mount_tree() {
     mkdir -p "$ROOTFS_DIR"/{proc,sys,dev,dev/pts,dev/shm,tmp,run,mnt/sdcard,storage/emulated} \
         || die "无法创建 rootfs 内部目录骨架"
 
-    # --- 抓取 Android 侧事实（DNS/时区），chroot 后就取不到了 ---------------
-    gather_android_facts
+    # --- 把宿主父进程预抓好的 Android 事实（DNS/时区）**拷进** rootfs 的 /etc -----
+    # ★ 真机事故（2026-09-17）：这里原来是 gather_android_facts —— 在**内层**（私有
+    #   mount/UTS ns）调用 /system/bin/ndc，ndc 打不开 /dev/binder → SIGABRT；连锁出
+    #   5 个 tombstone + system_app_anr + system_server crash ⇒ **整机卡死，只能重启**。
+    #   抓取（ndc/getprop/route，都是安卓系统工具）必须在**宿主父进程**做（未 unshare），
+    #   内层只负责拷贝 —— 这也是 gather_android_facts 注释里本来写的做法。
+    install_android_facts
 
     # --- 先把 /opt/sunsetlinux 入口脚本同步进 rootfs（本地最新版优先）----------
     # 理由：entry.sh/supervise.sh 属于"启动器"，不该随 squashfs 层更新才有新版。
@@ -1048,7 +1059,12 @@ rbind_host_run() {
 }
 
 # ---------------------------------------------------------------------------
-# gather_android_facts —— chroot 之前抓 Android 当前 DNS / 时区，落到
+# gather_android_facts —— 抓 Android 当前 DNS / 时区，落到 $LINUX_HOME/etc/android-*.txt
+#   ★★ 只能在**宿主父进程**（main() 里 spawn unshare 之前）调用 ★★
+#   严禁在 `--inner` / chroot 路径里调用：ndc/getprop 是安卓系统工具，在私有 ns 里会
+#   打不开 /dev/binder 与 /dev/__properties__ 而 abort，连锁把 system_server 带崩
+#   （2026-09-17 真机事故：5 个 tombstone + ANR + system_server crash ⇒ 整机卡死，只能重启）。
+#   内层只调用 install_android_facts() 做拷贝。
 #   $LH/etc/android-{resolv,dns,timezone}.txt，供 entry.sh 在环境内读取。
 #
 # 为什么必须在这里抓：chroot 之后根变成 overlay，Android 的 /system、/data 都
@@ -1062,6 +1078,29 @@ rbind_host_run() {
 #   ⑤ 默认网关（/proc/net/route + 修正字节序）—— 只作为"可能的 DNS"提示，不写死
 # 全部失败：不编造，entry.sh 会兜底 8.8.8.8/1.1.1.1 并在日志里警告。
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# install_android_facts —— 把**宿主父进程**预抓的 Android 事实拷进 rootfs 的 /etc
+#   为什么只能拷、不能抓：抓取要调 /system/bin/ndc、getprop，它们依赖 binder / 属性区；
+#   而本函数运行在 `--inner`（私有 mount/UTS ns）里。真机事故（2026-09-17）：
+#       ndc: SIGABRT "Binder driver '/dev/binder' could not be opened. Error: 2"
+#   → 5 个 tombstone + system_app_anr + system_server_crash ⇒ 整机卡死、只能重启。
+#   entry.sh 读的是 **/etc/android-resolv.txt**（chroot 内），所以这里拷到 rootfs/etc/。
+# ---------------------------------------------------------------------------
+install_android_facts() {
+    local dst="$ROOTFS_DIR/etc" f n=0
+    [ -d "$dst" ] || { log "WARN: $dst 不存在，跳过 Android 事实拷贝"; return 0; }
+    for f in android-dns.txt android-resolv.txt android-timezone.txt; do
+        [ -f "$ETC_DIR/$f" ] || continue
+        cp -f "$ETC_DIR/$f" "$dst/$f" 2>/dev/null && n=$((n + 1))
+    done
+    if [ "$n" -gt 0 ]; then
+        log "已拷入 rootfs/etc：$n 个 Android 事实文件（宿主父进程预抓；环境内不调安卓工具）"
+    else
+        log "WARN: $ETC_DIR 下没有 Android 事实文件（父进程抓取失败？entry.sh 会兜底 8.8.8.8）"
+    fi
+    return 0
+}
+
 gather_android_facts() {
     local dns_file="$ETC_DIR/android-dns.txt"
     local resolv_file="$ETC_DIR/android-resolv.txt"
@@ -1341,7 +1380,14 @@ main() {
         : > "$READY_FILE"
         log "挂载树就绪，交给 entry.sh"
         local rc=0
-        chroot "$ROOTFS_DIR" /opt/sunsetlinux/entry.sh "$(config_port)" || rc=$?
+        # ★ 进 chroot 前必须显式给环境变量：`#!/usr/bin/env bash` 里的 env 用的是
+        #   **从安卓继承的 PATH**（/product/bin:/system/bin 那一套），里面没有 /usr/bin
+        #   ⇒ 真机 2026-09-17 实测：`/usr/bin/env: 'bash': No such file or directory` → rc=127；
+        #   挂载树全建好了却起不来（日志停在"挂载树就绪，交给 entry.sh"）。
+        #   entry.sh/supervise.sh 的 shebang 也一并从 `env bash` 改成 `/bin/bash`（双保险）。
+        PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+        HOME=/root TERM="${TERM:-xterm-256color}" \
+            chroot "$ROOTFS_DIR" /opt/sunsetlinux/entry.sh "$(config_port)" || rc=$?
         finish_environment "$rc"
         trap - EXIT
         exit "$rc"
@@ -1399,6 +1445,10 @@ main() {
     #   子进程靠 resolve_layer_mode 从环境变量读到同一个值（否则会退回 loop，白解析一场）。
     SUNSETLINUX_LAYER_MODE="$LAYER_MODE"
     export SUNSETLINUX_LAYER_MODE
+    # ★ 在**父进程（宿主 ns，未 unshare）**里抓 Android 事实：ndc/getprop/route 都是
+    #   安卓系统工具，一旦在私有 ns 里调用就会像 2026-09-17 那样把整机带崩。
+    #   内层只读取/拷贝这里落下的文件（见 install_android_facts）。
+    gather_android_facts
     log "启动守护进程：unshare -m -u（propagation=$prop, layer_mode=$LAYER_MODE）$SELF_DIR/start.sh --inner"
 
     local uc_ok=0

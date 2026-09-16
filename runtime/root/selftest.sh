@@ -759,6 +759,69 @@ for pair in "mount-denied:denied" "mount-badfd:ok"; do
     esac
 done
 
+# ---------------------------------------------------------------------------
+# mount_layer：同一条 local 里自引用会炸（2026-09-17 真机事故）
+#   `local name="$1" … dst="$LAYERS_MNT/$name"` —— mksh 与 bash 在同一条 local 内都取不到
+#   刚赋的变量，`set -u` 下报 "name: parameter not set"。真机上 start.sh 就跑死在这行，
+#   而且**只**因为此前 loop 写不通、这行从未被执行过才一直没暴露。
+#   这里用真函数 + 假 mount/mountpoint/grep 驱动，断言：不再报 parameter not set，且登记正确。
+# ---------------------------------------------------------------------------
+head_ "mount_layer 的同条 local 自引用（真机回归）"
+MLB="$TMP/ml-bin"; mkdir -p "$MLB" "$TMP/ml-run" "$TMP/ml-mnt"
+printf '%s\n' '#!/bin/sh' 'exit 0' > "$MLB/grep"          # 让 /proc/filesystems 的支持性检查通过
+printf '%s\n' '#!/bin/sh' 'exit 0' > "$MLB/mount"
+printf '%s\n' '#!/bin/sh' 'exit 1' > "$MLB/mountpoint"    # 挂载点当前未挂
+chmod +x "$MLB/grep" "$MLB/mount" "$MLB/mountpoint"
+mlh="$TMP/ml-harness.sh"
+{
+    echo 'log() { :; }'
+    echo 'die() { echo "DIE: $*" >&2; exit 1; }'
+    echo 'have() { command -v "$1" >/dev/null 2>&1; }'
+    sed -n '/^_magic_at()/,/^}/p'    "$SELF_DIR/start.sh"
+    sed -n '/^layer_format()/,/^}/p' "$SELF_DIR/start.sh"
+    sed -n '/^mount_layer()/,/^}$/p' "$SELF_DIR/start.sh"
+} > "$mlh"
+grep -q '^mount_layer()' "$mlh" || bad "抽取 mount_layer 失败（函数被改名了？）"
+mlout="$(PATH="$MLB:$PATH" MOUNT="$MLB/mount" UMOUNT="$MLB/mount" \
+         LAYERS_MNT="$TMP/ml-mnt" MOUNTS_FILE="$TMP/ml-run/mounts" DAEMON_LOG="$TMP/ml-run/log" \
+         "$SH_BIN" -c 'set -u; . "$1"; mount_layer base "$2"; echo "ML=ok"' _ "$mlh" \
+         "$FIXTURES/erofs-head.bin" 2>&1 || true)"
+case "$mlout" in
+    *"parameter not set"*|*"unbound variable"*)
+        bad "同一条 local 自引用又炸了：$(printf '%s' "$mlout" | tr '\n' ' ' | cut -c1-110)" ;;
+    *"ML=ok"*) ok "mount_layer 在 set -u 下跑通（不再 name: parameter not set）" ;;
+    *) bad "mount_layer 没跑通：$(printf '%s' "$mlout" | tr '\n' ' ' | cut -c1-130)" ;;
+esac
+case "$(tr '\n' ' ' < "$TMP/ml-run/mounts" 2>/dev/null)" in
+    *"layers-mnt/base"*) ok "登记成 layers-mnt/base（dst 拼对了）" ;;
+    *) bad "登记不对：$(tr '\n' ' ' < "$TMP/ml-run/mounts" 2>/dev/null)" ;;
+esac
+
+# ---------------------------------------------------------------------------
+# 内层不许调安卓系统工具（2026-09-17 整机卡死事故的回归）
+#   事故：build_mount_tree 里调 gather_android_facts → 在内层（私有 mount/UTS ns）拉起
+#   /system/bin/ndc，ndc 打不开 /dev/binder → SIGABRT；5 个 tombstone + ANR +
+#   system_server crash ⇒ 整机卡死、只能重启。
+#   安全性质（文本断言，够硬）：① gather_android_facts 只在 main()（父进程）里调用一次；
+#                              ② 内层（build_mount_tree，位于 main() 之前）只用 install_android_facts 拷贝。
+# ---------------------------------------------------------------------------
+head_ "内层不许调安卓系统工具（ndc/getprop）"
+MAIN_LN="$(grep -n '^main()' "$SELF_DIR/start.sh" | head -1 | cut -d: -f1)"
+G_CALL="$(grep -n '^ *gather_android_facts$' "$SELF_DIR/start.sh" | head -1 | cut -d: -f1)"
+I_CALL="$(grep -n '^ *install_android_facts$' "$SELF_DIR/start.sh" | head -1 | cut -d: -f1)"
+G_N="$(grep -c '^ *gather_android_facts$' "$SELF_DIR/start.sh")"
+I_N="$(grep -c '^ *install_android_facts$' "$SELF_DIR/start.sh")"
+if [ "$G_N" = "1" ] && [ -n "$G_CALL" ] && [ -n "$MAIN_LN" ] && [ "$G_CALL" -gt "$MAIN_LN" ]; then
+    ok "gather_android_facts 只在 main()（父进程）里调用一次（第 $G_CALL 行 > main 第 $MAIN_LN 行）"
+else
+    bad "gather_android_facts 调用位置/次数不对（次数=$G_N 行=$G_CALL main=$MAIN_LN）：内层会拉起 ndc 把整机带崩"
+fi
+if [ "$I_N" = "1" ] && [ -n "$I_CALL" ] && [ -n "$MAIN_LN" ] && [ "$I_CALL" -lt "$MAIN_LN" ]; then
+    ok "内层只用 install_android_facts 拷贝（第 $I_CALL 行 < main 第 $MAIN_LN 行）"
+else
+    bad "内层没有改用 install_android_facts（次数=$I_N 行=$I_CALL main=$MAIN_LN）"
+fi
+
 printf '\n=========================================\n'
 printf '  通过 %d，失败 %d\n' "$pass" "$fail"
 printf '=========================================\n'

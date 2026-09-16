@@ -25,6 +25,20 @@
 | 0.3.0 | 15 | **拆成两个可共存的 App（各锁一条路）+ 内置矩阵数据驱动（6 个变体）+ 内置 DSH 与运行时 DSH 解耦**：root 版 `…​.root`、免 root 版 `…​.proot`（不同包名、可同时安装、界面不再有"切换模式"）；内置档位从 2 档扩到 **3 档**（最小 / Ubuntu / 完整离线），矩阵与标签**全部读 `tools/offline-bundle/variants.json`**（加档只改 JSON，Gradle flavor 与 CI 矩阵自动跟上）；新增 `core/DshPin.kt` —— 「内置 DSH（随 APK 冻结）↔ 运行时 DSH（可被频道更新）」对账（纯函数 + 9 条单测），「更新」页给两个版本号与结论、并给**一键回滚到内置版本**（`linuxctl rollback dsh --to <版本>`；`update` 不删旧层文件，所以退路一直在），「关于」页也有一行。模块 **1.0.18**（本轮运行时无改动） |
 | 0.3.1 | 16 | **修「两个 App 桌面同名」**（真机实测）：0.3.0 只改了 `main/res` 的 app_name，`src/<edition>/res/` 根本不存在，于是 root 版与免 root 版在桌面上都叫 "SunsetLinux"，用户点哪个纯靠猜。现在按 edition 设 `app_name`（`resValue` 取 `variants.json` 的 `editions[].label`）：**SunsetLinux Root** / **SunsetLinux 免root**；并打开 AGP 9 默认关闭的 `buildFeatures.resValues`。同时修一批拆版后过时的文案（"四个组合同一个 App、换组合就是覆盖安装"→ "同 App 内换档位＝覆盖安装；root / 免 root 是两个不同的 App"），Release 说明里那个从 0.2.x 起就不存在的 `sunsetlinux-launcher-debug.apk` 也换成了按 `variants.json` 推出来的真实文件名 |
 | 0.3.2 | 17 | **真机挂载归因 + 修掉三处 bug + 本机能力探测**（模块 **1.0.19**）：① **可写层挂载点不一致** —— `mount_upper_rw` 把 `upper.img` 挂到 `$ROOTFS_DIR/upper`，而 `architecture.md`/`stop.sh`/`linuxctl` 全都按 `$LINUX_HOME/upper` 找它 ⇒ overlay 的 `upperdir`（`$UPPER_DIR/upper`）根本看不到那块 ext4，8 GiB 镜像白挂、还被随后挂在 `$ROOTFS_DIR` 的 overlay 遮住；② **toybox 能力探测谎报** —— 判定表认不出 `Unknown option 'propagation'`（大写 U）与 `bad /etc/fstab`，于是每次启动都先按"支持"去调 `--propagation`/`--make-rprivate`（注定失败，日志里那两行就是这么来的）；③ **overlay 失败没诊断** —— 既不记实际入参，`kernel_hint_log` 的 grep 又把 `overlayfs:` 过滤掉了。新增 `overlay_fs_usable()`（同 fs 两个空目录只读试挂，实测该 fs 能不能当 overlay 的层）+ `probe_loop_io`/`probe_fuse_mount`（`PROBE_VERSION=2` 让老 cmdprobe 失效重探）。**真机结论（都有内核原文）**：这台机 `/data` 的 f2fs 被 overlayfs 一律拒绝（`ovl_dentry_weird` 命中 `DCACHE_OP_HASH/COMPARE`）⇒ dir 模式在这台机不可能；loop 的 I/O 在 `kernel` 域被 SELinux 拒（厂商只读 loop 背 `system_file` 正常、我们的文件连**读**都 FAIL、`chcon system_file` 后读通写仍被拒）⇒ **loop 快路需要一条可选的 `kernel` 域 sepolicy 规则，依旧不需要编/刷内核** |
+| 0.3.3 | 18 | **修整机卡死事故（模块 1.0.20）**：`gather_android_facts`（调 `ndc`/`getprop` 抓 DNS/时区）原本被**内层**（私有 mount/UTS ns）调用 —— 真机实测 `ndc` 打不开 `/dev/binder` 而 SIGABRT，连锁出 5 个 tombstone + `system_app_anr` + `system_server_crash` ⇒ **整机卡死只能重启**。现在抓取只在**父进程**做（未 unshare），内层改调 `install_android_facts()` 只把宿主预抓的文件**拷进** `rootfs/etc/`（`entry.sh` 读的 `/etc/android-resolv.txt` 顺带接通）。另含：`mount_layer` 同条 `local` 自引用修复、`chroot` 前显式给 `PATH`、`entry.sh`/`supervise.sh` shebang 改 `/bin/bash`、`ksud sepolicy` 写法（class 不带冒号）与回归 62 条 |
+
+## 0.3.3 —— 整机卡死事故：内层绝不能调用安卓系统工具
+
+
+`gather_android_facts` 要调 `/system/bin/ndc`、`getprop` 才能拿到 DNS/时区；它自己的注释
+写着"在宿主侧先取好是唯一可靠做法"，但**调用点却在 `build_mount_tree` 里**（内层）。
+真机结果：`ndc` 在私有 ns 里打不开 `/dev/binder`（`Error: 2`）→ SIGABRT → 5 个 tombstone
+→ `system_app_anr` → `system_server_crash` ⇒ 手机卡死，只能重启。
+
+改法：抓取移到**父进程**（`main()` 里、spawn unshare 之前）；内层新增 `install_android_facts()`
+只做**拷贝**（`$LINUX_HOME/etc/android-*.txt` → `rootfs/etc/`）。教训清单见
+`docs/HANDOFF.md` 第 37 轮补记（含 `ksud sepolicy` 写法、权限位、单行检测、`chroot PATH`、
+`local` 自引用）。
 
 ## 0.3.2 —— 真机挂载归因；三处 bug；"这台机起不来"背后的三条限制
 

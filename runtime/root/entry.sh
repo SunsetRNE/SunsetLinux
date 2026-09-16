@@ -1,4 +1,8 @@
-#!/usr/bin/env bash
+#!/bin/bash
+# 注：原为 `#!/usr/bin/env bash`。真机 2026-09-17 实测：chroot 后 `env` 用的是**从安卓继承的
+# PATH**（没有 /usr/bin），于是 `/usr/bin/env: 'bash': No such file or directory` → rc=127。
+# 现在 start.sh 在 chroot 前显式给了 Linux PATH（根因修复），这里再改成绝对路径做双保险
+# （本层是 Ubuntu，/bin/bash 一定在）。
 # =============================================================================
 # sunsetlinux · runtime/root/entry.sh
 #

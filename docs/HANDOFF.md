@@ -600,3 +600,27 @@ tail -40 /data/sunsetlinux/run/linux.log  # 现在会有内容了：卡在 loop/
 **诊断脚本（开发工作区，未入库）**：`真机诊断-挂载.sh`（现场+三种 overlay 写法）、`真机诊断2-loop与overlay.sh`
 （loop 在 f2fs/tmpfs、关 DIO 对照）、`真机诊断3-loop归因与fuse.sh`（厂商文件/标签/API 三种对照 + fuse）、
 `真机诊断4-判定表.sh`（只打结论的判定表）。要入库的话，建议合并成一个 `tools/device-mount-diag.sh`。
+
+## 第 37 轮补记（2026-09-17）：一次**整机卡死**事故与修法
+
+**现象**：跑 A 路线验证（start）后手机卡死，只能重启。
+
+**证据**（`/data/system/dropbox` + `/data/tombstones`）：
+- `01:44:08 /system/bin/ndc resolver getresolvers`（uid 0）**SIGABRT**：`Binder driver '/dev/binder' could not be opened. Error: 2` —— 就是 `start.sh` 的 `gather_android_facts` 在内层反复拉起的那几次（日志那句"完全取不到 Android DNS"）；
+- `01:44` 5 个 tombstone_08..12 → `01:45 system_app_anr` → `01:47 system_server_crash` + tombstone_13 ⇒ 卡死。
+
+**根因**：`gather_android_facts` 的注释写着"在宿主侧先取好是唯一可靠做法"，但**调用点在内层**（`build_mount_tree` 里）。内层处在私有 mount/UTS ns，`ndc`/`getprop` 依赖 binder 与 `/dev/__properties__`，在那里拿不到 → abort → 连锁把 `system_server` 带崩。
+
+**修法（模块 1.0.20 / App 0.3.3）**：
+- 抓取只在**父进程**（`main()` 里、spawn unshare 之前）做；
+- 内层改调 `install_android_facts()`：只把 `$LINUX_HOME/etc/android-*.txt` **拷贝**到 `rootfs/etc/`（`entry.sh` 读的就是 `/etc/android-resolv.txt` —— 顺带把这条一直没通的管道接上了）；
+- 回归：`selftest.sh` 新增两条文本断言（gather 只在 `main()` 调用一次；内层只用 install）⇒ **62/0（bash + mksh）**。
+
+**本轮踩过、别再犯的坑（合并清单）**：
+1. **内层（私有 ns）严禁调用安卓系统工具**（`ndc`/`getprop`/`ip route`…）——会 abort 并带崩 `system_server`；要宿主事实就让**父进程**或 App 采集、落文件。
+2. `ksud sepolicy check/patch` 的 tclass **不带冒号**：`allow kernel system_data_file file write;`。
+3. 改设备上的脚本：**先 `cp`（继承权限位）再原地重写**（`awk > 新文件` + `mv` 会丢 +x → `unshare: exec … Permission denied`）。
+4. 改文件的检测别只看单行（拆开后 `local dst=` 会跑到下一行）。
+5. `chroot` 前要自己给 `PATH`：否则 `#!/usr/bin/env bash` 用的是安卓 PATH → `env: 'bash': No such file or directory`（rc=127）。
+6. 同一条 `local` 里不能自引用：`local a=1 b=$a` → `a: parameter not set`（mksh/bash 一样）。
+7. **A 路线的技术验证已成功**（写权限放开后：upper 挂上、三层 erofs 挂上、overlay 成型、`entry.sh` 跑起来 rc=78）—— 剩下的是"环境内不许碰安卓系统服务"。

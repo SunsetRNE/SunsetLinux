@@ -503,6 +503,16 @@ su -c '/data/sunsetlinux/bin/linuxctl doctor'
 | 已装状态读不到时 | —— | **不给刷入按钮**，先让用户修 root 授权（与"读不到 ≠ 没装"一致） |
 | 重启 | —— | 只报告"重启后生效"（KernelSU 落 `modules_update/`），**App 不替用户重启**，脚本里有单测断言不许出现 `reboot` |
 
+### 3.10.26 内层禁止调用安卓系统工具（真机整机卡死事故；模块 1.0.20 / App 0.3.3）
+
+**现象**：真机跑 start 后**整机卡死**，只能重启。
+
+**证据**：`01:44:08 /system/bin/ndc resolver getresolvers`（uid 0）SIGABRT —— `Binder driver '/dev/binder' could not be opened. Error: 2`；同秒 5 个 tombstone，`01:45 system_app_anr`，`01:47 system_server_crash`。那 5 次 `ndc` 就是 `start.sh` 的 `gather_android_facts` 在内层拉起的（日志"完全取不到 Android DNS（ndc/getprop/resolv.conf/route 全部失败）"）。
+
+**根因**：函数注释写的"宿主侧先取好"没错，但**调用点在内层**（`build_mount_tree`）——私有 mount/UTS ns 里 `ndc`/`getprop` 打不开 binder 与 `/dev/__properties__`。
+
+**修法**：抓取移到父进程（`main()`、spawn 前）；内层新增 `install_android_facts()` 只做拷贝到 `rootfs/etc/`；`selftest.sh` 加两条文本回归 ⇒ **62/0（bash+mksh）**。另记：`ksud sepolicy` 的写法是 `allow <src> <tgt> <class> <perm>;`（**class 不带冒号**）；改设备脚本要先 `cp` 保权限位。
+
 ### 3.10.25 真机挂载归因：三处 bug + "这台机为什么起不来"的三条限制（App 0.3.2 / 模块 1.0.19）
 
 用户贴出真机启动日志（loop 可写层 `I/O error` → 降级 dir 模式又 `EINVAL`），随后问："我这台机子起步困难，

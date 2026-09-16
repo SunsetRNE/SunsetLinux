@@ -1,4 +1,6 @@
-#!/usr/bin/env bash
+#!/bin/bash
+# 注：同 entry.sh —— 原为 `#!/usr/bin/env bash`，chroot 后 env 找不到 bash（继承的是安卓 PATH）；
+# start.sh 已在 chroot 前显式给 PATH，这里改成绝对路径双保险。
 # =============================================================================
 # sunsetlinux · runtime/root/supervise.sh
 #
