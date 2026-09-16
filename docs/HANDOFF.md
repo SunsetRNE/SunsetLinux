@@ -104,6 +104,22 @@ CI 四条线路：① `ci.yml` 回归门禁（shell / node / android 三并行�
 - **模块 1.0.18**：proot 的 `linuxctl` 支持 erofs 层（`fsck.erofs --extract`）、`provision` 自动用
   base 层当 rootfs、`doctor` 报"部署就绪度"。
 
+### 第 34 条补记：两处「本机绿、CI 红」的坑（都已修）
+
+1. **CI 出的 APK 没内嵌模块包。** 第 33 条给 App 加了「一键刷入内置模块」（读
+   `assets/module/sunsetlinux-module.zip`），但 `release.yml` 里**模块 zip 是构建 APK 之后**才打的
+   → 官方 0.2.12 APK 里没有 `assets/module/`，用户点那个按钮只会看到"这个 APK 没有内嵌模块包"
+   （本机自测有、官方包没有 —— 最坏的一类不一致）。修法：`ci.yml` 的 android 关在 Gradle 构建**之前**
+   加一步 `bash module/mkmodule.sh`，并在构建后加断言「四个 APK 都必须含
+   `assets/module/sunsetlinux-module.zip`」（内嵌不完整就不许发，与离线包那条同规则）。
+2. **自测里的 erofs 假层是用 `awk 'BEGIN{printf "%c", 226}'` 写的** —— gawk 在 UTF-8 locale 下把
+   226 当码位 U+00E2 编成**两个字节**，假层 magic 写错 → `layer_format=unknown` →
+   `layer_has_path` 返回"判不了" → 三条断言在 CI 上红，而本地（mawk + POSIX）全绿。
+   改用 `printf '%b' '\342\341\365\340'`（bash/mksh/dash 都写单字节），并把
+   `magic/size/dump 路径/finding 摘要`塞进断言消息。
+   同时给 CI 加了 `tools/ci-shell-gate.sh`：失败时用 `::error::` 注释带出"红的是哪几条断言"
+   （步骤日志要仓库权限才看得到，而 check-run 的 annotations 匿名可读 —— 这次就是靠它拿到的现场）。
+
 ### 第 33 条的两个现场（截图与 doctor 输出）
 
 **现场 A**：引导页第 2 步的「我已经装好模块并重启」前面没有任何可点的东西 ——
