@@ -454,7 +454,14 @@ private fun ProvisionScreen(
                 )
                 Spacer(Modifier.height(6.dp))
                 Text(
-                    text = "给了种子目录就会以 --seed 传给 linuxctl provision，可离线铺层。",
+                    text = if (mode == EnvMode.PROOT) {
+                        "免 root 的三件必需件：**宿主脚本**（App 内置，进这个向导时会自动铺）、" +
+                            "**proot 运行时**（内嵌离线包）、**rootfs**（从 base 层解开或解一个 tar 种子）。" +
+                            "给了种子目录就以 --seed 传给 provision；没给也会自动用已装好的 base 层。"
+                    } else {
+                        "给了种子目录就会以 --seed 传给 linuxctl provision；root 模式下层通常来自" +
+                            "频道或设备侧构建（device-provision.sh）。"
+                    },
                     style = MaterialTheme.typography.labelSmall,
                     color = TextMuted,
                 )
@@ -488,21 +495,26 @@ private fun ProvisionScreen(
                             else -> Danger
                         },
                     )
-                    Spacer(Modifier.width(8.dp))
-                    Pill(
-                        text = moduleStatus?.label ?: "模块检测中…",
-                        color = when {
-                            moduleStatus == null -> TextMuted
-                            // 读不到 ≠ 没装：中性色 + 提示去授权（真机踩过"重启了还说没刷入"）
-                            !moduleStatus.readable -> TextMuted
-                            !moduleStatus.installed || moduleStatus.disabled -> WarnTone
-                            moduleStatus.pendingReboot -> WarnTone
-                            else -> StateRunning
-                        },
-                    )
+                    if (mode == EnvMode.ROOT) {
+                        Spacer(Modifier.width(8.dp))
+                        Pill(
+                            text = moduleStatus?.label ?: "模块检测中…",
+                            color = when {
+                                moduleStatus == null -> TextMuted
+                                // 读不到 ≠ 没装：中性色 + 提示去授权（真机踩过"重启了还说没刷入"）
+                                !moduleStatus.readable -> TextMuted
+                                !moduleStatus.installed || moduleStatus.disabled -> WarnTone
+                                moduleStatus.pendingReboot -> WarnTone
+                                else -> StateRunning
+                            },
+                        )
+                    }
                 }
-                // 说不清就没意义 —— 状态后面必须跟"下一步做什么"
-                listOfNotNull(rootProbe?.hint, moduleStatus?.hint).forEach { hint ->
+                // 说不清就没意义 —— 状态后面必须跟"下一步做什么"（免 root 下模块与它无关，不显示）
+                listOfNotNull(
+                    rootProbe?.hint,
+                    if (mode == EnvMode.ROOT) moduleStatus?.hint else null,
+                ).forEach { hint ->
                     Spacer(Modifier.height(8.dp))
                     Text(
                         text = "→ $hint",
