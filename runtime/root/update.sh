@@ -38,7 +38,17 @@
 # =============================================================================
 set -uo pipefail
 
-SELF_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")" && pwd -P)"
+# 与 linuxctl.sh 同一套判定：宿主/CI 用 bash，Android 用 /system/bin/sh。
+# **不要用裸 `sh`** —— 模块自启时 PATH 里可能是 busybox 的 ash（见 linuxctl.sh 注释）。
+SH_BIN="${SUNSETLINUX_SH:-}"
+if [ -z "$SH_BIN" ] || [ ! -x "$SH_BIN" ]; then
+    if command -v bash >/dev/null 2>&1; then SH_BIN="$(command -v bash)"
+    elif [ -x /system/bin/sh ]; then SH_BIN=/system/bin/sh
+    else SH_BIN=/bin/sh; fi
+fi
+export SH_BIN
+
+SELF_DIR="$(cd -- "$(dirname -- "$0")" && pwd -P)"   # 设备侧只用 $0（见 linuxctl.sh 的 pick_shell 注释）
 LINUX_HOME="${LINUX_HOME:-/data/sunsetlinux}"
 LH="$LINUX_HOME"
 
@@ -453,7 +463,7 @@ cmd_apply() {
             # 否则不交给 linuxctl（它会拒，但这里报错信息更具体）
             if [ -f "$SELF_DIR/linuxctl.sh" ]; then
                 local fm
-                fm="$(bash -c '. "'"$SELF_DIR"'/linuxctl.sh" >/dev/null 2>&1; layer_format "'"$raw"'"' 2>/dev/null || true)"
+                fm="$("$SH_BIN" -c '. "'"$SELF_DIR"'/linuxctl.sh" >/dev/null 2>&1; layer_format "'"$raw"'"' 2>/dev/null || true)"
                 if [ -n "$fm" ] && [ "$fm" != "erofs" ] && [ "$fm" != "squashfs" ]; then
                     rm -f "$raw"
                     emit '{"ok":false,"error":"解压结果不是有效的 erofs/squashfs 镜像（产物损坏或格式不符）"}'
@@ -490,7 +500,7 @@ cmd_apply() {
     fi
     log "安装 $layer $version"
     local upd
-    upd="$(bash "$ctl" update "$layer" "$raw" --version "$version" 2>/dev/null)" || true
+    upd="$(LINUX_HOME="$LH" "$SH_BIN" "$ctl" update "$layer" "$raw" --version "$version" 2>/dev/null)" || true
     # 安装完清理裸镜像（层已经落到 layers/ 了，这里不必留 200MB 副本）
     rm -f "$raw" 2>/dev/null || true
     if printf '%s' "$upd" | grep -q '"ok":true'; then

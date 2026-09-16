@@ -14,7 +14,7 @@
 # =============================================================================
 set -uo pipefail
 
-SELF_PATH="${BASH_SOURCE[0]:-$0}"   # mksh 下 BASH_SOURCE 未定义 → 退回 $0
+SELF_PATH="$0"   # mksh 下 BASH_SOURCE 未定义 → 退回 $0
 SELF_DIR="$(cd -- "$(dirname -- "$SELF_PATH")" && pwd -P)"
 
 LINUX_HOME="${LINUX_HOME:-/data/sunsetlinux}"
@@ -39,7 +39,7 @@ PRETTY=0
 [ "${1:-}" = "--pretty" ] && PRETTY=1
 
 if [ "$PRETTY" = "1" ] && command -v jq >/dev/null 2>&1; then
-    bash "$CTL" status 2>/dev/null | jq .
+    "$CTL" status 2>/dev/null | jq .
     exit $?
 fi
-exec bash "$CTL" status
+exec "$CTL" status

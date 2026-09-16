@@ -17,6 +17,52 @@
 | 0.2.4 | 6 | root 检测升级为可解释状态（无 su / 被拒 / 超时 / 已授权）+ 模块检测（装没装、版本、停用、装了没重启）；「更新」页修好"本地版本读不出来 ⇒ 看不到可更新层" |
 | 0.2.5 | 7 | **离线安装真正可用**：内嵌离线包一键装（读包 → 校验 → 解压 → 镜像校验 → `linuxctl update`，全程不联网）；proot 宿主脚本随 APK 走 assets（免 root 版不再要求用户手动解包）；模块检测改三态（**读不到 ≠ 没装**）；「更新」页把频道检查失败与"已是最新"分开说，并显示本机包/内嵌包对照 |
 | 0.2.6 | 8 | **App 内更新 KernelSU 模块**：关于页读官方 `index.json` 拿到最新模块版本/sha256/Release 地址，一键「下载 → 校验 → `ksud module install`」（重启由用户决定）；模块版本比较改**逐段数字**（`1.0.10 > 1.0.9`，字符串比会反） |
+| 0.2.7 | 9 | **修"层都在、却永远挂不上"**（模块 **1.0.11**）：开机自启用裸 `sh` 发起 → 撞上 busybox ash（`${BASH_SOURCE[0]}` 直接 `syntax error: bad substitution`），而且 `linuxctl` 用 `bash start.sh` 去挂载 —— 而 Android 上没有 bash。现在统一走 `$SH_BIN`（宿主/CI 用 bash，设备用 `/system/bin/sh`），并加了三条回归闸门。App 本身无代码改动，只是与模块 1.0.11 一起发 |
+
+## 0.2.7 —— 挂载修好了：**层都在，却永远"未挂载"**
+
+用户截图：三个层文件都在（`layers/` 里 240 MB + 625 MB + 198 MB，`state.json` 也齐），
+App 却一直显示「未挂载 / 失败（文件/层缺失）」。查设备 `run/service.log`，只有一行：
+
+```
+/data/sunsetlinux/bin/linuxctl: line 34: syntax error: bad substitution
+```
+
+两个原因叠在一起，都是"以为设备上有 bash"：
+
+1. **模块自启用裸 `sh` 发起**：`module/service.sh` 里是 `sh "$CTL" start`。模块环境里
+   PATH 前面是 KernelSU 的 busybox，`sh` 解析成 **busybox ash**（不是 mksh）——
+   而 ash 见到设备侧脚本里的 `${BASH_SOURCE[0]:-$0}` 直接 `syntax error: bad substitution`，
+   脚本**一行都没跑**（这也解释了为什么 App 里的 `linuxctl status` 是好的：App 经
+   `su -c` 直接执行文件，内核按 shebang 用 `/system/bin/sh`＝mksh）。
+2. **`linuxctl start` 用 `bash start.sh` 去挂载**：设备上 `/system/bin/bash` **不存在**
+   （实测 `ls: No such file or directory`），所以就算跑到这一步也必然失败。
+   同一个模式还在 `stop.sh`／`update.sh`／`doctor.sh`／`status.sh`／`uninstall.sh` 里。
+
+### 修法
+
+- `linuxctl.sh` 新增 `pick_shell()` / `$SH_BIN`：**宿主/CI 用 bash，Android 用
+  `/system/bin/sh`（mksh）**，可用 `SUNSETLINUX_SH` 覆盖；`start/stop/update/doctor`
+  一律走它。
+- `service.sh`／`uninstall.sh` 不再写裸 `sh`：能直接执行就**直接执行**（走 shebang），
+  否则显式 `/system/bin/sh`；`update.sh`／`selftest.sh` 内部子壳也改 `$SH_BIN`。
+- 设备侧脚本里所有 `${BASH_SOURCE[0]:-$0}` → `$0`（busybox ash 也解析得了；
+  真要判断"是否被 source"的地方仍用显式的 `SUNSETLINUX_SOURCED=1`）。
+- `tools/shell-compat-check.mjs` 加三条闸门（都对应这次事故）：
+  `BASH_SOURCE[...]`、`bash <脚本>` 调用、裸 `sh <脚本>` 调用 —— 都是"本地 bash 跑得通、
+  真机一行都跑不了"的类型；并加一条行为级回归：用**剥掉 bash 的 PATH** 跑
+  `linuxctl start`，必须给出业务错误（缺少层文件），不许出现 `bad substitution`。
+- `tools/provision-selftest.mjs` 同步断言"发起必须是 `/system/bin/sh` 且不许裸 `sh`"。
+
+### 怎么拿到
+
+刷 **模块 1.0.11**（模块带 `service.sh` 与全部脚本）。设备上装 0.2.6+ 的 App 可以直接在
+「关于 → KernelSU 模块 → 下载并刷入 1.0.11」，然后**重启**：`post-fs-data.sh` 会把新脚本
+铺到 `$LINUX_HOME/bin`，`service.sh` 用新方式发起 `linuxctl start`，层才会真正挂上。
+
+> 最小版 APK 不受影响也不特殊：它只是"内嵌包只带 proot"，层要么等模块设备侧自建、
+> 要么从频道装；挂载路径与其它组合完全一样。
+
 
 ## 0.2.6 —— 「关于」页把模块更新做到"点一下就能刷"
 

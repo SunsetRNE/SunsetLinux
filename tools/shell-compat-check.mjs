@@ -27,6 +27,9 @@
  *   | `printf %q` | `printf: bad %q@20`，整个部署终止 | 容器/CI 的 mksh **有** %q，Android 的**没有** |
  *   | `local x=(…)` | `syntax error: unexpected '('` | mksh 全系都不支持，但 host 侧 `bash -n` 会过 |
  *   | `[[ x =~ re ]]` | `syntax error: unexpected operator/operand '=~'` | 同上 |
+ *   | `${BASH_SOURCE[0]}` | 被 busybox ash 解析时 `syntax error: bad substitution`（脚本一行都不跑） | 只有"用裸 `sh` 发起"时才会撞到，本地用 bash 跑一直是对的 |
+ *   | `bash start.sh` | 设备上没有 bash → 挂载这一步永远失败 | 本地/CI 的 bash 让它看起来完全正常 |
+ *   | 裸 `sh <脚本>` | 模块自启的 PATH 里 `sh` 是 busybox ash，解析不了设备侧脚本 | 同上 |
  *
  *   还有一类**语法闸门永远管不了**的：`x=()` 在 mksh 里**不是空数组**，
  *   `set -u` 下展开 `"${x[@]}"` 会 `parameter not set`（真机第二次失败的原因）。
@@ -91,6 +94,17 @@ const ENV_SIDE = {
  */
 const KNOWN_BASH_ONLY = {};
 
+/**
+ * 允许出现 `BASH_SOURCE[...]` 的文件 → 原因。
+ * 判据很窄：**只有 bash 上下文才会求值**（前面有 `${BASH_SOURCE+set}` 守卫），
+ * mksh/ash 下 BASH_SOURCE 未定义 → 短路，下标表达式根本不会执行。
+ * 这与"设备侧脚本依赖 bash"是两回事，所以单独列，不放进 TRAPS 白名单式豁免。
+ */
+const BASH_SOURCE_OK = {
+  'runtime/common/status_json.sh': '尾部"是否被 source"的自查，被 `${BASH_SOURCE+set}` 守卫（mksh/ash 下短路）',
+  'runtime/common/http_health.sh': '同上',
+};
+
 const problems = [];
 const notations = [];
 
@@ -135,6 +149,31 @@ const TRAPS = [
     re: /\bx=\(\)/,
     why: '',
   },
+  {
+    re: /BASH_SOURCE\[/,
+    why: '`${BASH_SOURCE[0]}` 只在 bash 里有意义。设备侧脚本可能被 **busybox ash** ' +
+         '解析（模块自启时 PATH 前面是 KernelSU 的 busybox，`sh` 就是它），' +
+         'ash 对数组下标直接判 `syntax error: bad substitution` —— 2026-09-16 真机事故：' +
+         '三个层文件都在、`state.json` 也齐，App 却永远显示「未挂载」，' +
+         'service.log 里只有这一行。要用 `$0`；确实需要判断"是否被 source"时，' +
+         '让 source 方显式设 `SUNSETLINUX_SOURCED=1`（见 status_json.sh 尾部）。',
+  },
+  {
+    re: /(^|[^\w./-])bash\s+["'$]/,
+    quotedSafe: true,
+    unless: /(--arg(json)?|--slurpfile|command\s+-v|\bwhich)\s*$/,   // jq 参数名 / 查解释器路径，不是"发起脚本"
+    why: '设备侧**没有 bash**（`/system/bin/bash` 不存在）：用 `bash start.sh` 去挂载' +
+         '在真机上必然失败（2026-09-16 事故的另一半）。请用 linuxctl.sh 里的 ' +
+         '`$SH_BIN`（宿主/CI 是 bash，Android 是 /system/bin/sh）。',
+  },
+  {
+    re: /(^|[^\w./-])sh\s+["'$]/,
+    quotedSafe: true,
+    unless: /(--arg(json)?|--slurpfile|command\s+-v|\bwhich)\s*$/,
+    why: '不要用裸 `sh` 发起设备侧脚本：模块自启的 PATH 里 `sh` 可能是 **busybox ash**，' +
+         '解析不了这些脚本，而且"住哪台机器能跑"就交给了 PATH 运气。' +
+         '要显式写 `/system/bin/sh`（mksh），能直接执行就优先直接执行（走 shebang）。',
+  },
 ];
 
 function trapScan(rel) {
@@ -144,7 +183,17 @@ function trapScan(rel) {
     if (/^\s*#/.test(raw)) return;                    // 注释行：项目里常在这里解释这些坑
     for (const t of TRAPS) {
       if (!t.why) continue;
-      if (t.re.test(raw)) hits.push({ line: i + 1, text: raw.trim(), why: t.why });
+      const m = t.re.exec(raw);
+      if (!m) continue;
+      // quotedSafe：命中点落在**双引号字符串里**就不算（那多半是给用户看的提示文案，
+      // 例如 log "  sh $BIN_DIR/linuxctl status"）。判据：命中点之前的双引号个数是奇数。
+      const at = raw.indexOf(m[0]) + (m[1] ? m[1].length : 0);
+      if (t.unless && t.unless.test(raw.slice(0, at))) continue;
+      if (t.quotedSafe) {
+        const quotes = (raw.slice(0, at).match(/"/g) || []).length;
+        if (quotes % 2 === 1) continue;
+      }
+      hits.push({ line: i + 1, text: raw.trim(), why: t.why });
     }
   });
   return hits;
@@ -167,7 +216,11 @@ for (const dir of DEVICE_SIDE) {
         `或用 POSIX 字符串替代数组。`,
       );
     } else {
+      // 环境内脚本（chroot/proot 后的 Ubuntu，bash 一定存在）不参与这层扫描：
+      // 它们本来就允许 bash 特性，用设备侧的规则去卡只会逼出假豁免。
+      if (Object.prototype.hasOwnProperty.call(ENV_SIDE, rel)) continue;
       for (const h of trapScan(rel)) {
+        if (BASH_SOURCE_OK[rel] && /BASH_SOURCE\[/.test(h.text)) continue;
         problems.push(
           `${rel}:${h.line} 命中"mksh 解析得过、真机照死"的陷阱：${h.text}\n       ${h.why}`,
         );

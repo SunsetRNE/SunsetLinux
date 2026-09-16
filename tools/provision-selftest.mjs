@@ -220,9 +220,17 @@ printf 'nodisk|%s\\n' "$(autoprovision_decision 0 1 0 1 '')"
   // 顺序/机制上的硬要求（源码级）：先落标记再启动、setsid 脱离 boot、手动路径提示还在
   const code = svc.split('\n').filter((l) => !/^\s*#/.test(l)).join('\n');
   ok(/start_auto_provision/.test(code), 'service.sh 里有发起自动部署的入口');
-  ok(code.indexOf(': > "$MARKER"') > 0 && code.indexOf(': > "$MARKER"') < code.indexOf('setsid sh "$RUN/.auto-provision.sh"'),
+  // ★ 2026-09-16 起：发起用的解释器必须是 **/system/bin/sh**（mksh），不能是裸 `sh`。
+  //   真机事故：模块 PATH 里 `sh` 是 busybox ash，它在 `${BASH_SOURCE[0]:-$0}` 上直接
+  //   `syntax error: bad substitution` → 层都在却永远挂不上。
+  const launch = '/system/bin/sh "$RUN/.auto-provision.sh"';
+  ok(code.indexOf(': > "$MARKER"') > 0 && code.indexOf(': > "$MARKER"') < code.indexOf(launch),
     '先落标记、再启动（断电/失败后不会每次开机重跑）');
-  ok(/setsid sh/.test(code), '用 setsid 脱离 boot 进程（不阻塞、也不被 boot 收摊带走）');
+  ok(new RegExp(`setsid\\s+${launch.replace(/[$"]/g, '\\$&')}`).test(code) ||
+     code.includes(`setsid ${launch}`),
+    '用 setsid + /system/bin/sh 脱离 boot 进程（不阻塞、也不被 boot 收摊带走）');
+  ok(!/(^|[^\w./-])sh\s+["'$]/.test(code.replace(/\/system\/bin\/sh/g, '')),
+    'service.sh 里没有裸 `sh` 发起（busybox ash 解析不了设备侧脚本）');
   ok(/device-provision.sh --seeds/.test(code), '跳过时会把"手动怎么跑"写进日志');
 }
 

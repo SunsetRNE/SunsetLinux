@@ -24,7 +24,7 @@
 # =============================================================================
 set -uo pipefail
 
-SELF_PATH="${BASH_SOURCE[0]:-$0}"      # mksh 下 BASH_SOURCE 未定义 → 退回 $0
+SELF_PATH="$0"      # mksh 下 BASH_SOURCE 未定义 → 退回 $0
 SELF_DIR="$(cd -- "$(dirname -- "$SELF_PATH")" && pwd -P)"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/sunsetlinux-funcs.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT

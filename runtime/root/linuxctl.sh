@@ -30,7 +30,9 @@
 set -uo pipefail
 
 # --- 目录：脚本自身 + 公共库 ------------------------------------------------
-SELF_PATH="${BASH_SOURCE[0]:-$0}"
+# 设备侧只用 `$0`：`${BASH_SOURCE[0]:-$0}` 在 busybox ash（模块自启的 PATH 里
+# `sh` 可能就是它）下是 **syntax error: bad substitution**，整个脚本一行都跑不了。
+SELF_PATH="$0"
 SELF_DIR="$(cd -- "$(dirname -- "$SELF_PATH")" && pwd -P)"
 
 # 公共库查找顺序：同目录（安装后 bin/ 里会一起放）→ 仓库相对路径
@@ -68,6 +70,40 @@ else
 fi
 # shellcheck source=/dev/null
 SUNSETLINUX_SOURCED=1 . "$COMMON_DIR/http_health.sh"
+
+# ---------------------------------------------------------------------------
+# 选一个能跑**设备侧脚本**的 shell（start/stop/update/doctor 都靠它）
+#
+# 真机事故（2026-09-16）：层文件三个都在、`state.json` 也齐，App 却一直显示
+# 「未挂载 / 失败（文件/层缺失）」。`run/service.log` 里只有一行：
+#
+#     /data/sunsetlinux/bin/linuxctl: line 34: syntax error: bad substitution
+#
+# 两个原因叠在一起，都是"以为设备上有 bash"：
+#   1) 模块 `service.sh` 用裸 `sh "$CTL" start` 发起 —— 模块环境里 PATH 前面是
+#      KernelSU 的 busybox，`sh` 解析成 **busybox ash**（不是 mksh）。ash 见到
+#      `${BASH_SOURCE[0]:-$0}` 直接判 `syntax error: bad substitution`，脚本一行都没跑。
+#   2) 就算跑到了 `linuxctl start`，它内部又用 `bash start.sh` 去挂载 —— 而
+#      **Android 上没有 bash**（`/system/bin/bash` 不存在），挂载这一步必然失败。
+#
+# 所以：只认两个解释器 —— 开发机/CI 上的 bash（自测用），或 Android 的
+# `/system/bin/sh`（mksh）。**绝不用裸 `sh`**：谁在 PATH 里就听谁的，等于把
+# "哪台机器能跑"交给运气。
+# ---------------------------------------------------------------------------
+pick_shell() {
+    if [ -n "${SUNSETLINUX_SH:-}" ] && [ -x "${SUNSETLINUX_SH}" ]; then
+        printf '%s' "$SUNSETLINUX_SH"; return 0
+    fi
+    if command -v bash >/dev/null 2>&1; then
+        command -v bash; return 0
+    fi
+    if [ -x /system/bin/sh ]; then
+        printf '/system/bin/sh'; return 0
+    fi
+    printf '/bin/sh'
+}
+SH_BIN="$(pick_shell)"
+export SH_BIN
 
 # --- 全局配置 ---------------------------------------------------------------
 LINUX_HOME="${LINUX_HOME:-/data/sunsetlinux}"
@@ -579,7 +615,7 @@ cmd_start() {
     }
 
     log "调用 start.sh（stdout 已丢弃，只保留 JSON 通道）"
-    if ! LINUX_HOME="$LH" bash "$starter" >/dev/null 2>>"$LOGFILE"; then
+    if ! LINUX_HOME="$LH" "$SH_BIN" "$starter" >/dev/null 2>>"$LOGFILE"; then
         local msg
         msg="$(last_error_read || true)"
         [ -z "$msg" ] && msg="start.sh 失败，详见 $LOGFILE"
@@ -607,7 +643,7 @@ cmd_stop() {
 
     local stopper="$SELF_DIR/stop.sh"
     if [ -f "$stopper" ]; then
-        LINUX_HOME="$LH" bash "$stopper" >/dev/null 2>>"$LOGFILE" || warnl "stop.sh 返回非 0（继续做收尾清理）"
+        LINUX_HOME="$LH" "$SH_BIN" "$stopper" >/dev/null 2>>"$LOGFILE" || warnl "stop.sh 返回非 0（继续做收尾清理）"
     else
         warnl "找不到 $stopper，退化为内建停止逻辑"
         builtin_stop
@@ -1289,7 +1325,7 @@ cmd_update_proxy() {
         return 1
     fi
     local out
-    out="$(LINUX_HOME="$LH" LINUXCTL_SH="$SELF_DIR/linuxctl.sh" bash "$u" "$sub" "$@" 2>/dev/null)" || true
+    out="$(LINUX_HOME="$LH" LINUXCTL_SH="$SELF_DIR/linuxctl.sh" "$SH_BIN" "$u" "$sub" "$@" 2>/dev/null)" || true
     if [ -z "$out" ]; then
         emit '{"ok":false,"error":"update.sh 没有输出（执行失败）"}'
         return 1
@@ -1304,7 +1340,7 @@ cmd_update_proxy() {
 cmd_doctor() {
     local doc="$SELF_DIR/doctor.sh"
     [ -f "$doc" ] || { log "找不到 $doc"; emit '{"schema":1,"ok":false,"fails":1,"last_error":"doctor.sh 缺失"}'; return 1; }
-    LINUX_HOME="$LH" bash "$doc"
+    LINUX_HOME="$LH" "$SH_BIN" "$doc"
     return $?
 }
 

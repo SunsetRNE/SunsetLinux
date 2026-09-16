@@ -55,7 +55,15 @@ for c in "$LINUX_HOME/bin/linuxctl" "$LINUX_HOME/bin/linuxctl.sh"; do
 done
 if [ -n "$CTL" ] && [ -f "$LINUX_HOME/run/supervisor.pid" ]; then
   echo " 正在停止仍在运行的环境…"
-  if LINUX_HOME="$LINUX_HOME" sh "$CTL" stop >> "$LINUX_HOME/run/linux.log" 2>&1; then
+  # 用 /system/bin/sh（mksh）发起，或直接执行走 shebang —— **不要裸 `sh`**：
+  # 卸载器的 PATH 里 `sh` 可能是 busybox ash，它解析不了设备侧脚本，
+  # 结果是"环境没停掉、模块先被删"，留下挂载点（见 linuxctl.sh 的 pick_shell 注释）。
+  if [ -x "$CTL" ]; then
+    LINUX_HOME="$LINUX_HOME" "$CTL" stop >> "$LINUX_HOME/run/linux.log" 2>&1
+  else
+    LINUX_HOME="$LINUX_HOME" /system/bin/sh "$CTL" stop >> "$LINUX_HOME/run/linux.log" 2>&1
+  fi
+  if [ $? -eq 0 ]; then
     echo " 已停止。"
   else
     echo " ⚠️ 停止返回非 0，请看 $LINUX_HOME/run/linux.log"

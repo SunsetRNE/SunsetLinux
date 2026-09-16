@@ -14,7 +14,17 @@
 # =============================================================================
 set -uo pipefail
 
-SELF_PATH="${BASH_SOURCE[0]:-$0}"   # mksh 下 BASH_SOURCE 未定义 → 退回 $0
+SELF_PATH="$0"   # mksh 下 BASH_SOURCE 未定义 → 退回 $0
+
+# 自测要在两种地方跑：CI/开发机（有 bash）与**真机**（只有 /system/bin/sh）。
+# 下面所有 `-c` 子壳都用 $SH_BIN，不用裸 `bash`（Android 上没有 bash）。
+SH_BIN="${SUNSETLINUX_SH:-}"
+if [ -z "$SH_BIN" ] || [ ! -x "$SH_BIN" ]; then
+    if command -v bash >/dev/null 2>&1; then SH_BIN="$(command -v bash)"
+    elif [ -x /system/bin/sh ]; then SH_BIN=/system/bin/sh
+    else SH_BIN=/bin/sh; fi
+fi
+export SH_BIN
 SELF_DIR="$(cd -- "$(dirname -- "$SELF_PATH")" && pwd -P)"
 REPO_DIR="$(cd "$SELF_DIR/../.." 2>/dev/null && pwd || printf '%s' "$SELF_DIR")"
 # 夹具查找顺序：显式指定 → 脚本同目录/fixtures（**模块安装后自带，真机可用**）
@@ -83,7 +93,7 @@ for src in "$SELF_DIR/start.sh" "$SELF_DIR/doctor.sh"; do
     if ! grep -q '^layer_format()' "$h"; then bad "$(basename "$src"): 抽取 layer_format 失败（函数被改名了？）"; continue; fi
     probe() { # probe <夹具> <期望>
         local got
-        got="$(bash -c 'set -uo pipefail; . "$1"; layer_format "$2"' _ "$h" "$FIXTURES/$1" 2>/dev/null)"
+        got="$("$SH_BIN" -c 'set -uo pipefail; . "$1"; layer_format "$2"' _ "$h" "$FIXTURES/$1" 2>/dev/null)"
         [ "$got" = "$2" ] && ok "$(basename "$src"): $(printf '%-18s' "$1") -> $got" \
                           || bad "$(basename "$src"): $1 -> $got，期望 $2"
     }
@@ -107,7 +117,7 @@ else
     printf '       本组断言测的是我们自己的逻辑（格式判定/落盘/状态），内核能力留给真机验\n'
 fi
 # 合法 erofs 必须被**接受**（这里用 2KB 头当最小样本：update 只做 magic 判定）
-if out="$(LINUX_HOME="$LH" bash "$SELF_DIR/linuxctl.sh" update dsh "$FIXTURES/erofs-head.bin" 2>&1)"; then
+if out="$(LINUX_HOME="$LH" "$SH_BIN" "$SELF_DIR/linuxctl.sh" update dsh "$FIXTURES/erofs-head.bin" 2>&1)"; then
     case "$out" in
         *'"ok":true'*'"format":"erofs"'*) ok "合法 erofs 被接受" ;;
         *) bad "合法 erofs 未被接受：$out" ;;
@@ -117,7 +127,7 @@ else
 fi
 # 压缩产物必须被**拒绝** —— 这是**正确**行为：解压是客户端（App）的职责，
 # linuxctl 只接受可直接挂载的裸镜像。若这条变成"接受"，说明校验被削弱了。
-if out="$(LINUX_HOME="$LH" bash "$SELF_DIR/linuxctl.sh" update dsh "$FIXTURES/zstd-head.bin" 2>&1)"; then
+if out="$(LINUX_HOME="$LH" "$SH_BIN" "$SELF_DIR/linuxctl.sh" update dsh "$FIXTURES/zstd-head.bin" 2>&1)"; then
     bad "压缩产物竟被接受（校验被削弱，这是错的）"
 else
     case "$out" in
@@ -143,16 +153,16 @@ for src in "$_sj"; do
     sed -n '/^dsh_jq_ok()/,/^}/p' "$src" > "$h"
     if ! grep -q '^dsh_jq_ok()' "$h"; then bad "抽取 dsh_jq_ok 失败（函数被改名了？）"; continue; fi
     # 用 DSH_ST_JQ_OK 缓存控制两种情形，验证退出码与缓存一致
-    r="$(bash -c 'set -uo pipefail; . "$1"; DSH_ST_JQ_OK=0; if dsh_jq_ok; then echo WRONG; else echo RIGHT; fi' _ "$h")"
+    r="$("$SH_BIN" -c 'set -uo pipefail; . "$1"; DSH_ST_JQ_OK=0; if dsh_jq_ok; then echo WRONG; else echo RIGHT; fi' _ "$h")"
     [ "$r" = "RIGHT" ] && ok "缓存 0 时 dsh_jq_ok 判为不可用" || bad "缓存 0 时 dsh_jq_ok 竟判为可用"
-    r="$(bash -c 'set -uo pipefail; . "$1"; DSH_ST_JQ_OK=1; if dsh_jq_ok; then echo RIGHT; else echo WRONG; fi' _ "$h")"
+    r="$("$SH_BIN" -c 'set -uo pipefail; . "$1"; DSH_ST_JQ_OK=1; if dsh_jq_ok; then echo RIGHT; else echo WRONG; fi' _ "$h")"
     [ "$r" = "RIGHT" ] && ok "缓存 1 时 dsh_jq_ok 判为可用" || bad "缓存 1 时 dsh_jq_ok 判为不可用"
 done
 
 head_ "集成：update --version 落盘 + state.json + find_layer 版本优先"
 LH2="$TMP/linux2"; mkdir -p "$LH2"/{layers,etc,run,bin,cache,upper,work,rootfs,layers-mnt}
 # 用夹具头当"层"，只验命名/版本/state 逻辑（格式判定已在上面的端到端验过）
-if out="$(LINUX_HOME="$LH2" bash "$SELF_DIR/linuxctl.sh" update dsh "$FIXTURES/erofs-head.bin" --version 1.0.0 2>&1)"; then
+if out="$(LINUX_HOME="$LH2" "$SH_BIN" "$SELF_DIR/linuxctl.sh" update dsh "$FIXTURES/erofs-head.bin" --version 1.0.0 2>&1)"; then
     case "$out" in
         *'"version":"1.0.0"'*) ok "update --version 在 JSON 里回显版本" ;;
         *) bad "update JSON 未回显版本：$out" ;;
@@ -168,7 +178,7 @@ else
     bad "state.json 未写入版本：$(cat "$LH2/etc/state.json" 2>/dev/null | tr -d '\n')"
 fi
 # 第二个版本并存
-if LINUX_HOME="$LH2" bash "$SELF_DIR/linuxctl.sh" update dsh "$FIXTURES/erofs-head.bin" --version 2.0.0 >/dev/null 2>&1; then
+if LINUX_HOME="$LH2" "$SH_BIN" "$SELF_DIR/linuxctl.sh" update dsh "$FIXTURES/erofs-head.bin" --version 2.0.0 >/dev/null 2>&1; then
     if [ -f "$LH2/layers/dsh-1.0.0.erofs" ] && [ -f "$LH2/layers/dsh-2.0.0.erofs" ]; then
         ok "同层多版本并存（旧文件未被删，回滚可用）"
     else
@@ -188,15 +198,15 @@ fl="$TMP/find_layer.sh"
     sed -n '/^find_layer()/,/^}/p' "$SELF_DIR/start.sh"
 } > "$fl"
 if ! grep -q '^find_layer()' "$fl"; then bad "抽取 find_layer 失败（函数被改名了？）"; else
-    got="$(bash -c 'set -uo pipefail; . "$1"; find_layer dsh' _ "$fl" 2>/dev/null)"
+    got="$("$SH_BIN" -c 'set -uo pipefail; . "$1"; find_layer dsh' _ "$fl" 2>/dev/null)"
     case "$got" in
         */dsh-1.0.0.erofs) ok "state.json 优先：find_layer 返回 1.0.0（而非最高的 2.0.0）" ;;
         *) bad "state.json 版本优先失效，find_layer 返回：$got" ;;
     esac
 fi
 # rollback 子命令必须存在且能把指向改回去
-if LINUX_HOME="$LH2" bash "$SELF_DIR/linuxctl.sh" update dsh "$FIXTURES/erofs-head.bin" --version 2.0.0 >/dev/null 2>&1; then
-    if out="$(LINUX_HOME="$LH2" bash "$SELF_DIR/linuxctl.sh" rollback dsh 2>&1)"; then
+if LINUX_HOME="$LH2" "$SH_BIN" "$SELF_DIR/linuxctl.sh" update dsh "$FIXTURES/erofs-head.bin" --version 2.0.0 >/dev/null 2>&1; then
+    if out="$(LINUX_HOME="$LH2" "$SH_BIN" "$SELF_DIR/linuxctl.sh" rollback dsh 2>&1)"; then
         case "$out" in
             *'"to":"1.0.0"'*) ok "rollback 把 dsh 指回 1.0.0" ;;
             *) bad "rollback 目标不对：$out" ;;
@@ -205,6 +215,35 @@ if LINUX_HOME="$LH2" bash "$SELF_DIR/linuxctl.sh" update dsh "$FIXTURES/erofs-he
         bad "rollback 失败：$(printf '%s' "$out" | tail -2)"
     fi
 fi
+
+# ---------------------------------------------------------------------------
+# 真机事故回归（2026-09-16）：层都在、却永远挂不上
+#
+# 两个原因：模块 service.sh 用裸 `sh "$CTL"` 发起（模块 PATH 里可能是 busybox ash，
+# 它在 `${BASH_SOURCE[0]}` 上直接 `syntax error: bad substitution`），
+# 以及 linuxctl 用 `bash start.sh` 去挂载（**Android 上没有 bash**）。
+# 这里断言"start 走 $SH_BIN、且不依赖 bash"这条性质仍然成立：
+#   · 用一个**干净的 PATH**（剥掉 bash 所在目录）启动 start，必须给出业务错误
+#     （缺少层文件），而不是 `bad substitution` / `bash: not found`。
+# ---------------------------------------------------------------------------
+LH3="$TMP/no-bash"
+mkdir -p "$LH3/run"
+nobash_dir="$TMP/nobash-bin"
+mkdir -p "$nobash_dir"
+# 把除了 bash 之外要用的命令软链过去（dirname/sed/grep/tr/stat/mount/df/awk 等）
+for tool in sed grep tr stat mount umount df awk cat mkdir rm ls ln cp mv chmod id date sleep kill ps sh mksh uname find sort head tail cut wc printf dirname basename expr touch; do
+    p="$(command -v "$tool" 2>/dev/null || true)"
+    if [ -n "$p" ] && [ ! -e "$nobash_dir/$tool" ]; then
+        ln -sf "$p" "$nobash_dir/$tool" 2>/dev/null || true
+    fi
+done
+out="$(PATH="$nobash_dir" LINUX_HOME="$LH3" "$SH_BIN" "$SELF_DIR/linuxctl.sh" start 2>&1 || true)"
+case "$out" in
+    *"bad substitution"*) bad "start 在无 bash 的 PATH 下仍死在 bad substitution：$(printf '%s' "$out" | tail -1)" ;;
+    *"bash: not found"*|*"bash: inaccessible"*) bad "start 仍在调用 bash（Android 上没有 bash）：$(printf '%s' "$out" | tail -1)" ;;
+    *"缺少层文件"*) ok "start 不依赖 bash：无 bash 的 PATH 下给出业务错误（缺少层文件）" ;;
+    *) bad "start 在无 bash 的 PATH 下没有给出预期错误：$(printf '%s' "$out" | tail -2)" ;;
+esac
 
 printf '\n=========================================\n'
 printf '  通过 %d，失败 %d\n' "$pass" "$fail"

@@ -498,6 +498,26 @@ su -c '/data/sunsetlinux/bin/linuxctl doctor'
 | 已装状态读不到时 | —— | **不给刷入按钮**，先让用户修 root 授权（与"读不到 ≠ 没装"一致） |
 | 重启 | —— | 只报告"重启后生效"（KernelSU 落 `modules_update/`），**App 不替用户重启**，脚本里有单测断言不许出现 `reboot` |
 
+### 3.10.14 真机「层都在、却永远未挂载」（模块 1.0.11，2026-09-16 实测）
+
+用户截图：`layers/` 三个文件都在（240 MB + 625 MB + 198 MB）、`etc/state.json` 也齐，
+App 却永远显示「未挂载 / 失败（文件/层缺失）」。设备 `run/service.log` 里只有一行：
+
+```
+/data/sunsetlinux/bin/linuxctl: line 34: syntax error: bad substitution
+```
+
+| 事 | 之前 | 现在 |
+|---|---|---|
+| 开机自启的发起方式 | `service.sh` 写 `sh "$CTL" start` —— 模块 PATH 前面是 KernelSU 的 busybox，`sh` 就是 **busybox ash**；ash 对 `${BASH_SOURCE[0]:-$0}` 直接 `syntax error: bad substitution`，脚本一行没跑 | 优先**直接执行**（内核按 shebang 用 `/system/bin/sh`＝mksh），退路也显式 `/system/bin/sh`；`uninstall.sh` 同样处理 |
+| 挂载的调用方 | `linuxctl start` 用 `bash start.sh`（`/system/bin/bash` **实测不存在**）；`stop.sh` / `update.sh` / `doctor.sh` / `status.sh` 同样 | 新增 `pick_shell()` / `$SH_BIN`：宿主/CI 用 bash，Android 用 `/system/bin/sh`，可用 `SUNSETLINUX_SH` 覆盖 |
+| 设备侧脚本 | 9 个脚本用 `${BASH_SOURCE[0]:-$0}`（ash 下致命） | 一律改 `$0`；需要判断"是否被 source"的地方继续用显式 `SUNSETLINUX_SOURCED=1` |
+| 为什么本地/CI 查不出来 | `bash -n` 与 mksh 都能过；只有"被 ash 解析"或"设备上没有 bash"时才炸 | `tools/shell-compat-check.mjs` 加三条闸门：`BASH_SOURCE[...]`、`bash <脚本>`、裸 `sh <脚本>`；`runtime/root/selftest.sh` 加行为回归：**剥掉 bash 的 PATH** 跑 `linuxctl start`，必须是业务错误（缺少层文件），不许 `bad substitution` |
+
+证据链：`service.log` 的那一行（真机）→ 本地用 `busybox ash` 复现出**逐字相同**的
+`<file>: line N: syntax error: bad substitution` → `ls /system/bin/bash` 不存在 →
+`linuxctl start` 在无 bash 的 PATH 下现在给出「缺少层文件 base.erofs」。
+
 ### 3.10.13 发布完整性：APK 少内嵌 = 静默失效（2026-09-16 补）
 
 0.2.6 首次发布时四个 APK 里三个只有 12 MB —— `assets/offline-bundle.bin` 没进去。

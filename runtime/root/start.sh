@@ -39,7 +39,7 @@
 set -euo pipefail
 
 # --- 路径与常量 -------------------------------------------------------------
-SELF_PATH="${BASH_SOURCE[0]:-$0}"   # mksh 下 BASH_SOURCE 未定义 → 退回 $0
+SELF_PATH="$0"   # mksh 下 BASH_SOURCE 未定义 → 退回 $0
 SELF_DIR="$(cd -- "$(dirname -- "$SELF_PATH")" && pwd -P)"
 LINUX_HOME="${LINUX_HOME:-/data/sunsetlinux}"
 LH="$LINUX_HOME"

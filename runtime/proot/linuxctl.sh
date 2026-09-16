@@ -43,8 +43,8 @@ SCHEMA_VERSION=1
 MODE="proot"
 LINUXCTL_VERSION="1.0.0"
 
-PROG=$(basename -- "${BASH_SOURCE[0]:-$0}")
-SELF_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")" >/dev/null 2>&1 && pwd -P)
+PROG=$(basename -- "$0")
+SELF_DIR=$(cd -- "$(dirname -- "$0")" >/dev/null 2>&1 && pwd -P)
 
 # 可调参数（环境变量覆盖，便于测试与不同设备）
 START_GRACE=${SUNSETLINUX_START_GRACE:-90}      # 超过这么多秒还不健康 → state=error

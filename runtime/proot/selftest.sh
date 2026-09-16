@@ -16,7 +16,7 @@
 # =============================================================================
 set -uo pipefail
 
-SELF_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")" >/dev/null 2>&1 && pwd -P)
+SELF_DIR=$(cd -- "$(dirname -- "$0")" >/dev/null 2>&1 && pwd -P)
 ENTRY="$SELF_DIR/entry.sh"
 [ -f "$ENTRY" ] || { printf '找不到 %s\n' "$ENTRY" >&2; exit 1; }
 

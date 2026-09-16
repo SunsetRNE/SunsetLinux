@@ -16,7 +16,7 @@
 set -uo pipefail
 
 # 脚本自身目录：用于定位可选的辅助脚本（detect-mount.sh 等）
-SELF_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")" && pwd -P)"
+SELF_DIR="$(cd -- "$(dirname -- "$0")" && pwd -P)"
 
 LINUX_HOME="${LINUX_HOME:-/data/sunsetlinux}"
 LH="$LINUX_HOME"
@@ -304,7 +304,7 @@ if [ -f "$PROBE_FILE" ]; then
     add_finding ok cmd_probe "rbind=$(probe_val mount_rbind) rslave=$(probe_val mount_make_rslave) unshare_prop=$(probe_val unshare_propagation) util=$(probe_val util_mount)"
 else
     warn "还没有探测结果（环境从未 start 过）。执行一次 linuxctl start 后会生成 $PROBE_FILE"
-    info "也可以手动探测：LINUX_HOME=$LH bash $LH/bin/start.sh --probe-only 2>&1 | tail"
+    info "也可以手动探测：LINUX_HOME=$LH /system/bin/sh $LH/bin/start.sh --probe-only 2>&1 | tail"
     add_finding warn cmd_probe "未探测（先跑一次 start）"
 fi
 

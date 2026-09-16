@@ -85,17 +85,22 @@ start_auto_provision() {
   : > "$MARKER" 2>/dev/null || true       # ★ 先落标记，再启动（见文件头第 2 条）
   mkdir -p "$LINUX_HOME/cache" 2>/dev/null
 
+  # ★ 只用 /system/bin/sh（mksh），**绝不写裸 `sh`**：模块环境里 PATH 前面是
+  #   KernelSU 的 busybox，`sh` 会解析成 busybox ash，而 ash 见到设备侧脚本里的
+  #   `${BASH_SOURCE[0]:-$0}` 会直接 `syntax error: bad substitution` ——
+  #   真机上就是"层文件都在、却永远挂不上"（2026-09-16 事故，见 linuxctl.sh 的 pick_shell）。
   cat > "$RUN/.auto-provision.sh" <<EOF
 #!/system/bin/sh
 # 由 service.sh 生成：自动部署的可回放引导脚本（失败时直接重放它即可）。
 # 日志：$PROV_LOG
 LINUX_HOME='$LINUX_HOME'
 export LINUX_HOME
-sh '$prov' --seeds '$SEEDS' >>'$PROV_LOG' 2>&1
+/system/bin/sh '$prov' --seeds '$SEEDS' >>'$PROV_LOG' 2>&1
 rc=\$?
 if [ "\$rc" = 0 ]; then
   echo "[\$(date '+%Y-%m-%d %H:%M:%S')] [service.sh] 自动部署完成，接着启动环境" >>'$PROV_LOG'
-  sh '$ctl' start >>'$PROV_LOG' 2>&1
+  if [ -x '$ctl' ]; then LINUX_HOME='$LINUX_HOME' '$ctl' start >>'$PROV_LOG' 2>&1
+  else LINUX_HOME='$LINUX_HOME' /system/bin/sh '$ctl' start >>'$PROV_LOG' 2>&1; fi
 fi
 exit \$rc
 EOF
@@ -103,9 +108,9 @@ EOF
 
   log "自动部署：开始（十几分钟到半小时，日志 $PROV_LOG）"
   if [ -x /system/bin/setsid ]; then
-    setsid sh "$RUN/.auto-provision.sh" >/dev/null 2>&1 &
+    setsid /system/bin/sh "$RUN/.auto-provision.sh" >/dev/null 2>&1 &
   else
-    ( sh "$RUN/.auto-provision.sh" >/dev/null 2>&1 ) &
+    ( /system/bin/sh "$RUN/.auto-provision.sh" >/dev/null 2>&1 ) &
   fi
   log "自动部署：已在后台发起（不阻塞 boot）"
 }
@@ -164,7 +169,7 @@ if [ "$HAVE_LAYER" = "0" ]; then
       ;;
     *)
       log "自动部署：跳过（${DECISION#no:}）"
-      log "  手动跑：sh $MODDIR/bin/device-provision.sh --seeds $SEEDS"
+      log "  手动跑：/system/bin/sh $MODDIR/bin/device-provision.sh --seeds $SEEDS"
       exit 0
       ;;
   esac
@@ -191,8 +196,15 @@ if [ -f "$RUN/ready" ] && [ -f "$RUN/supervisor.pid" ]; then
 fi
 
 log "启动环境：LINUX_HOME=$LINUX_HOME $CTL start"
+# ★ 优先**直接执行**（内核按 shebang 用 /system/bin/sh 即 mksh 跑）；
+#   退路也必须是 /system/bin/sh，不能是裸 `sh`（模块 PATH 里可能是 busybox ash，
+#   它连设备侧脚本第一屏都解析不过 —— 真机上表现为"层都在、就是挂不上"）。
 (
-  LINUX_HOME="$LINUX_HOME" sh "$CTL" start >> "$SERVICE_LOG" 2>&1
+  if [ -x "$CTL" ]; then
+    LINUX_HOME="$LINUX_HOME" "$CTL" start >> "$SERVICE_LOG" 2>&1
+  else
+    LINUX_HOME="$LINUX_HOME" /system/bin/sh "$CTL" start >> "$SERVICE_LOG" 2>&1
+  fi
 ) &
 # 不等待：start.sh 自己会 fork 出守护进程，这里只是发起
 log "已在后台发起启动（不阻塞 boot）"
