@@ -181,6 +181,7 @@ jobs:
               h=hashlib.sha256(open(p,'rb').read()).hexdigest()
               files.append({"name":os.path.basename(p),"size":os.path.getsize(p),"sha256":h})
           mod=os.environ.get("MODULE_VERSION","")
+          repo=os.environ.get("GITHUB_REPOSITORY","")   # apk_url 要用（APK 挂在 Release 上）
 
           # App 版本（唯一事实源：app/version.properties）
           appver=""
