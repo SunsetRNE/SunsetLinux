@@ -39,6 +39,10 @@ jobs:
   # ① 发布前必须过全量回归（复用 ci.yml，结构上保证，不靠人记得）
   gate:
     uses: ./.github/workflows/ci.yml
+    with:
+      # 发布路径才内嵌离线包：四个组合的 APK 要真的自带环境
+      # （PR/分支推送不内嵌，省掉约 100 MB 下载与几百 MB 制品）
+      embed_bundles: true
 
   # ② 构建并发布
   publish:
@@ -195,6 +199,10 @@ jobs:
                   "embed": v.get("embed", []),
                   "note": v.get("note",""),
                   "apk": apk["name"] if apk else None,
+                  # ★ APK 挂在 Release 上（不是 gh-pages）：内嵌离线包后单文件可到 114 MB，
+                  #   超过 git/Pages 的 100 MB 限制。下载页与 App 都用这个绝对地址。
+                  "apk_url": (f"https://github.com/{repo}/releases/download/v{appver}/{apk['name']}"
+                              if (apk and appver) else None),
                   "apk_size": apk["size"] if apk else None,
                   "apk_sha256": apk["sha256"] if apk else None,
                   # 离线包挂在 Release 上（不在 gh-pages），名字按约定拼
@@ -328,8 +336,9 @@ jobs:
           for v in variants:
               apk = by_name.get(v.get("apk") or "")
               chips = "".join(f'<span class="chip">{html.escape(PARTS_CN.get(p, p))}</span>' for p in v.get("embed", []))
+              apk_href = v.get("apk_url") or (apk or {}).get("name") or ""
               if apk:
-                  dl = (f'<a class="dl" href="{html.escape(apk["name"])}">下载 APK'
+                  dl = (f'<a class="dl" href="{html.escape(apk_href)}">下载 APK'
                         f'（{human(apk["size"])}）</a>')
               else:
                   dl = '<span class="tagline">本次没有产出这个组合</span>'
@@ -363,6 +372,8 @@ jobs:
           body = ("<h2>① 装 App（四个内置组合，选一个）</h2>\n"
                   "<p class=\"sub\">四个包是<b>同一个 App</b>（同包名、同签名）：区别只在"
                   "<b>内嵌了什么</b>。换组合 = 覆盖安装另一个 APK，数据不丢。</p>\n"
+                  "<p class=\"sub\">APK 放在 <b>GitHub Releases</b>（内嵌环境后单文件可到 114 MB，"
+                  "超过 Pages 的 100 MB 上限）；模块 zip 与 index.json 仍在站内。</p>\n"
                   + "\n".join(cards) +
                   "\n<h2>② 装 KernelSU 模块</h2>\n" + modcard +
                   "\n<h2>③ 起环境</h2>\n"
@@ -388,7 +399,7 @@ jobs:
                   '<h2>这是什么</h2>\n'
                   '<ol><li>Android 上的真 chroot + overlayfs Ubuntu 24.04 环境，跑原生 DSH。</li>'
                   '<li>装 App + KernelSU 模块，即可在手机上得到完整的 DSH 运行环境。</li>'
-                  f'<li>App 有四个包（{names}）：内嵌得越多，装完越不需要联网。</li></ol>')
+                  f'<li>App 有四个包（{names}）：内嵌得越多，装完越不需要联网（APK 在 Releases 页）。</li></ol>')
               open(os.path.join(root, "index.html"), "w", encoding="utf-8").write(
                   page("SunsetLinux · 下载", "Android 上的原生 DSH 运行环境", rbody))
           print("已生成 dist/_publish/index.html" + (" 与 dist/_root/index.html" if ch == "stable" else ""))
@@ -401,6 +412,11 @@ jobs:
           publish_dir: dist/_publish
           destination_dir: ${{ steps.ch.outputs.dir }}
           keep_files: true          # ★ 关键：不要抹掉另一个通道的目录
+          # ★ APK **不走 gh-pages**，只挂 Release：内嵌离线包之后
+          #   ubuntu-proot-dsh 那份有 114 MB —— 超过 git 单文件 100 MB 硬限，
+          #   往 gh-pages 分支推会直接失败（而且 Pages 站点还有 1 GB 上限）。
+          #   Release 资产没有这些限制，下载地址也能跨域名（App/CLI 都跟 302）。
+          exclude_assets: '*.apk'
 
       # 站点根页：destination_dir 留空 = gh-pages 根目录。keep_files: true 只增不删，
       # 所以 /stable/ 与 /beta/ 不受影响（发布通道那一步已经在用同一个机制）。
@@ -489,7 +505,13 @@ jobs:
             # shellcheck disable=SC2086
             gh release upload "$TAG" $ASSETS --clobber
             gh release edit "$TAG" --title "$TITLE" --notes-file dist/_release-notes.md
-            gh release delete-asset "$TAG" index.html --yes >/dev/null 2>&1 || true
+            # 清历史遗留资产名（换命名后它们不该继续出现在 Release 上，否则用户会下错）
+            for legacy in index.html sunsetlinux-launcher-debug.apk \
+                          minimal.bin minimal.json ubuntu.bin ubuntu.json \
+                          ubuntu-proot.bin ubuntu-proot.json \
+                          ubuntu-proot-dsh.bin ubuntu-proot-dsh.json; do
+              gh release delete-asset "$TAG" "$legacy" --yes >/dev/null 2>&1 || true
+            done
           else
             echo "新建 Release $TAG"
             # shellcheck disable=SC2086

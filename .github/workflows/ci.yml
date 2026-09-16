@@ -37,7 +37,17 @@ on:
   pull_request:
   workflow_dispatch:
   # 允许发布工作流复用本门禁（release.yml 里 `uses: ./.github/workflows/ci.yml`）
+  #
+  # embed_bundles：**只有发布路径**才把离线包内嵌进 APK。
+  #   为什么默认 false：内嵌要先把三层从频道拉下来再打包（约 100 MB 下载 + 1~2 分钟），
+  #   而 PR / 分支推送根本不需要带环境的 APK（徒增几百 MB 制品）。
+  #   用显式输入而不是猜 `github.event_name`：可复用工作流里那个值来自调用方，猜不得。
   workflow_call:
+    inputs:
+      embed_bundles:
+        description: '把离线包内嵌进四个组合的 APK（发布时用）'
+        type: boolean
+        default: false
 
 # 同一分支的旧运行排队（不取消）：本门禁会被 release.yml 复用，
 # "取消进行中的运行"分不清"这是新推送的独立跑"还是"发布流程正在等的门禁"。
@@ -197,6 +207,52 @@ jobs:
             echo "签名：未配置 ANDROID_KEYSTORE_BASE64 → 使用仓库内固定的调试密钥" >> "$GITHUB_STEP_SUMMARY"
             echo "签名：未配置 ANDROID_KEYSTORE_BASE64 → 使用仓库内固定的调试密钥（app/app/debug.keystore，签名稳定、可覆盖安装）"
           fi
+
+      # ── 内嵌离线包（仅发布路径）────────────────────────────────────────────
+      # 四个组合的 APK 要真的自带环境，就得在**构建前**把离线包放进 dist/bundles/。
+      # 离线包从**签名频道清单**拉层再打包（与 offline-bundle.yml 同一套工具），
+      # 所以 CI 打出来的 APK 与用户从频道装到的层**必然同源**。
+      # 任何一步失败都只是"本次不内嵌"（警告 + 继续），绝不让发布因为网络问题失败。
+      - name: 取离线包（有就内嵌进 APK；仅发布路径）
+        if: ${{ inputs.embed_bundles }}
+        run: |
+          set -euo pipefail
+          OWNER_LC="$(printf '%s' "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
+          SITE="https://${OWNER_LC}.github.io/${GITHUB_REPOSITORY#*/}"
+          mkdir -p dist/bundles
+          if ! curl -fsSL --retry 3 -o dist/channel.json "$SITE/channel/channel.json"; then
+            echo "::warning::拿不到频道清单 → 本次 APK 不内嵌离线包（不影响功能，只是装完要联网装层）"
+            exit 0
+          fi
+          node - <<'NODE' > dist/layers.tsv || { echo "::warning::清单解析失败，跳过内嵌"; exit 0; }
+          const fs = require('node:fs');
+          const m = JSON.parse(fs.readFileSync('dist/channel.json', 'utf8'));
+          for (const l of m.layers ?? []) {
+            const url = l.url || l.url_gz;
+            const sha = l.url ? l.sha256 : l.sha256_gz;
+            if (!url || !sha) continue;
+            console.log([l.id, l.version, url, sha, url.endsWith('.gz') ? 'gz' : 'zst', l.sha256_raw ?? '', l.size_raw ?? ''].join('\t'));
+          }
+          NODE
+          : > dist/SHA256SUMS.layers.txt
+          while IFS=$'\t' read -r id ver url sha ext raw rawsize; do
+            f="dist/$id-$ver.erofs.$ext"
+            curl -fsSL --retry 3 -o "$f" "$url" || { echo "::warning::下载 $id 失败，跳过内嵌"; exit 0; }
+            got="$(sha256sum "$f" | awk '{print $1}')"
+            [ "$got" = "$sha" ] || { echo "::warning::$id 层 sha256 不符，跳过内嵌"; exit 0; }
+            if [ -n "$raw" ] && [ -n "$rawsize" ]; then
+              printf '%s-%s.erofs  %s  %s\n' "$id" "$ver" "$rawsize" "$raw" >> dist/SHA256SUMS.layers.txt
+            fi
+          done < dist/layers.tsv
+          # proot 运行时（minimal / ubuntu-proot 组合要用）挂在 layers 存储 Release 上
+          PURL="$(curl -fsSL "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases?per_page=50" \
+                  | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const rs=JSON.parse(s);for(const r of rs){if(!String(r.tag_name||"").startsWith("layers-"))continue;const a=(r.assets||[]).find(x=>/^proot-bundle-.*\.tar\.gz$/.test(x.name));if(a){console.log(a.browser_download_url);break}}})' || true)"
+          if [ -n "${PURL:-}" ]; then
+            curl -fsSL --retry 3 -o "dist/$(basename "$PURL")" "$PURL" || echo "::warning::proot 下载失败"
+          fi
+          node tools/offline-bundle/mk-bundle.mjs --available --dir dist --out dist/bundles \
+            || echo "::warning::离线包打包失败 → 本次 APK 不内嵌"
+          ls -l dist/bundles/*.bin 2>/dev/null || echo "::warning::没有可内嵌的离线包"
 
       - name: Android 构建 + 单测（★ 两条一起跑）
         id: android
