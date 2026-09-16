@@ -498,6 +498,20 @@ su -c '/data/sunsetlinux/bin/linuxctl doctor'
 | 已装状态读不到时 | —— | **不给刷入按钮**，先让用户修 root 授权（与"读不到 ≠ 没装"一致） |
 | 重启 | —— | 只报告"重启后生效"（KernelSU 落 `modules_update/`），**App 不替用户重启**，脚本里有单测断言不许出现 `reboot` |
 
+### 3.10.17 终端接上原生 PTY（App 0.2.9）
+
+| 事 | 之前 | 现在 |
+|---|---|---|
+| 连接方式 | `ProcessBuilder` 普通管道（没有 termios） | **原生 PTY**：`/dev/ptmx` → grantpt/unlockpt/ptsname_r → termios（IUTF8；关 IXON/IOFF；保留 ISIG/ICANON）→ TIOCSWINSZ → fork → 子进程 setsid+打开从设备+dup2+execve |
+| Ctrl-C | **无效**（0x03 只是普通字节；本地实测：无 PTY 时进程毫无反应） | 有效 —— 行规程把它变成 SIGINT（本地实测：有 PTY 时子进程的 INT trap 触发） |
+| 全屏程序 | `vim`/`htop`/`top` 不可用 | 能跑；窗口大小按控件尺寸发 `TIOCSWINSZ` |
+| 渲染 | 按行拼接，`\r`/`ESC[K` 全当正文 → 花屏 | 最小 VT 模拟器（纯 Kotlin，12 条单测）：CR 覆盖（CRLF 例外）、`\b`、`\t`、`ESC[K/J/H/A-D/G`、OSC 标题、SGR 剥离、滚屏、增量 UTF-8 |
+| 原生库缺失时 | —— | **优雅降级**回行缓冲 + 界面明说原因（`PtyNative.loadError`） |
+| 构建 | 无原生代码 | `tools/ndk-build-pty.sh` 自己驱动 clang（官方 NDK 只有 x86_64 宿主工具链，aarch64 环境跑不了 AGP 的 externalNativeBuild）；产物 11.6 KB 进 `jniLibs/arm64-v8a` |
+
+顺带纠错：`TerminalSession.kt` 原注释"Android 上没有随系统可用的伪终端分配接口"是**错的**
+（`/dev/ptmx` 可用、bionic 有 grantpt/unlockpt/ptsname_r，Termux 走的就是这条路），已在文件头更正。
+
 ### 3.10.16 免 root 运行时：proroot 首选 + proot 降级（App 0.2.8）
 
 | 事 | 之前 | 现在 |

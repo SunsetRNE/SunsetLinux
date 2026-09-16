@@ -3,7 +3,10 @@ package io.github.sunsetrne.sunsetlinux.ui
 import android.content.Context
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -39,6 +42,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
@@ -46,6 +50,9 @@ import androidx.compose.ui.unit.sp
 import io.github.sunsetrne.sunsetlinux.core.EnvMode
 import io.github.sunsetrne.sunsetlinux.core.EnvState
 import io.github.sunsetrne.sunsetlinux.core.LinuxCtl
+import io.github.sunsetrne.sunsetlinux.core.PtyNative
+import io.github.sunsetrne.sunsetlinux.core.PtySession
+import io.github.sunsetrne.sunsetlinux.core.TerminalEmulator
 import io.github.sunsetrne.sunsetlinux.core.TerminalSession
 import io.github.sunsetrne.sunsetlinux.ui.components.Pill
 import io.github.sunsetrne.sunsetlinux.ui.theme.Danger
@@ -68,19 +75,36 @@ import kotlinx.coroutines.withContext
  * 一个连进**正在运行的环境**的常驻会话：`linuxctl attach` → root 模式 `nsenter … chroot … bash`，
  * proot 模式 `start.sh --inner -- bash -l`。命令在环境里跑，和你在 root 终端里手敲是同一条路。
  *
- * ## 三个必须说清的边界（都写进了界面上的提示）
- * 1. **没有 PTY**：只按行刷新、没有作业控制 —— `vim`/`htop`/`top` 这类全屏程序不可用；
- *    连提示符（`>>> ` 这种不换行的）也不会即时出现，要等它换行。
- * 2. **命令回显由本面板补**（`❯ ` 前缀）：管道里的 shell 是非交互的，它自己不回显、
- *    也不打提示符 —— 所以本地回显是**必须的**，不是多此一举。
- * 3. 会话**不随 tab 切换销毁**（状态挂在 AppShell 上），退出 App 才断开。
+ * ## 两套引擎（按可用性自动选）
+ *   · **PTY**（首选，`PtySession` + `TerminalEmulator`）：真伪终端 —— Ctrl-C/Ctrl-D、
+ *     Tab、方向键都真的生效，`vim`/`htop` 这类全屏程序能跑，窗口大小按控件尺寸发 TIOCSWINSZ。
+ *     回显**由环境里的 shell 自己产生**（PTY 的行规程会回显），所以面板**不再**本地回显。
+ *   · **行缓冲**（降级，`TerminalSession`）：原生库不可用（自编译 APK 没带 .so、ABI 不匹配）
+ *     时用老的管道实现 —— 终端不能因为缺一个 .so 就完全不可用。这时仍需要本地回显。
+ *
+ * 会话**不随 tab 切换销毁**（状态挂在 AppShell 上），退出 App 才断开。
  */
 class TerminalPaneState internal constructor(
     private val context: Context,
     private val scope: CoroutineScope,
 ) {
-    private val session = TerminalSession()
+    private val session = TerminalSession()          // 降级引擎（行缓冲）
+    private val pty = PtySession()                    // 首选引擎（原生 PTY）
+    private val emu = TerminalEmulator()              // PTY 输出 → 屏幕
     private val lock = Any()
+
+    /** 是否跑在原生 PTY 上（false = 降级到行缓冲）。 */
+    var ptyActive by mutableStateOf(false)
+        private set
+
+    /** 原生库不可用的原因（会显示给用户，说明为什么能力受限）。 */
+    val ptyUnavailable: String? get() = PtyNative.loadError
+
+    /** 当前窗口行列（由界面按控件尺寸算出来，用于 TIOCSWINSZ 与 emulator.resize）。 */
+    private var rows = 24
+    private var cols = 80
+    private var lastRender = 0L
+    private var renderScheduled = false
 
     private val _lines = MutableStateFlow<List<String>>(emptyList())
     val lines: StateFlow<List<String>> = _lines
@@ -106,6 +130,33 @@ class TerminalPaneState internal constructor(
 
     init {
         session.onLine = { line -> append(line) }
+        pty.onOutput = { buf, len ->
+            emu.feed(buf, 0, len)
+            // 高频输出节流：最多 ~60ms 刷一次屏（`cat 大文件` 时否则会疯狂重组）
+            val now = System.currentTimeMillis()
+            if (now - lastRender >= 60) {
+                lastRender = now
+                publishScreen()
+            } else if (!renderScheduled) {
+                renderScheduled = true
+                scope.launch {
+                    kotlinx.coroutines.delay(60)
+                    renderScheduled = false
+                    lastRender = System.currentTimeMillis()
+                    publishScreen()
+                }
+            }
+        }
+        pty.onExit = { code ->
+            running = false
+            val byUs = askedStop
+            askedStop = false
+            publishScreen()
+            if (!byUs) {
+                exitCode = code
+                append("— 会话已结束（退出码 $code）—")
+            }
+        }
         session.onExit = { code ->
             running = false
             val byUs = askedStop
@@ -117,6 +168,41 @@ class TerminalPaneState internal constructor(
         }
     }
 
+    /** 把 emulator 的屏幕搬进 [lines]（PTY 模式专用）。 */
+    private fun publishScreen() {
+        val snap = emu.snapshot()
+        val rendered = snap.lines.dropLastWhile { it.isEmpty() }
+        synchronized(lock) { _lines.value = rendered }
+    }
+
+    /**
+     * 控件尺寸变化：改行列 → 既告诉内核（TIOCSWINSZ，vim/htop 会跟着重排），
+     * 也让模拟器把画布换尺寸。降级模式只更新 emulator（不生效，仅保持尺寸一致）。
+     */
+    fun resize(newRows: Int, newCols: Int) {
+        val r = newRows.coerceIn(4, 300)
+        val c = newCols.coerceIn(20, 500)
+        if (r == rows && c == cols) return
+        rows = r
+        cols = c
+        emu.resize(r, c)
+        if (ptyActive) pty.resize(r, c)
+        if (ptyActive) publishScreen()
+    }
+
+    /**
+     * 发送**任意字节**（快捷键用）：Ctrl-C = 0x03、Ctrl-D = 0x04、方向键 = ESC[A…。
+     * 只有 PTY 模式有意义 —— 行缓冲模式下这些字节不会变成信号（这正是 PTY 的价值）。
+     */
+    fun sendBytes(bytes: ByteArray) {
+        if (!running) { notice = "会话未运行：先点「连接」。"; return }
+        if (!ptyActive) {
+            notice = "当前是行缓冲降级模式：Ctrl-C / 方向键不可用（原生 PTY 未加载）。"
+            return
+        }
+        pty.write(bytes)
+    }
+
     fun append(line: String) {
         synchronized(lock) {
             val cur = _lines.value
@@ -125,6 +211,7 @@ class TerminalPaneState internal constructor(
     }
 
     fun clear() {
+        emu.reset()
         synchronized(lock) { _lines.value = emptyList() }
     }
 
@@ -157,15 +244,27 @@ class TerminalPaneState internal constructor(
                     return@withContext "环境未运行（当前：${st?.state?.label ?: "未知"}）。" +
                         "终端是连进正在运行的环境的 —— 先到「启动」页点「启动环境」。"
                 }
-                session.start(ctl.terminalCommand())
+                if (PtyNative.available) {
+                    ptyActive = true
+                    pty.start(ctl.ptySpec(rows, cols), rows, cols)
+                } else {
+                    ptyActive = false
+                    session.start(ctl.terminalCommand())
+                }
             }
             starting = false
             if (err == null) {
                 running = true
                 if (firstLine || _lines.value.isEmpty()) {
-                    append("— 已连入环境（${mode.modeLabel}）—")
-                    append("· 输入命令后回车发送；命令在环境内执行（root 模式 = chroot 进 rootfs）")
-                    append("· 全屏程序（vim / htop / top）与 Ctrl-C 不可用：这里是行缓冲，没有 PTY")
+                    if (ptyActive) {
+                        // PTY 模式下 shell 自己会打提示符/回显，这里只留一行状态说明
+                        append("— 已连入环境（${mode.modeLabel}，原生 PTY）—")
+                    } else {
+                        append("— 已连入环境（${mode.modeLabel}，行缓冲降级）—")
+                        append("· 原生 PTY 不可用：${ptyUnavailable ?: "未知原因"}")
+                        append("· 输入命令后回车发送；命令在环境内执行（root 模式 = chroot 进 rootfs）")
+                        append("· 全屏程序（vim / htop / top）与 Ctrl-C 不可用：这里是行缓冲，没有 PTY")
+                    }
                     firstLine = false
                 } else {
                     append("— 已重新连入环境（${mode.modeLabel}）—")
@@ -185,6 +284,14 @@ class TerminalPaneState internal constructor(
             notice = "会话未运行：先点「连接」。"
             return
         }
+        if (ptyActive) {
+            // PTY：把整行 + CR 交给行规程。回显由环境里的 shell 产生，本地**不能**再补一次。
+            if (!pty.write(("$cmd\r").toByteArray(Charsets.UTF_8))) {
+                running = false
+                notice = "写入失败：会话可能已退出。点「重开」再试。"
+            }
+            return
+        }
         append("❯ $cmd")
         if (!session.sendLine(cmd)) {
             running = false
@@ -196,6 +303,7 @@ class TerminalPaneState internal constructor(
         if (!running && !starting) return
         askedStop = true
         session.stop()
+        pty.stop()
         running = false
         append("— 已断开（手动停止）—")
     }
@@ -203,6 +311,7 @@ class TerminalPaneState internal constructor(
     /** AppShell 销毁时调用：不留孤儿 shell。 */
     fun dispose() {
         session.stop()
+        pty.stop()
     }
 }
 
@@ -278,7 +387,18 @@ fun TerminalPane(
             color = Mono0,
             border = BorderStroke(1.dp, Line),
         ) {
-            if (lines.isEmpty()) {
+            // 窗口行列按**控件真实尺寸**算：这就是 TIOCSWINSZ 的来源，
+            // 让 vim/htop 的分辨率跟着屏幕走（旋转/分屏都会重算）。
+            BoxWithConstraints(Modifier.fillMaxSize()) {
+                val dens = LocalDensity.current
+                val charW = with(dens) { (12.sp * 0.6f).toPx() }
+                val lineH = with(dens) { 16.sp.toPx() }
+                val wPx = with(dens) { maxWidth.toPx() } - with(dens) { 24.dp.toPx() }
+                val hPx = with(dens) { maxHeight.toPx() } - with(dens) { 20.dp.toPx() }
+                val cols = (wPx / charW).toInt().coerceAtLeast(20)
+                val rows = (hPx / lineH).toInt().coerceAtLeast(4)
+                LaunchedEffect(cols, rows) { state.resize(rows, cols) }
+                if (lines.isEmpty()) {
                 Column(Modifier.padding(16.dp)) {
                     Text("终端还没有输出。", style = MaterialTheme.typography.bodySmall, color = TextSecondary)
                     Spacer(Modifier.height(6.dp))
@@ -289,7 +409,13 @@ fun TerminalPane(
                     )
                     Spacer(Modifier.height(4.dp))
                     Text(
-                        "限制：没有 PTY —— vim / htop / top 这类全屏程序不可用；输出按行刷新。",
+                        if (PtyNative.available) {
+                            "原生 PTY 已就绪：Ctrl-C / Tab / 方向键可用，vim / htop 这类全屏程序能跑，" +
+                                "窗口大小跟着控件走。"
+                        } else {
+                            "限制：原生 PTY 不可用（${PtyNative.loadError ?: "未知原因"}）—— " +
+                                "当前是行缓冲降级：全屏程序与 Ctrl-C 不可用；输出按行刷新。"
+                        },
                         style = MaterialTheme.typography.labelSmall,
                         color = TextMuted,
                     )
@@ -317,6 +443,42 @@ fun TerminalPane(
                             modifier = Modifier.fillMaxWidth(),
                         )
                     }
+                }
+            }
+            }
+        }
+
+        // ── 快捷键（PTY 才有意义：这些字节靠行规程变成信号/光标移动）
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 6.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            val keys = listOf(
+                "Ctrl-C" to byteArrayOf(0x03),
+                "Ctrl-D" to byteArrayOf(0x04),
+                "Ctrl-Z" to byteArrayOf(0x1a),
+                "Tab" to byteArrayOf(0x09),
+                "Esc" to byteArrayOf(0x1b),
+                "↑" to "\u001b[A".toByteArray(),
+                "↓" to "\u001b[B".toByteArray(),
+                "←" to "\u001b[D".toByteArray(),
+                "→" to "\u001b[C".toByteArray(),
+                "Ctrl-L" to byteArrayOf(0x0c),
+            )
+            // 横向滚动免得小屏放不下（Row + horizontalScroll）
+            Row(
+                modifier = Modifier.horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                keys.forEach { (label, bytes) ->
+                    TextButton(
+                        onClick = { state.sendBytes(bytes) },
+                        enabled = state.running && state.ptyActive,
+                        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp),
+                    ) { Text(label, style = MaterialTheme.typography.labelSmall) }
                 }
             }
         }

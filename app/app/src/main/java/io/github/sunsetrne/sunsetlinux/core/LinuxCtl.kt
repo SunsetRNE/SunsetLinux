@@ -204,6 +204,43 @@ class LinuxCtl(private val context: Context, val mode: EnvMode) {
         result.normalize()
     }
 
+    /**
+     * **终端**（原生 PTY）的启动规格。
+     *
+     * 统一用 `/system/bin/sh -c "exec …"` 启动，原因有两条：
+     *   1. `execve` 不查 PATH，而 `su` 的绝对路径各 ROM 不同（`/system/bin/su` /
+     *      `/system/xbin/su` / `/data/adb/ksu/bin/su`…）—— 交给 sh 的 PATH 查找最稳；
+     *   2. 这样 PTY 在最外层，`su` 之后的整条链路（chroot/proot → bash）都继承同一个
+     *      控制终端，Ctrl-C 才能落到真正的前台进程组。
+     *
+     * proot 模式直接执行 `linuxctl attach`（它自己会 `start.sh --inner`）；丢了执行位就
+     * 退化 `/system/bin/sh <path> attach` —— 与 [prootCommand] 同一套判据。
+     */
+    fun ptySpec(rows: Int, cols: Int): PtySpec {
+        val script = when (mode) {
+            EnvMode.ROOT -> "exec su -c " + shQuote(shellCommand(listOf("attach")))
+            EnvMode.PROOT -> if (File(activeCtlPath).canExecute()) {
+                "exec " + shQuote(activeCtlPath) + " attach"
+            } else {
+                "exec /system/bin/sh " + shQuote(activeCtlPath) + " attach"
+            }
+        }
+        val env = baseEnv() + mapOf(
+            // 终端相关：TERM 决定程序输出什么控制序列；LOCALE 决定 UTF-8 与消息语言
+            "TERM" to "xterm-256color",
+            "LANG" to "C.UTF-8",
+            "LC_ALL" to "C.UTF-8",
+            "COLUMNS" to cols.toString(),
+            "LINES" to rows.toString(),
+        )
+        return PtySpec(
+            cmd = "/system/bin/sh",
+            args = listOf("-c", script),
+            env = env,
+            cwd = if (mode == EnvMode.PROOT) context.filesDir.absolutePath else null,
+        )
+    }
+
     /** `linuxctl exec -- cmd...`（非交互，供 App 调环境内的命令）。 */
     suspend fun execInEnv(vararg cmd: String): CtlResult =
         execBlocking(listOf("exec", "--") + cmd.toList(), TIMEOUT_START_STOP)

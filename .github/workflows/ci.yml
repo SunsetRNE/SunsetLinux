@@ -191,6 +191,16 @@ jobs:
       # 否则每次发布签名都不同：用户装新版报 INSTALL_FAILED_UPDATE_INCOMPATIBLE，
       # 且 KernelSU 已授予的 root 授权（按包名+签名记录）全部作废。
       # 配了 Secret 就用私有发布密钥（更安全）；⚠️ 换密钥那次用户必须卸载重装一次。
+      # 终端用的原生 PTY（src/main/cpp/pty.c）需要 NDK 来编：
+      # 我们不走 AGP 的 externalNativeBuild（官方 NDK 只有 x86_64 宿主工具链，
+      # 而 aarch64 环境上那个 clang 跑不了），由 tools/ndk-build-pty.sh 自己驱动。
+      - name: 安装 NDK（编译终端用的原生 PTY）
+        run: |
+          set -euo pipefail
+          yes | sdkmanager --licenses >/dev/null 2>&1 || true
+          sdkmanager --install "ndk;26.1.10909125" >/dev/null
+          echo "NDK 就绪：$ANDROID_SDK_ROOT/ndk/26.1.10909125"
+
       - name: 准备签名密钥（有 Secret 用发布密钥，否则用仓库内固定调试密钥）
         env:
           KS_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
@@ -316,6 +326,22 @@ jobs:
       # ① 仓库/工作流里没有裸 .so（公开仓库的独立分发不允许）
       # ② APK 里 5 个 .so 齐全且 sha256 与上游一致（没被 strip）
       # ③ APK 带许可原文、关于页有 attribution
+      # 终端不能用"静默降级"糊过去：APK 里必须真的带上 PTY .so
+      - name: 断言 — APK 内含原生 PTY（终端底座）
+        run: |
+          set -euo pipefail
+          tools/ndk-build-pty.sh --check
+          fail=0
+          for apk in $(find app/app/build/outputs/apk -name '*.apk'); do
+            if unzip -l "$apk" | grep -q 'lib/arm64-v8a/libsunsetlinux_pty.so'; then
+              echo "✓ $(basename "$apk") 带 libsunsetlinux_pty.so"
+            else
+              echo "::error::$apk 缺少 libsunsetlinux_pty.so —— 终端会退回行缓冲（Ctrl-C/vim 不可用）"
+              fail=1
+            fi
+          done
+          exit $fail
+
       - name: 断言 — proroot 许可合规（不得独立分发；APK 内必须完整）
         run: node tools/proroot/compliance-test.mjs
         if: always() && steps.android.conclusion == 'success'

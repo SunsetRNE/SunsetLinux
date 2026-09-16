@@ -19,6 +19,44 @@
 | 0.2.6 | 8 | **App 内更新 KernelSU 模块**：关于页读官方 `index.json` 拿到最新模块版本/sha256/Release 地址，一键「下载 → 校验 → `ksud module install`」（重启由用户决定）；模块版本比较改**逐段数字**（`1.0.10 > 1.0.9`，字符串比会反） |
 | 0.2.7 | 9 | **修"层都在、却永远挂不上"**（模块 **1.0.11**）：开机自启用裸 `sh` 发起 → 撞上 busybox ash（`${BASH_SOURCE[0]}` 直接 `syntax error: bad substitution`），而且 `linuxctl` 用 `bash start.sh` 去挂载 —— 而 Android 上没有 bash。现在统一走 `$SH_BIN`（宿主/CI 用 bash，设备用 `/system/bin/sh`），并加了三条回归闸门。App 本身无代码改动，只是与模块 1.0.11 一起发 |
 | 0.2.8 | 10 | **免 root 模式换 proroot 首选 + proot 降级**：proroot（LD_PRELOAD，无 ptrace 开销）随 APK 的 jniLibs 打包，proot 仍随包内嵌；`SUNSETLINUX_ROOTLESS=auto|proroot|proot`（App 设置里可选），`status`/`doctor`/App 都如实报实际用了谁。proroot 是专有许可 —— 只随 APK 分发、不得再分发修改版，带许可原文 + 关于页 attribution，并有合规闸门 |
+| 0.2.9 | 11 | **终端接上原生 PTY**：`/dev/ptmx` + forkpty 路线（NDK 编译的小 `.so` 随 APK），Ctrl-C/Ctrl-D/Tab/方向键真的生效，`vim`/`htop` 这类全屏程序能跑，窗口大小按控件尺寸发 `TIOCSWINSZ`；输出用最小 VT 模拟器渲染（`\r` 覆盖、`ESC[K`、定位、SGR 剥离）；原生库不可用时**优雅降级**回行缓冲并明说 |
+
+## 0.2.9 —— 终端：从「按行管道」换成「原生 PTY」
+
+**问题**（老实现）：终端走 `ProcessBuilder` 的普通管道，只能"写一行、读一批行"。
+管道没有 termios，于是 Ctrl-C 无效（`0x03` 只是个普通字节）、`vim`/`htop`/`top` 不能跑、
+没有作业控制、`apt` 的进度条与 `python` 的 `>>> ` 提示全乱。
+
+**先纠一个错**：老代码注释写着"Android 上没有随系统可用的伪终端分配接口"——**不对**。
+设备上 `/dev/ptmx` 存在且 `crw-rw-rw-`，bionic 也提供 `grantpt/unlockpt/ptsname_r`；
+Termux 用的就是这条路。真正的原因是当时没写原生库。
+
+**做法**（与 Termux 同一套顺序，见 `app/app/src/main/cpp/pty.c`）：
+
+```
+open("/dev/ptmx") → grantpt → unlockpt → ptsname_r
+  → tcgetattr/tcsetattr（IUTF8；关 IXON/IOFF，否则 Ctrl-S 锁屏；**保留 ISIG/ICANON**）
+  → ioctl(TIOCSWINSZ) 设初始行列 → fork
+     子：setsid() → open(从设备) → dup2 到 0/1/2 → execve(/system/bin/sh -c "exec su -c …" / "exec linuxctl attach")
+     父：master fd 交给 Kotlin（ParcelFileDescriptor.adoptFd）
+```
+
+- **构建**：不走 AGP 的 `externalNativeBuild` —— 官方 NDK 只发布 **x86_64 宿主**工具链，
+  而本项目有 aarch64 构建环境（AGP 会去调那个 clang 直接 `error=2`）。改成
+  `tools/ndk-build-pty.sh` 自己驱动 clang：x86_64 宿主用 NDK 自带 clang，
+  aarch64 宿主用系统 clang + NDK sysroot（`-resource-dir` + `-rtlib=compiler-rt`）。
+  两条路同一份源码、同一组选项，产物落 `src/main/jniLibs/arm64-v8a/`（随 APK 打包）。
+- **尺寸**：App 用 `BoxWithConstraints` 按控件真实尺寸算行列 → `TIOCSWINSZ`，
+  旋转/分屏都会重算（这是比"层内 script 包一层"更强的地方：`script` 的 stdin 是管道，永远学不到尺寸）。
+- **渲染**：新增纯 Kotlin 的最小 VT 模拟器（`TerminalEmulator`，12 条单测）：
+  `\r` 覆盖（CRLF 例外，否则会把上一行擦掉）、`\b`、`\t`、`ESC[K/J/H/A-D/G`、OSC 标题、
+  SGR 剥离、滚屏、增量 UTF-8（一个汉字分两次 read 也正确）。
+- **降级**：原生库加载失败（自编译漏 .so / ABI 不匹配）→ 退回老的 `TerminalSession` 行缓冲，
+  并在界面上**明说**原因与能力差异。终端不能因为缺一个 .so 就不可用。
+- **回显**：PTY 模式**不再本地回显**（行规程会回显，本地再补一次就重复了）；降级模式仍本地补。
+
+体积代价：`.so` 11.6 KB。
+
 
 ## 0.2.8 —— 免 root 模式：proroot 首选，proot 降级
 

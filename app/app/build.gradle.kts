@@ -440,6 +440,67 @@ abstract class SyncProrootLicense : DefaultTask() {
     }
 }
 
+
+/**
+ * 编译终端用的原生 PTY 库（`src/main/jniLibs/arm64-v8a/libsunsetlinux_pty.so`）。
+ *
+ * 为什么**不**用 AGP 的 `externalNativeBuild`：官方 NDK 只发布 **x86_64 宿主的工具链**，
+ * 而本项目有 aarch64 的构建环境 —— AGP 会去调那个 x86_64 的 clang，直接 `error=2`。
+ * 产物本身与宿主无关（bionic 头/库都在 `sysroot/` 里，是纯数据），所以由
+ * `tools/ndk-build-pty.sh` 自己驱动 clang：x86_64 宿主用 NDK 自带 clang，
+ * aarch64 宿主用系统 clang + NDK sysroot + `-resource-dir`/`-rtlib=compiler-rt`。
+ *
+ * 没有 NDK 时**明确失败**（而不是静默出一个"终端退回行缓冲"的 APK）：
+ * 那种"看起来成功"最坑人 —— 用户会以为终端坏了。
+ */
+abstract class BuildPtySo : DefaultTask() {
+    @get:Inject
+    abstract val execOps: ExecOperations
+
+    @get:InputDirectory
+    @get:PathSensitive(PathSensitivity.RELATIVE)
+    abstract val cppDir: DirectoryProperty
+
+    @get:InputFile
+    @get:PathSensitive(PathSensitivity.RELATIVE)
+    abstract val script: RegularFileProperty
+
+    @get:Internal
+    abstract val repoRoot: Property<String>
+
+    @get:OutputDirectory
+    abstract val outputDir: DirectoryProperty
+
+    @TaskAction
+    fun build() {
+        val repo = File(repoRoot.get())
+        val res = execOps.exec {
+            workingDir = repo
+            commandLine("bash", "tools/ndk-build-pty.sh")
+        }
+        if (res.exitValue != 0) {
+            throw GradleException(
+                "原生 PTY 编译失败（exit ${res.exitValue}）。\n" +
+                    "  终端需要它来拿真 PTY（Ctrl-C / vim / htop / 窗口大小）。\n" +
+                    "  装了 NDK 再试：sdkmanager --install \"ndk;26.1.10909125\"（或设 NDK=/path/to/ndk）",
+            )
+        }
+        val so = File(outputDir.get().asFile, "arm64-v8a/libsunsetlinux_pty.so")
+        if (!so.isFile) throw GradleException("脚本跑完了但没看到产物：${so.path}")
+    }
+}
+
+// 任何构建都先编 PTY（源在 src/main/cpp/pty.c，产物落在 src/main/jniLibs，随 APK 打包）
+val buildPty = tasks.register<BuildPtySo>("buildPtySo") {
+    group = "build"
+    description = "编译原生 PTY 库（终端底座，arm64-v8a）"
+    repoRoot.set(rootDir.parentFile.absolutePath)
+    cppDir.set(File(rootDir.parentFile, "app/app/src/main/cpp"))
+    script.set(File(rootDir.parentFile, "tools/ndk-build-pty.sh"))
+    outputDir.set(File(rootDir.parentFile, "app/app/src/main/jniLibs"))
+}
+tasks.matching { it.name == "preBuild" }.configureEach { dependsOn(buildPty) }
+
 androidComponents {
     onVariants { variant ->
         val flavor = embedFlavors.firstOrNull { it.gradleName == variant.flavorName }

@@ -13,6 +13,10 @@ app/build/
 app/.gradle/
 app/.kotlin/
 app/local.properties
+# 原生 PTY（终端底座）：源码是 app/app/src/main/cpp/pty.c，产物由 tools/ndk-build-pty.sh
+# 在构建时生成（Gradle 的 buildPtySo 挂在 preBuild 上）。**不提交二进制**：
+# 提交了就会和 pty.c 悄悄漂移，而"终端能不能用"取决于这个 .so 是否与源码一致。
+app/app/src/main/jniLibs/
 *.apk
 *.aab
 *.idsig

@@ -14,8 +14,15 @@ import java.util.concurrent.TimeUnit
  * 两条路都是把 shell **exec 进去**（见 runtime/{root,proot}/linuxctl.sh 的 cmd_attach），
  * 所以本进程的 stdin/stdout 就是那个 shell 的：我们只要「写一行、读一批行」。
  *
- * ## ⚠️ 没有 PTY —— 这是刻意的取舍，不是漏做
- * Android 上没有随系统可用的伪终端分配接口；自己引 PTY（JNI + forkpty）代价远大于收益。
+ * ## ⚠️ 这是**降级实现**：没有 PTY
+ *
+ * ★ 纠错（2026-09-16）：本文件原先写着"Android 上没有随系统可用的伪终端分配接口"，
+ * 这句是**错的** —— 设备上 `/dev/ptmx` 存在且可读写，bionic 也提供
+ * grantpt/unlockpt/ptsname_r；Termux 就是这么做的（见 `pty.c` 顶部注释）。
+ * 真原因是"当时没写原生库"。现在终端**首选** `PtySession`（原生 PTY，见 `pty.c`），
+ * 只有在原生库不可用时（自编译 APK 没带 .so、ABI 不匹配）才退回这里的行缓冲，
+ * 并且界面会**明确告诉用户**当前是降级模式（`TerminalPane` 的 `ptyUnavailable`）。
+ *
  * 因此这里只能做到**行缓冲**：
  *   · 能用：`ls` / `cat` / `apt` / `npm` / `dsh` / 交互式 y/n 提示……
  *   · 不能用：`vim` / `htop` / `top` 这类**全屏程序**（它们要 termios 与窗口大小）
