@@ -712,7 +712,7 @@ private fun AboutDialog(ui: LauncherViewModel.UiState, onClose: () -> Unit, onEx
         text = {
             Column(Modifier.verticalScroll(rememberScrollState())) {
                 // ★ "关于"要能真的回答"我装的是哪个包、什么版本、环境缺不缺东西" ——
-                //   以前只有 VERSION_NAME，四个内置组合的名字都看不出来（真机反馈）。
+                //   以前只有 VERSION_NAME，内置组合的名字都看不出来（真机反馈）。
                 AboutLine("应用版本", BuildConfig.STANDARD_VERSION)
                 AboutLine("工程版本", "${BuildConfig.ENGINEERING_VERSION} (${BuildConfig.VERSION_CODE})")
                 AboutLine("构建时间", BuildConfig.BUILD_TIME)
@@ -780,8 +780,9 @@ private fun AboutDialog(ui: LauncherViewModel.UiState, onClose: () -> Unit, onEx
                 )
                 Spacer(Modifier.height(8.dp))
                 Text(
-                    text = "四个内置组合（最小版 / Ubuntu 版 / 免 root 版 / 完整离线版）是同一个 App：" +
-                        "换组合就覆盖安装另一个 APK，数据不丢，KernelSU 的 root 授权也不受影响。",
+                    text = "本版是「${BuildConfig.EDITION_LABEL}」的内置${BuildConfig.EMBED_LABEL}：" +
+                        "同一个 App 内换内置档位（最小 / Ubuntu / 完整离线）＝覆盖安装，数据不丢；" +
+                        "Root 版与免 root 版是两个不同的 App（包名不同），可以同时装、互不影响。",
                     style = MaterialTheme.typography.labelSmall,
                     color = TextMuted,
                 )

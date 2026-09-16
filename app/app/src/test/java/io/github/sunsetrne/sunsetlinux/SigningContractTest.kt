@@ -136,5 +136,25 @@ class SigningContractTest {
             "APK 命名必须带组合名（AGP 9 只能用 VariantOutputImpl.outputFileName）",
             buildText.contains("VariantOutputImpl") && buildText.contains("outputFileName"),
         )
+        // ★ 两个 App 装在同一台手机上，**桌面标签必须能分辨** —— 0.3.0 拆版时真的漏了：
+        //   只改了 main/res 的 app_name，而 `src/<edition>/res/` 根本不存在，
+        //   实测两个图标都叫 "SunsetLinux"（用户点哪个纯靠猜）。
+        //   标签来源必须是 variants.json 的 editions[].label（不在构建脚本里抄第二份）；
+        //   另外 AGP 9 的 `resValues` 特性默认**关闭**，不开就是配置阶段直接失败。
+        assertTrue(
+            "桌面标签必须按 edition 设：resValue(\"string\", \"app_name\", e.label)",
+            buildText.contains("resValue(\"string\", \"app_name\", e.label)"),
+        )
+        assertTrue(
+            "AGP 9 的 resValues 特性默认关闭，必须显式打开（否则配置阶段就报 feature is disabled）",
+            buildText.contains("resValues = true"),
+        )
+        // ⚠️ org.json 的 keys() 返回的是 **Iterator**（不是 Iterable）：要么 for-in
+        //   （Kotlin 有 `Iterator.iterator()` 扩展），要么先 `asSequence()`——
+        //   直接 `.map {}` 是编不过的（实测踩过）。
+        val editionLabels = editions.keys().asSequence()
+            .map { editions.getJSONObject(it).getString("label") }
+            .toList()
+        assertEquals("两个 App 的桌面标签必须不同（否则用户分不清点哪个）", editionLabels.size, editionLabels.distinct().size)
     }
 }

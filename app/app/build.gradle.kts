@@ -21,8 +21,9 @@ plugins {
 //   · 版本号放 version.properties（唯一事实源），build 脚本只读键值行；
 //   · 构建时算一个**标准版本号** = <versionName>-<yyyyMMdd-HHmm>-<7 位 git hash>，
 //     固定 Asia/Shanghai（本地与 CI 一致），注入 BuildConfig；
-//   · APK 文件名按 "产品-版本-组合" 生成 —— 四个内置组合必须能一眼分清，
-//     否则下载下来全是 app-debug.apk，用户根本不知道哪个是哪个。
+//   · APK 文件名按 "产品-版本-组合" 生成 —— 六个内置组合必须能一眼分清
+//     （0.3.0 起是 2 个 App × 3 档），否则下载下来全是 app-debug.apk，
+//     用户根本不知道哪个是哪个。
 // ============================================================================
 // 版本文件放在 **Gradle 根**（app/version.properties），不是模块目录（app/app/）——
 // 所以这里显式用 rootDir 定位，别看 build 脚本的所在目录。
@@ -182,9 +183,13 @@ android {
     }
 
     // ────────────────────────────────────────────────────────────────────────
-    // 四个内置组合：**同一个 App**（同 applicationId / 同签名 / 同 versionCode），
-    // 差别只在 assets/ 里内嵌哪份离线包（见 tools/offline-bundle/variants.json）。
-    // 换组合 = 覆盖安装另一个 APK，数据不丢；KernelSU 授权按【包名+签名】记，也不受影响。
+    // 两个维度、六个组合（0.3.0 起）——**全部读 tools/offline-bundle/variants.json**：
+    //   edition（root / proot）：**两个可共存的 App**，包名不同（`…​.root` / `…​.proot`），
+    //    各自锁死运行模式。跨 edition **不能**覆盖安装，也不该互相干扰
+    //    （KernelSU 授权按【包名+签名】记）。
+    //   embed（minimal / base / full）：同一 App 的**内置档位**，差别只在 assets/ 里
+    //    内嵌哪份离线包。**同 edition 内换档位 = 覆盖安装**，数据不丢。
+    // 加档只改 JSON（Gradle flavor 与 CI 矩阵都会自动跟上），别在这里写死数量。
     // ────────────────────────────────────────────────────────────────────────
     flavorDimensions += listOf("edition", "embed")
     productFlavors {
@@ -193,6 +198,12 @@ android {
                 dimension = "edition"
                 // 两个可共存的 App：包名不同（KernelSU 授权、App 数据、卸载互不影响）
                 applicationId = e.applicationId
+                // ★ 桌面标签也必须按 edition 分开：两个 App 装在同一台手机上、都叫
+                //   "SunsetLinux" 的话，用户点哪一个纯靠猜 —— 0.3.0 拆版时**真的**是
+                //   这样（只改了 main/res 的 app_name，`src/<edition>/res/` 根本不存在，
+                //   实测桌面两个图标同名）。标签取自 variants.json 的
+                //   `editions[].label`，改 JSON 就跟着变，这里不抄第二份。
+                resValue("string", "app_name", e.label)
                 buildConfigField("String", "EDITION", "\"${e.id}\"")
                 buildConfigField("String", "EDITION_LABEL", "\"${e.label}\"")
                 buildConfigField("String", "EDITION_LABEL_SHORT", "\"${e.labelShort}\"")
@@ -233,6 +244,10 @@ android {
     buildFeatures {
         compose = true
         buildConfig = true
+        // ★ AGP 9 起 `resValues` 默认**关闭**：不开的话 `productFlavors { resValue(...) }`
+        //   会在配置阶段直接失败 —— "Product Flavor root contains custom resource values,
+        //   but the feature is disabled."（要的是按 edition 改 app_name 桌面标签）
+        resValues = true
     }
 
     packaging {

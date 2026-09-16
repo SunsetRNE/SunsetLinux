@@ -4,8 +4,9 @@
 > **每个版本的来龙去脉写在这里**（新增一版时先加条目，再改 version.properties）。
 >
 > 版本号规则：Android 只按 `versionCode` 判"是不是新版"，所以**每次对外发布都要 +1**。
-> 四个内置组合（minimal / ubuntu / ubuntu-proot / ubuntu-proot-dsh）是同一个 App，
-> **共用同一组 versionName/versionCode** —— 换组合就是覆盖安装另一个 APK，数据不丢。
+> 0.3.0 起是 **2 个 App（root / proot，包名不同、可共存）× 3 个内置档位**，清单见
+> `tools/offline-bundle/variants.json`。同一个 App 内换档位 = 覆盖安装另一个 APK（数据不丢）；
+> **跨 App 不能覆盖安装**，是两个独立包。两个 App 共用同一组 versionName/versionCode。
 
 | versionName | versionCode | 内容 |
 |---|---|---|

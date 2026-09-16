@@ -623,7 +623,7 @@ fun UpdatePane(
 
             Spacer(Modifier.height(12.dp))
 
-            // ── 本机包（四个内置组合里的哪一个、内嵌了什么）────────────────────
+            // ── 本机包（哪个 App 的哪个内置档位、内嵌了什么）──────────────────────
             DshCard(Modifier.fillMaxWidth()) {
                 Column(Modifier.fillMaxWidth()) {
                     Row(verticalAlignment = Alignment.CenterVertically) {

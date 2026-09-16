@@ -10,8 +10,10 @@ import java.security.MessageDigest
  *
  * ## 这是什么
  *
- * 四个内置组合（minimal / ubuntu / ubuntu-proot / ubuntu-proot-dsh）各自的 APK 里，
- * 都带一份 `assets/offline-bundle.bin` —— 装完**不用联网**就能把环境铺起来。
+ * 内置档位非空的组合（见 `tools/offline-bundle/variants.json` 的 `embed`：root-base /
+ * root-full / proot-minimal / proot-base / proot-full）各自的 APK 里，都带一份
+ * `assets/offline-bundle.bin` —— 装完**不用联网**就能把环境铺起来。
+ * `embed` 为空的组合（root-minimal）**没有**这个文件，那份环境走频道下载。
  * 格式与打包工具见 `tools/offline-bundle/README.md`：
  *
  * ```
