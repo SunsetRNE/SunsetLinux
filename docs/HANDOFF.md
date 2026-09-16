@@ -72,6 +72,7 @@ CI 四条线路：① `ci.yml` 回归门禁（shell / node / android 三并行�
 | 20 | *(本次)* | **root / 模块检测升级**（用户：对 root 授权的检测和模块的检测）：以前只有一个 `suAvailable: Boolean`，界面只能写「su 不可用」；模块状态 App 完全不知道 | 新增 `core/DeviceStatus.kt`：root 细分为 已授权 / 被拒 / 无 su / 超时（各带**下一步**），模块读出装没装 + 版本 + 停用 + **装了没重启**，首启引导与部署向导都显示；`needsInstallDecision` 修好「本地版本读不出来 ⇒ 永远看不到可更新层」（老 state.json 就是这情况）。App 单测 **78 → 94/0**；App **0.2.4** |
 | 21 | *(本次)* | **官方频道首次上线**：三层预构建镜像（base 27.8 MB / runtime 77.1 MB / dsh 50.1 MB，gzip 合计 155 MB / zstd 96 MB）推 `layers` 分支 → Release 资产 → `channel.json` 签名发布 | 签名用 App **内置公钥**验过（指纹 `ed25519:06:d0:c4:4d:29:1c:ef:66`）；层文件逐层**真解压复算** sha256_raw/size_raw，且 .zst/.gz 两条路结果一致 → **App「更新」页点两下装完，不用再等 30 分钟构建** |
 | 22 | *(本次)* | **内置（离线）包工具链落地**（用户：「后面开始做 ubuntu 内嵌等多个版本」）：`tools/offline-bundle/`（`variants.json` 是组合的**唯一事实源** + `mk-bundle.mjs` 容器打包/校验/解包 + `selftest.mjs` 26 条）＋ `.github/workflows/offline-bundle.yml`（从**签名频道清单**拉层、逐层校验、`--available` 打齐的组合、挂到产品 Release） | 实测：minimal **0.9 MiB** / ubuntu **65.1** / ubuntu-proot **66.0** / ubuntu-proot-dsh **97.2 MiB**；容器 `SLB1`+头 JSON+载荷，层部件带 `sha256_raw/size_raw`；回归含三类负例与**真产物逐字节回验**；CI 跑通后四个 `.bin` 已挂在 `v0.2.4` 上。顺带修掉新工作流的站点地址拼接 bug（owner/repo 当成了两层路径）|
+| 23 | *(本次)* | **内置组合命名定案 + App 变体/真内嵌 + 下载页重画**（用户：先把组合命名定下来，然后改 App、命名与 pages）。定案：`minimal` 最小版 / `ubuntu` Ubuntu 版 / `ubuntu-proot` 免 root 版 / `ubuntu-proot-dsh` 完整离线版；APK `SunsetLinux-<版本>-<组合>[-debug].apk`、离线包 `SunsetLinux-<版本>-<组合>.bin` | App：版本号移到 `app/version.properties`（+ 标准版本号 `<ver>-<时间>-<hash>` 注入 BuildConfig）、四个 flavor（同包名/同签名/同 versionCode，换组合=覆盖安装）、`EmbedOfflineBundle` 把离线包作为 generated assets 内嵌、APK 改名走 AGP 9 的 `VariantOutputImpl`；新增 `core/OfflineBundle.kt` 容器读取（纯函数 parse + 范围取部件 + sha256 校验，单测 101/0）。发布：门禁加 `embed_bundles` 输入（**只有发布路径**先拉层打包再构建，于是 APK 真的自带环境：13.7 / 80.9 / 81.9 / 114.7 MB）；**APK 改挂 Release**（内嵌后单文件 114 MB 超 git/Pages 的 100 MB 硬限），gh-pages 只留 index.json/模块/页；下载页重画成"四个组合各一张卡（内嵌什么+体积+sha256+按钮）"|
 
 ### 第 12 条到底修了什么 —— 一句话：**真机上根本跑不了首次部署**
 
@@ -332,6 +333,13 @@ curl -s https://sunsetrne.github.io/SunsetLinux/stable/index.json
   模块根了 —— 素材要么一起同步过去，要么把模块根也列进候选路径（本次两条都做了）。
 - **`linuxctl provision` 不会构建层**：它只建目录 / upper.img / 写 config，层要么来自频道、
   要么来自 `device-provision.sh`。App 的「首次部署向导」现在走的正是它 → 见 §三·0。
+- **gh-pages 是 git 分支**：单文件 100 MB、站点 1 GB 两道硬限。内嵌离线包后的 APK 会到 114 MB，
+  推上去直接失败 —— **大产物一律走 Release 资产**（APK / 层 / 离线包），gh-pages 只放 index.json、
+  模块 zip 和下载页。判据永远是"这文件多大、以后还要不要回滚"。
+- **`${{ github.repository }}` 是 `owner/repo`**：拼进 `https://<owner>.github.io/<repo>` 时会多一段 →
+  404。要 `owner` 转小写 + 只取仓库名（channel.yml 早就是这么写的，这次新工作流忘了）。
+- **upload-artifact 保留目录结构**：上传 `apk/*/debug/*.apk`，解出来是 `apk-artifact/<组合>/debug/*.apk`；
+  平铺通配 `apk-artifact/*.apk` 一个都匹配不到（而制品其实有 46 MB）→ 用 `find` 递归收。
 - **`dist/` 是 gitignore 的** → CI 拿不到本地产物；发布步骤里依赖本地构建物的，必须显式说"本次没有"，
   **不许静默跳过**（`release.yml` 的 job summary 已这么做）。
 - **编辑时别在空行边界动手**：删空行会把下一行粘上来（本轮那个 bug 就是这么来的）。
