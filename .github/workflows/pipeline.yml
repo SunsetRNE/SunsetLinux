@@ -58,8 +58,25 @@ jobs:
       matrix: ${{ steps.matrix.outputs.matrix }}
       app_version: ${{ steps.ver.outputs.app_version }}
       module_version: ${{ steps.ver.outputs.module_version }}
+      embed_bundles: ${{ steps.norm.outputs.embed_bundles }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: 归一化输入（push 事件没有 inputs，别被 `'' == false` 坑到）
+        id: norm
+        run: |
+          set -euo pipefail
+          # ★ GitHub 表达式的宽松相等：`'' == false` 为**真**。
+          #   所以 push 事件下写 `inputs.embed_bundles != false` 会得到"假" ——
+          #   表现是"默认该内嵌离线包，却整条 ② 节点被跳过"（这次真踩到）。
+          #   这里只算一次，后面统一用 needs.prep.outputs.embed_bundles。
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            want="${{ inputs.embed_bundles }}"
+          else
+            want="true"
+          fi
+          echo "embed_bundles=$want" >> "$GITHUB_OUTPUT"
+          echo "内嵌离线包：$want"
 
       - name: 读版本（app/version.properties + module/module.prop）
         id: ver
@@ -121,7 +138,8 @@ jobs:
   # ─────────────────────────────────────────────── ② 内嵌离线包
   bundles:
     name: ② 内嵌离线包
-    if: ${{ inputs.embed_bundles != false }}
+    needs: prep
+    if: ${{ needs.prep.outputs.embed_bundles == 'true' }}
     # ★ 被调用的 offline-bundle.yml 在工作流级声明了 `contents: write`（它要挂 Release）。
     #   GitHub 的规则是"调用方只能**收紧**、不能收紧到低于被调用方声明的权限"，
     #   不显式授权就会在**计划阶段**直接失败（报 Invalid workflow file，工作流一行都不跑）。
@@ -146,7 +164,7 @@ jobs:
     with:
       variant: ${{ matrix.id }}
       gradle_task: ${{ matrix.task }}
-      bundles_available: ${{ inputs.embed_bundles != false }}
+      bundles_available: ${{ needs.prep.outputs.embed_bundles == 'true' }}
     secrets: inherit            # 签名密钥（没配就各步自己回退到仓库内固定调试密钥）
 
   # ─────────────────────────────────────────────── ④ 回归门禁（与编译并行）
@@ -249,4 +267,8 @@ jobs:
           case "${{ needs.gates.result }}" in
             success) ;;
             *) echo "::error title=回归门禁未通过::看 ④ gates 的注释（tools/ci-shell-gate.sh 会带出具体断言）"; exit 1 ;;
+          esac
+          case "${{ needs.publish.result }}" in
+            success) ;;
+            *) echo "::error title=发布失败::看 ⑤ 的注释（publish.yml 里那个 if: failure() 步骤会把日志尾部带出来）"; exit 1 ;;
           esac

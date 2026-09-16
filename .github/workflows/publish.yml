@@ -51,6 +51,12 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write            # 需要推 gh-pages 分支
+    # ★ 每个 run: 步骤都留一份日志到 $RUNNER_TEMP/ci-steps.log：
+    #   步骤日志要仓库权限才看得到（手机上排查时看不到），而工作流末尾那个
+    #   `if: failure()` 的步骤会把尾部贴成 `::error::` 注释 —— 注释匿名可读。
+    defaults:
+      run:
+        shell: bash ${{ github.workspace }}/tools/ci-step-tee.sh {0}
     # ★ 与 channel.yml 共用同一个组：都会写 gh-pages。放在 **job 级**，
     #   这样两个分支的门禁可以并行验证，只有"真正写 gh-pages"这一步需要排队。
     concurrency:
@@ -554,6 +560,18 @@ jobs:
             gh release create "$TAG" --title "$TITLE" --notes-file dist/_release-notes.md $ASSETS
           fi
           echo "- Release：https://github.com/$REPO/releases/tag/$TAG" >> "$GITHUB_STEP_SUMMARY"
+
+      # 失败时把"最后跑的那一步 + 它输出里的报错行"带成注释。
+      # 注释是匿名可读的（check-runs/annotations），日志不是 —— 手机上排查 CI 全靠它。
+      - name: 失败诊断（把日志尾部带成注释）
+        if: failure()
+        run: |
+          LOG="${RUNNER_TEMP:-/tmp}/ci-steps.log"
+          echo "---- 日志尾部（最后 40 行）----"
+          tail -n 40 "$LOG" 2>/dev/null || echo "（没有日志文件）"
+          detail="$(grep -aiE '(^|[^a-z])(error|fatal|failed|denied|not found|No such file|unbound|invalid)([^a-z]|$)' "$LOG" 2>/dev/null | tail -n 6 | tr '\n' '~' | cut -c1-1200)"
+          [ -n "$detail" ] || detail="$(tail -n 6 "$LOG" 2>/dev/null | tr '\n' '~' | cut -c1-1200)"
+          echo "::error title=发布失败（日志尾部）::$detail"
 
       - name: 输出下载地址
         run: |
