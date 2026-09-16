@@ -11,7 +11,7 @@
  *   · variants.json 的矩阵合法（部件的名字必须在 parts_legend 里 —— 名字写错就是"这个包少一块"）
  *   · 合成小部件：打包 → 校验 → 解包 → 与源文件逐字节一致；头里的版本/raw 校验值来自文件名与清单
  *   · 负例：缺部件要明确失败、魔数不对要失败、载荷被改一个字节要失败
- *   · 真产物（dist/ 里有层时才跑）：四个变体全打一遍并逐个校验
+ *   · 真产物（dist/ 里有层时才跑）：**有部件的变体**全打一遍并逐个校验（个数由 variants.json 决定）
  *
  * 用法：node tools/offline-bundle/selftest.mjs
  */
@@ -170,10 +170,13 @@ console.log('\n== 真产物（dist/ 里有层时才跑）==');
   } else {
     const out = mkdtempSync(join(tmpdir(), 'sunsetlinux-bundle-real-'));
     try {
+      // 该打几个包**由 variants.json 决定**（embed 为空的档位不打 .bin，比如 root-minimal）
+      const withParts = Object.values(JSON.parse(readFileSync(VARIANTS, 'utf8')).variants)
+        .filter((v) => (v.embed ?? []).length > 0).length;
       const all = run(['--all', '--dir', dist, '--out', out]);
-      ok(all.code === 0, `四个变体全部打包成功（退出码 ${all.code}）`);
+      ok(all.code === 0, `${withParts} 个有部件的变体全部打包成功（退出码 ${all.code}）`);
       const lines = all.out.split('\n').filter((l) => l.includes('校验通过'));
-      ok(lines.length === 4, `四个变体逐个校验通过（实际 ${lines.length} 个）`);
+      ok(lines.length === withParts, `${withParts} 个变体逐个校验通过（实际 ${lines.length} 个）`);
       // 逐字节回验两个月牙层
       const ex = join(out, 'x');
       const r = run(['--extract', join(out, 'proot-full.bin'), '--out', ex]);

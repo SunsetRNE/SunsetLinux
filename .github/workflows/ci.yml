@@ -337,12 +337,18 @@ jobs:
         #   跑全部四个变体则白等 4 倍时间。assembleDebug 仍然四个全建。
         run: |
           set -euo pipefail
+          # ★ 单测任务名**从 variants.json 推**（别再写死某个 flavor：0.3.0 拆版后
+          #   `ubuntu*` 这些 flavor 已经不存在，写死会直接"任务不存在"）。
+          #   第一个变体的 Gradle 任务名 = 按 '-' 分段首字母大写 + DebugUnitTest。
+          FIRST="$(python3 -c 'import json;print(list(json.load(open("tools/offline-bundle/variants.json",encoding="utf-8"))["variants"])[0])')"
+          TASK="$(python3 -c "print(''.join(p[:1].upper()+p[1:] for p in '$FIRST'.split('-'))+'DebugUnitTest')")"
+          echo "· 单测任务：:app:$TASK（变体 $FIRST）"
           if [ "${{ inputs.build_apks }}" = "false" ]; then
             echo "· 流水线模式：APK 由编译矩阵并行产出，这里只跑单测"
-            ./gradlew --no-daemon :app:testUbuntuDebugUnitTest
+            ./gradlew --no-daemon ":app:$TASK"
           else
-            echo "· 独立门禁模式：四个组合一起编 + 单测"
-            ./gradlew --no-daemon :app:assembleDebug :app:testUbuntuDebugUnitTest
+            echo "· 独立门禁模式：全部组合一起编 + 单测"
+            ./gradlew --no-daemon :app:assembleDebug ":app:$TASK"
           fi
 
       - name: 单测结果摘要
