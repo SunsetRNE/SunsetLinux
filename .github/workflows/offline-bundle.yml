@@ -116,6 +116,36 @@ jobs:
       - name: 打包（每个变体打完立刻校验）
         run: node tools/offline-bundle/mk-bundle.mjs --available --dir dist --out dist/bundles
 
+      # 发布的离线包按**定下来的命名**：SunsetLinux-<App 版本>-<组合>.bin
+      # （本地/工具产出的中间名是 <组合>.bin；页面与"导入离线包"都认发布名）
+      - name: 按发布命名重命名离线包
+        run: |
+          set -euo pipefail
+          APP_VER="$(sed -n 's/^versionName=//p' app/version.properties | head -n1 | tr -d '[:space:]')"
+          [ -n "$APP_VER" ] || { echo "::error::读不出 app/version.properties 的 versionName"; exit 1; }
+          cd dist/bundles
+          for f in *.bin; do
+            [ -f "$f" ] || continue
+            id="${f%.bin}"
+            case "$id" in SunsetLinux-*) continue ;; esac   # 已经是发布名就跳过
+            mv -v "$f" "SunsetLinux-$APP_VER-$id.bin"
+          done
+          # 校验清单（.json）保持同名，只是把 bundle 字段指到新名字
+          for j in *.json; do
+            [ -f "$j" ] || continue
+            id="${j%.json}"
+            case "$id" in SunsetLinux-*) continue ;; esac
+            python3 - "$j" "$APP_VER-$id.bin" <<'PY'
+          import json, sys
+          p, newname = sys.argv[1], sys.argv[2]
+          d = json.load(open(p, encoding="utf-8"))
+          d["bundle"] = newname
+          json.dump(d, open(p, "w", encoding="utf-8"), indent=2, ensure_ascii=False)
+          PY
+            mv -v "$j" "SunsetLinux-$APP_VER-$id.json"
+          done
+          ls -l *.bin
+
       - name: 回归（合成部件全链路 + 负例）
         run: node tools/offline-bundle/selftest.mjs
 
@@ -138,5 +168,6 @@ jobs:
             echo "::warning::$TAG 还不存在（还没发过正式版？）—— 制品已上传为 workflow artifact，暂不挂 Release"
             exit 0
           fi
+          # 只挂"发布名"的那两份（.bin 给用户、.json 给排障/对账）
           gh release upload "$TAG" dist/bundles/*.bin dist/bundles/*.json --clobber
           echo "- 内置离线包已挂到 https://github.com/${{ github.repository }}/releases/tag/$TAG" >> "$GITHUB_STEP_SUMMARY"

@@ -201,7 +201,17 @@ jobs:
       - name: Android 构建 + 单测（★ 两条一起跑）
         id: android
         working-directory: app
-        run: ./gradlew --no-daemon :app:assembleDebug :app:testDebugUnitTest
+        env:
+          # 单测里有**中文测试方法名**（`fun \`磁盘缓存…\``）—— JVM 用 sun.jnu.encoding 决定
+          # 写 .class 文件时的编码，而它由**启动时的 locale** 决定（-D 覆盖不了）。
+          # runner 默认一般是 C.UTF-8，这里显式写死，免得换个镜像就出现
+          # `InvalidPathException: Malformed input or input contains unmappable characters`。
+          LANG: C.UTF-8
+          LC_ALL: C.UTF-8
+        # ★ 四个内置组合（flavor）是同一份代码，单测只需跑一个变体 ——
+        #   跑 `testDebugUnitTest` 会变成歧义任务（AGP 直接报 ambiguous），
+        #   跑全部四个变体则白等 4 倍时间。assembleDebug 仍然四个全建。
+        run: ./gradlew --no-daemon :app:assembleDebug :app:testUbuntuDebugUnitTest
 
       - name: 单测结果摘要
         # 只在构建**真的跑过**时才当"必须有用例"来判定：前面某步先失败时构建会被跳过，
@@ -226,5 +236,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: apk-debug
-          path: app/app/build/outputs/apk/debug/app-debug.apk
+          # 四个组合各一份（minimal / ubuntu / ubuntu-proot / ubuntu-proot-dsh），
+          # 文件名由 build.gradle.kts 的 androidComponents.onVariants 生成。
+          path: app/app/build/outputs/apk/*/debug/*.apk
           retention-days: 7

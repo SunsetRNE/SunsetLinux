@@ -17,12 +17,24 @@
 
 组合（**唯一事实源**是 `variants.json`，改表即可，工具与 CI 都读它）：
 
-| 变体 id | 内嵌 | 离线包体积 | 说明 |
-|---|---|---|---|
-| `minimal` | proot | **0.9 MiB** | 非内嵌：只带必要组件；Ubuntu 与 dsh 走频道/离线包 |
-| `ubuntu` | base + runtime | **65.1 MiB** | 装完离线拥有 Ubuntu 基础环境（root 模式可用） |
-| `ubuntu-proot` | base + runtime + proot | **66.0 MiB** | root / 非 root 都能离线起步（不含 dsh） |
-| `ubuntu-proot-dsh` | base + runtime + proot + dsh | **97.2 MiB** | **完全离线**：装完开机即用 |
+| 变体 id | 中文名 | 内嵌 | 离线包体积 | 说明 |
+|---|---|---|---|---|
+| `minimal` | 最小版 | proot | **0.9 MiB** | 只带 proot 运行时；Ubuntu 与 dsh 按需下载/导入 |
+| `ubuntu` | Ubuntu 版 | base + runtime | **65.1 MiB** | 内嵌 Ubuntu 基础环境（root 模式可用） |
+| `ubuntu-proot` | 免 root 版 | base + runtime + proot | **66.0 MiB** | root / 非 root 都能离线起步（不含 dsh） |
+| `ubuntu-proot-dsh` | 完整离线版 | base + runtime + proot + dsh | **97.2 MiB** | 装完开机即用，零下载 |
+
+**产物命名**（`app/VERSION-NOTES.md` 里也记了一份，定了就别随手改）：
+
+| 产物 | 命名 | 例 |
+|---|---|---|
+| APK（四个组合各一份） | `SunsetLinux-<App 版本>-<变体>.apk` | `SunsetLinux-0.2.4-ubuntu-proot-dsh.apk` |
+| 离线包 | `SunsetLinux-<App 版本>-<变体>.bin` | `SunsetLinux-0.2.4-minimal.bin` |
+| KernelSU 模块 | `sunsetlinux-module-<模块版本>.zip` | `sunsetlinux-module-1.0.9.zip` |
+
+> APK 是**同一个 App**（同包名、同签名、同 versionCode），换组合 = 覆盖安装，数据不丢。
+> 本工具本地产出的中间名是 `<变体>.bin`；CI 发布前会重命名成上表的发布名
+> （Gradle 内嵌任务两种名字都认，见 `app/app/build.gradle.kts` 的 `EmbedOfflineBundle`）。
 
 > 体积是"内嵌进 APK 后 APK 的增量"（载荷就是压缩产物，不二次压缩）。
 > 上游 DSHA 的思路一致：`offline-rootfs.bin`（base+runtime）与 `dsh-runtime.bin`（dsh）分包，

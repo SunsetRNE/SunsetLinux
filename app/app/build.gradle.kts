@@ -1,9 +1,65 @@
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import java.util.Properties
+import java.util.TimeZone
+
 plugins {
     alias(libs.plugins.android.application)
     // AGP 9 起 Kotlin 支持内置，**不能**再 apply org.jetbrains.kotlin.android。
     // Compose 只需要编译器插件。
     alias(libs.plugins.kotlin.compose)
 }
+
+// ============================================================================
+// 版本与命名（每次发版只改 app/version.properties；说明写在 app/VERSION-NOTES.md）
+//
+// 这里的做法参照另一份构建笔记（Branchbase 的 docs/specs/BUILD-NOTES.md）：
+//   · 版本号放 version.properties（唯一事实源），build 脚本只读键值行；
+//   · 构建时算一个**标准版本号** = <versionName>-<yyyyMMdd-HHmm>-<7 位 git hash>，
+//     固定 Asia/Shanghai（本地与 CI 一致），注入 BuildConfig；
+//   · APK 文件名按 "产品-版本-组合" 生成 —— 四个内置组合必须能一眼分清，
+//     否则下载下来全是 app-debug.apk，用户根本不知道哪个是哪个。
+// ============================================================================
+// 版本文件放在 **Gradle 根**（app/version.properties），不是模块目录（app/app/）——
+// 所以这里显式用 rootDir 定位，别看 build 脚本的所在目录。
+val versionProps = Properties().apply {
+    File(rootDir, "version.properties").inputStream().use { load(it) }
+}
+val engineeringVersion = versionProps.getProperty("versionName").trim()
+val engineeringVersionCode = versionProps.getProperty("versionCode").trim().toInt()
+
+/** 构建时间（固定 Asia/Shanghai，避免本地与 CI 差 8 小时导致文件名对不上）。 */
+val buildTime: String = SimpleDateFormat("yyyyMMdd-HHmm", Locale.US)
+    .apply { timeZone = TimeZone.getTimeZone("Asia/Shanghai") }
+    .format(Date())
+
+/** 7 位 git hash；不在 git 仓库里（例如导出源码包）时退化为 unknown。 */
+val gitHash: String = runCatching {
+    val proc = ProcessBuilder("git", "rev-parse", "--short=7", "HEAD")
+        .directory(project.rootDir.parentFile)   // Gradle root 是 app/，仓库根在上一级
+        .redirectErrorStream(true)
+        .start()
+    val out = proc.inputStream.bufferedReader().readText().trim()
+    proc.waitFor()
+    out.ifBlank { "unknown" }
+}.getOrDefault("unknown")
+
+val standardVersion = "$engineeringVersion-$buildTime-$gitHash"
+
+/**
+ * 内置组合（与 tools/offline-bundle/variants.json 的 id 一一对应）。
+ *
+ * ★ Gradle 的 flavor 名必须是合法标识符（不能带 `-`），所以内部用驼峰、产物用带横杠的 id；
+ *   两者靠这里的映射对齐 —— 改组合只改这张表 + variants.json。
+ */
+data class EmbedFlavor(val gradleName: String, val id: String, val label: String, val parts: String)
+val embedFlavors = listOf(
+    EmbedFlavor("minimal", "minimal", "最小版", "proot"),
+    EmbedFlavor("ubuntu", "ubuntu", "Ubuntu 版", "base,runtime"),
+    EmbedFlavor("ubuntuProot", "ubuntu-proot", "免 root 版", "base,runtime,proot"),
+    EmbedFlavor("ubuntuProotDsh", "ubuntu-proot-dsh", "完整离线版", "base,runtime,proot,dsh"),
+)
 
 android {
     namespace = "io.github.sunsetrne.sunsetlinux"
@@ -13,18 +69,16 @@ android {
         applicationId = "io.github.sunsetrne.sunsetlinux"
         minSdk = 26
         targetSdk = 35
-        // 版本号规则：每次对外发布都要 +1（Android 只按 versionCode 判"这是不是新版"）。
-        // 0.2.0：内置终端、DSH 入口上顶栏、更新进侧边栏、内置官方频道。
-        // 0.2.1：部署向导缺层时会去跑 device-provision.sh（此前只调 linuxctl provision，
-        //        而那个命令**不构建层** —— 真机上向导必然以 "provision 失败" 收场）。
-        // 0.2.2：把模块版本提示从 ≥1.0.5 更正为 ≥1.0.6（1.0.5 在真机上还有两个坑：
-        //        mksh 没有 printf %q、profiles/ 没随包）。
-        // 0.2.3：修**一打开就闪退**：zstd 能力探测走 aircompressor 的 direct-ByteBuffer/Unsafe
-        //        快路径，在 Android 上 SIGSEGV（进程直接死，catch 不住）。改成流式解码。
-        // 0.2.4：root / 模块检测从"布尔"升级成"可解释状态 + 下一步"（首启引导与部署向导都显示）；
-        //        「更新」页修好了"本地版本读不出来 ⇒ 永远看不到可更新层"这个坑。
-        versionCode = 6
-        versionName = "0.2.4"
+        // 版本号来自 app/version.properties；逐版变更说明在 app/VERSION-NOTES.md
+        // （APP 名仍是 "SunsetLinux"，versionName 用标准版本号：<语义版本>-<时间>-<hash>）
+        versionCode = engineeringVersionCode
+        versionName = standardVersion
+
+        // 构建信息进 BuildConfig：界面上"关于/诊断"能直接看到，排障时不用猜是哪个包
+        buildConfigField("String", "ENGINEERING_VERSION", "\"$engineeringVersion\"")
+        buildConfigField("String", "STANDARD_VERSION", "\"$standardVersion\"")
+        buildConfigField("String", "BUILD_TIME", "\"$buildTime\"")
+        buildConfigField("String", "GIT_HASH", "\"$gitHash\"")
     }
 
     // ────────────────────────────────────────────────────────────────────────
@@ -63,6 +117,23 @@ android {
         }
     }
 
+    // ────────────────────────────────────────────────────────────────────────
+    // 四个内置组合：**同一个 App**（同 applicationId / 同签名 / 同 versionCode），
+    // 差别只在 assets/ 里内嵌哪份离线包（见 tools/offline-bundle/variants.json）。
+    // 换组合 = 覆盖安装另一个 APK，数据不丢；KernelSU 授权按【包名+签名】记，也不受影响。
+    // ────────────────────────────────────────────────────────────────────────
+    flavorDimensions += "embed"
+    productFlavors {
+        embedFlavors.forEach { f ->
+            create(f.gradleName) {
+                dimension = "embed"
+                buildConfigField("String", "EMBED_VARIANT", "\"${f.id}\"")
+                buildConfigField("String", "EMBED_LABEL", "\"${f.label}\"")
+                buildConfigField("String", "EMBED_PARTS", "\"${f.parts}\"")
+            }
+        }
+    }
+
     buildTypes {
         debug {
             // 刻意不加 applicationIdSuffix：包名必须保持 io.github.sunsetrne.sunsetlinux，
@@ -91,6 +162,11 @@ android {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
+    }
+
+    androidResources {
+        // 离线包（.bin）本身已是压缩产物，再压一遍纯属浪费构建时间（体积也不会变小）
+        noCompress += "bin"
     }
 
     lint {
@@ -137,4 +213,87 @@ tasks.withType<Test>().configureEach {
     val repoRoot = rootProject.projectDir.parentFile
     systemProperty("sunsetlinux.repo.dir", repoRoot.absolutePath)
     systemProperty("sunsetlinux.dist.dir", File(repoRoot, "dist").absolutePath)
+}
+
+// ============================================================================
+// 内嵌离线包 + APK 命名
+//
+// ★ 离线包**不入库**（`dist/` 是 gitignore 的，CI 上只有源码）：由
+//   .github/workflows/offline-bundle.yml 按组合生成、挂到 Release，构建前放到
+//   `<仓库根>/dist/bundles/` 即可被打进对应组合的 assets/。
+//   没放也不失败：那个组合退化成"未内嵌"（App 里会显示，并走频道下载）。
+//
+// ★ APK 命名必须带组合名：四个组合产出的都是同一个 App，如果不改名，
+//   下载下来全是 `app-debug.apk`，用户根本分不清哪个是哪个（AGP 默认命名就是这样）。
+//   AGP 9 已移除 `VariantOutput.outputFileName`，只能用内部实现类 VariantOutputImpl
+//   （见另一份构建笔记 Branchbase docs/specs/BUILD-NOTES.md 第一节）。
+// ============================================================================
+abstract class EmbedOfflineBundle : DefaultTask() {
+    /** 候选离线包（可能为空 = 本次没放包，那就"未内嵌"）。 */
+    @get:InputFiles
+    @get:PathSensitive(PathSensitivity.NAME_ONLY)
+    abstract val bundles: ConfigurableFileCollection
+
+    /**
+     * 期望的文件名，**两种都认**：
+     *   · `SunsetLinux-<版本>-<组合>.bin` —— 发布/下载用的正式名（见 app/VERSION-NOTES.md）
+     *   · `<组合>.bin`                     —— 打包工具 `tools/offline-bundle` 的本地产物名
+     * 这样"CI 下载回来的离线包"和"本机刚打出来的"都能直接内嵌，不用先改名。
+     */
+    @get:Input
+    abstract val wanted: Property<String>
+
+    @get:Input
+    abstract val wantedShort: Property<String>
+
+    @get:OutputDirectory
+    abstract val outputDir: DirectoryProperty
+
+    @TaskAction
+    fun embed() {
+        val out = outputDir.get().asFile
+        out.deleteRecursively()
+        out.mkdirs()
+        val hit = bundles.files.firstOrNull { it.name == wanted.get() || it.name == wantedShort.get() }
+            ?: run {
+                logger.lifecycle("未内嵌离线包（没找到 ${wanted.get()} 或 ${wantedShort.get()}）—— 该组合按「未内嵌」构建")
+                return
+            }
+        val to = File(out, ASSET_NAME)
+        hit.copyTo(to, overwrite = true)
+        logger.lifecycle("已内嵌离线包：${hit.name} → assets/$ASSET_NAME（${hit.length() / 1048576} MiB）")
+    }
+
+    companion object {
+        /** assets 里的固定名字：组合由 BuildConfig.EMBED_VARIANT 决定，文件名不必带版本。 */
+        const val ASSET_NAME = "offline-bundle.bin"
+    }
+}
+
+androidComponents {
+    onVariants { variant ->
+        val flavor = embedFlavors.firstOrNull { it.gradleName == variant.flavorName }
+        val variantId = flavor?.id ?: variant.flavorName
+
+        // ① APK 名：SunsetLinux-<版本>-<组合>.apk（debug 构建类型再带 -debug，
+        //    与 Branchbase 的产物命名规则一致）
+        val buildTypeSuffix = if (variant.buildType == "debug") "-debug" else ""
+        variant.outputs.forEach { output ->
+            (output as com.android.build.api.variant.impl.VariantOutputImpl)
+                .outputFileName.set("SunsetLinux-$engineeringVersion-$variantId$buildTypeSuffix.apk")
+        }
+
+        // ② 内嵌离线包：生成一个 assets 目录交给 AGP（不往 src/ 里写文件）
+        val taskName = "embedOfflineBundle" + variant.name.replaceFirstChar { it.uppercase() }
+        val embed = tasks.register<EmbedOfflineBundle>(taskName) {
+            group = "build"
+            description = "把 $variantId 组合的离线包内嵌进 assets/（没有则跳过）"
+            wanted.set("SunsetLinux-$engineeringVersion-$variantId.bin")
+            wantedShort.set("$variantId.bin")
+            bundles.from(
+                fileTree(File(rootDir.parentFile, "dist/bundles")) { include("*.bin") },
+            )
+        }
+        variant.sources.assets?.addGeneratedSourceDirectory(embed, EmbedOfflineBundle::outputDir)
+    }
 }

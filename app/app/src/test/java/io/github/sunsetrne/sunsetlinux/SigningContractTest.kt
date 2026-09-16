@@ -23,6 +23,9 @@ class SigningContractTest {
 
     private val repo = TestPaths.repoRoot
     private val gradle = File(repo, "app/app/build.gradle.kts")
+
+    /** 版本号的**唯一事实源**（放在 Gradle 根，不是模块目录）。 */
+    private val versionProps = File(repo, "app/version.properties")
     private val keystore = File(repo, "app/app/debug.keystore")
     private val gitignore = File(repo, ".gitignore")
 
@@ -67,12 +70,30 @@ class SigningContractTest {
 
     @Test
     fun `发布前要推进版本号`() {
-        val text = read(gradle)
+        // 版本号的唯一事实源是 app/version.properties（build.gradle.kts 只读它）——
+        // 所以这里读那份，而不是去 grep 构建脚本里的字面量。
+        val text = read(versionProps)
         val code = Regex("""versionCode\s*=\s*(\d+)""").find(text)?.groupValues?.get(1)?.toIntOrNull()
-        val name = Regex("""versionName\s*=\s*"([^"]+)"""").find(text)?.groupValues?.get(1)
-        assertTrue("解析不出 versionCode", code != null)
-        assertTrue("解析不出 versionName", name != null)
+        val name = Regex("""versionName\s*=\s*([0-9.]+)""").find(text)?.groupValues?.get(1)
+        assertTrue("解析不出 versionCode（app/version.properties）", code != null)
+        assertTrue("解析不出 versionName（app/version.properties）", name != null)
         assertTrue("versionCode 必须 ≥ 2（0.1.0/1 是首个版本，早就过时了）", (code ?: 0) >= 2)
         assertFalse("versionName 还停在 0.1.0：发布前请推进版本号", name == "0.1.0")
+
+        // 构建脚本必须**真的在读**那份文件，否则"唯一事实源"是假的（改了不生效最坑）
+        val buildText = read(gradle)
+        assertTrue(
+            "app/build.gradle.kts 必须从 version.properties 读版本",
+            buildText.contains("version.properties") && buildText.contains("engineeringVersionCode"),
+        )
+        // 四个内置组合都要建得出来
+        for (id in listOf("minimal", "ubuntu", "ubuntu-proot", "ubuntu-proot-dsh")) {
+            assertTrue("构建脚本里没有组合 $id", buildText.contains("\"$id\""))
+        }
+        // APK 名必须带组合名，否则下载下来全是 app-debug.apk，用户分不清哪个是哪个
+        assertTrue(
+            "APK 命名必须带组合名（AGP 9 只能用 VariantOutputImpl.outputFileName）",
+            buildText.contains("VariantOutputImpl") && buildText.contains("outputFileName"),
+        )
     }
 }

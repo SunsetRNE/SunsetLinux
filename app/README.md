@@ -266,3 +266,39 @@ app/src/main/java/io/github/sunsetrne/sunsetlinux/
 | **B. npm 源切换** | 设置页 `NpmSourceCard`；写入经 `linuxctl exec` 进**可写层**的 `/root/.npmrc`，另在环境根写 `etc/npmrc`；「验证」用 `npm/pnpm config get registry` 回读 | **需重启环境**才对新进程生效；运行时若要用 `NPM_CONFIG_USERCONFIG` 注入 `etc/npmrc` 需另行支持 |
 | **C. 第三方插件** | 新增「插件」tab（`PluginsPane`）；`dsh plugin --profile web add/remove`（实测该命令把参数透传给 profile 里的 pnpm），已装列表读 profile 的 `package.json` 的 `dependencies`/`bundles` | 需要环境**运行中**；安装的是第三方代码，装完需重启环境；失败时把 pnpm 原始输出全部显示出来 |
 | **D. DSH dist-tag** | 更新页通道选择器；用 npm registry 元数据把 tag 解析成版本号（含 5 分钟缓存）；选择写入 `Prefs` 与环境 `etc/config.json` 的 `dsh_dist_tag` | **运行时尚未消费 `dsh_dist_tag`**（只有 `tools/channel/gen-manifest.mjs` 会写 `dsh_npm.dist_tag`）——App 侧已能解析与展示，落地执行需运行时配合 |
+
+---
+
+## 构建踩过的坑（照 Branchbase 的 `docs/specs/BUILD-NOTES.md` 记一份，免得再翻）
+
+### 1. Kotlin 块注释**可嵌套**：注释里别出现 `/*`
+
+KDoc 里写 `dist/bundles/*.bin` 会开一个**嵌套注释**，把后面的代码整段吞掉，
+报错指向别处（例如 "Unclosed comment" 落在文件末尾，或 `project ':app' does not specify compileSdk`）。
+→ 注释里写目录就写 `dist/bundles/ 下的 *.bin`，别带那个斜杠星号。
+
+### 2. 中文测试方法名需要 UTF-8 locale
+
+形如 `` fun `发布前要推进版本号`() `` 的测试会生成 `...$发布前要推进版本号.class`。
+若 JVM 启动时 locale 不是 UTF-8（精简容器里常是 POSIX），写盘直接失败：
+
+```
+java.nio.file.InvalidPathException: Malformed input or input contains unmappable characters
+```
+
+`-Dsun.jnu.encoding=UTF-8` **覆盖不了**（它由启动时的 locale 决定），所以：
+本地跑之前 `export LANG=C.UTF-8 LC_ALL=C.UTF-8`，并 `./gradlew --stop` 重启守护进程；
+CI 里由 `ci.yml` 的 android job 显式设这两个变量。
+
+### 3. AGP 9 的 APK 改名只能用内部实现类
+
+`VariantOutput.outputFileName` 在 AGP 9 已移除，只能
+`(output as com.android.build.api.variant.impl.VariantOutputImpl).outputFileName.set(...)`。
+本项目必须改名：四个内置组合产出的是**同一个 App**，不改名就全是 `app-debug.apk`。
+
+### 4. flavor 让任务名变长
+
+四个组合（minimal / ubuntu / ubuntuProot / ubuntuProotDsh）之后：
+`testDebugUnitTest` 会变成**歧义任务**（AGP 直接报 ambiguous），要写
+`:app:testUbuntuDebugUnitTest`（代码相同，单测跑一个变体就够）；
+`assembleDebug` 不受影响（四个一起建）。

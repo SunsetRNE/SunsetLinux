@@ -73,17 +73,30 @@ jobs:
           name: apk-debug
           path: apk-artifact
 
-      - name: 把制品 APK 收进 dist/（统一命名）
+      - name: 把制品 APK 收进 dist/（四个内置组合各一份）
         run: |
           set -euo pipefail
-          SRC="apk-artifact/app-debug.apk"
-          [ -f "$SRC" ] || { echo "::error::没找到门禁上传的 APK 制品：$SRC（制品名/路径改了？同步 ci.yml 的 upload-artifact）"; exit 1; }
-          # ★ 必须自己建 dist/：这一步现在跑在 mkmodule 之前，而 dist/ 是 mkmodule 建的。
-          #   漏了这行就会 `cp: cannot create regular file 'dist/...': No such file or directory`
-          #   （实测；元凶是"复用制品"改造把这一步提到了 mkmodule 前面）。
+          # 门禁那边上传的是**四个组合**的 debug APK（minimal / ubuntu / ubuntu-proot /
+          # ubuntu-proot-dsh），文件名由 build.gradle.kts 的 androidComponents.onVariants 生成：
+          #   SunsetLinux-<版本>-<组合>-debug.apk
+          # ★ 必须自己建 dist/：这一步跑在 mkmodule 之前，而 dist/ 是 mkmodule 建的。
+          #   漏了这行会 `cp: cannot create regular file 'dist/...'`（实测踩过）。
           mkdir -p dist
-          cp -v "$SRC" dist/sunsetlinux-launcher-debug.apk
-          ( cd dist && sha256sum sunsetlinux-launcher-debug.apk > sunsetlinux-launcher-debug.apk.sha256 )
+          n=0
+          for f in apk-artifact/*.apk; do
+            [ -f "$f" ] || continue
+            cp -v "$f" dist/
+            n=$((n + 1))
+          done
+          [ "$n" -ge 1 ] || {
+            echo "::error::没收到任何 APK 制品（apk-artifact/ 是空的？同步 ci.yml 的 upload-artifact 路径）"
+            exit 1
+          }
+          # 四个组合缺一个就明确报出来（不许静默少发一个包）
+          for v in minimal ubuntu ubuntu-proot ubuntu-proot-dsh; do
+            ls dist/SunsetLinux-*-"$v"-debug.apk >/dev/null 2>&1 || echo "::warning::缺少组合 $v 的 APK（本次不发这个组合）"
+          done
+          ( cd dist && sha256sum SunsetLinux-*.apk > SHA256SUMS.apk.txt && cat SHA256SUMS.apk.txt )
 
       - name: 打包 KernelSU 模块
         run: |
@@ -158,13 +171,40 @@ jobs:
               h=hashlib.sha256(open(p,'rb').read()).hexdigest()
               files.append({"name":os.path.basename(p),"size":os.path.getsize(p),"sha256":h})
           mod=os.environ.get("MODULE_VERSION","")
+
+          # App 版本（唯一事实源：app/version.properties）
+          appver=""
+          for line in open("app/version.properties", encoding="utf-8"):
+              if line.strip().startswith("versionName="):
+                  appver=line.split("=",1)[1].strip()
+          # 四个内置组合的元数据：**从 variants.json 读**（不在工作流里再抄一份），
+          # 再和实际产出的 APK 对上 —— 下载页/App 靠它说明"这个包内嵌了什么"。
+          variants=[]
+          spec=json.load(open("tools/offline-bundle/variants.json", encoding="utf-8"))
+          for vid, v in (spec.get("variants") or {}).items():
+              apk=next((f for f in files if f["name"].endswith(f"-{vid}-debug.apk")), None)
+              variants.append({
+                  "id": vid,
+                  "label": v.get("label",""),
+                  "embed": v.get("embed", []),
+                  "note": v.get("note",""),
+                  "apk": apk["name"] if apk else None,
+                  "apk_size": apk["size"] if apk else None,
+                  "apk_sha256": apk["sha256"] if apk else None,
+                  # 离线包挂在 Release 上（不在 gh-pages），名字按约定拼
+                  "bundle": f"SunsetLinux-{appver}-{vid}.bin" if appver else None,
+              })
+
           data={
             "schema":1,
             "channel":os.environ.get("CHANNEL_DIR",""),
             "built_at":datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "commit":os.environ.get("GITHUB_SHA",""),
             "run_number":int(os.environ.get("GITHUB_RUN_NUMBER","0") or 0),
+            "app_version":appver,
+            "github_release_tag":f"v{appver}" if appver else None,
             "module_version":mod,
+            "variants":variants,
             "files":files,
           }
           json.dump(data, open(os.path.join(out,"index.json"),"w"), indent=2, ensure_ascii=False)
@@ -179,6 +219,14 @@ jobs:
       #   · /stable/ 会被 Pages 当成 index.json 返回，浏览器里是一坨 JSON
       # 所以每次发布都生成一个自包含的 index.html（内联 CSS、零外部资源、深色单色），
       # 顺手再生成一份站点根页面（只在 stable 通道生成，免得 beta 覆盖它）。
+      # 人看的下载页。为什么需要它：gh-pages 上只有 index.json / APK / 模块 zip，
+      # 没有 index.html —— 于是站点根 404、/stable/ 直接返回一坨 JSON。
+      # 所以每次发布都生成一个自包含的 index.html（内联 CSS、零外部资源、深色单色）。
+      #
+      # ★ 页面结构按"四个内置组合"重画（2026-09-16）：
+      #   四个 APK 都是同一个 App，区别只在**内嵌了什么**（proot / Ubuntu / dsh）。
+      #   以前只有一个下载按钮，用户根本不知道哪个包该下 —— 现在每个组合一张卡，
+      #   写明"内嵌什么 + 多大 + sha256"，并给出对应的离线包（.bin，挂在 Release 上）。
       - name: 生成下载页（通道页 + 站点根页）
         env:
           CHANNEL_DIR: ${{ steps.ch.outputs.dir }}
@@ -192,17 +240,33 @@ jobs:
           ch = os.environ.get("CHANNEL_DIR", "")
           label = os.environ.get("CHANNEL_LABEL", ch)
           idx = json.load(open(os.path.join(out, "index.json"), encoding="utf-8"))
+          repo = os.environ.get("GITHUB_REPOSITORY", "")
+          site = f"https://{repo.split('/')[0].lower()}.github.io/{repo.split('/')[-1]}" if repo else ""
+          rel = f"https://github.com/{repo}/releases"
+          tag = idx.get("github_release_tag") or ""
+          reltag = f"{rel}/tag/{tag}" if tag else rel
+          bundle_base = f"{rel}/download/{tag}" if tag else rel
+
+          appver = idx.get("app_version") or ""
           mod = idx.get("module_version", "")
           files = idx.get("files", [])
-          apk = next((f for f in files if f["name"].endswith(".apk")), None)
+          variants = idx.get("variants", [])
           modzip = next((f for f in files if f["name"].endswith(".zip")), None)
+          by_name = {f["name"]: f for f in files}
 
           def human(n):
-              n = float(n)
+              n = float(n or 0)
               for u in ("B", "KiB", "MiB", "GiB"):
                   if n < 1024 or u == "GiB":
                       return f"{n:.0f} {u}" if u == "B" else f"{n:.1f} {u}"
                   n /= 1024.0
+
+          PARTS_CN = {
+              "base": "Ubuntu 基础层",
+              "runtime": "运行层（Node + 工具）",
+              "dsh": "DSH 本体 + web profile",
+              "proot": "proot 运行时（免 root 用）",
+          }
 
           CSS = """
           :root{color-scheme:dark}
@@ -210,9 +274,9 @@ jobs:
           body{margin:0;background:#0A0A0A;color:#F5F5F5;
             font:-apple-system,BlinkMacSystemFont,"Noto Sans CJK SC","PingFang SC",sans-serif;
             line-height:1.6;-webkit-text-size-adjust:100%}
-          main{max-width:720px;margin:0 auto;padding:28px 20px 64px}
+          main{max-width:760px;margin:0 auto;padding:28px 20px 64px}
           h1{font-size:26px;margin:0 0 4px;letter-spacing:.5px}
-          h2{font-size:15px;margin:28px 0 10px;color:#A3A3A3;font-weight:600}
+          h2{font-size:15px;margin:30px 0 10px;color:#A3A3A3;font-weight:600}
           .sub{color:#A3A3A3;font-size:13px;margin:0 0 22px}
           .sub code{color:#F5F5F5}
           a{color:#F5F5F5}
@@ -221,6 +285,17 @@ jobs:
           .btn.primary{background:#F5F5F5;color:#000;border-color:#F5F5F5;font-weight:600}
           .btn small{display:block;font-weight:400;font-size:12px;opacity:.7;margin-top:3px}
           .btn.ghost{background:transparent;font-size:14px;padding:11px 18px}
+          .card{border:1px solid #2A2A2A;border-radius:16px;padding:16px 18px;margin:12px 0;background:#0F0F0F}
+          .card h3{margin:0 0 2px;font-size:17px}
+          .card .tagline{color:#A3A3A3;font-size:13px;margin:0 0 10px}
+          .card .kv{font-family:ui-monospace,Menlo,monospace;font-size:11px;color:#6E6E6E;
+            margin:8px 0 0;word-break:break-all}
+          .chips{margin:0 0 12px}
+          .chip{display:inline-block;border:1px solid #3D3D3D;border-radius:999px;padding:2px 9px;
+            font-size:11px;color:#A3A3A3;margin:0 6px 6px 0}
+          .card a.dl{display:inline-block;padding:10px 16px;border-radius:999px;background:#F5F5F5;
+            color:#000;font-weight:600;text-decoration:none;font-size:14px}
+          .card a.alt{display:inline-block;margin-left:10px;font-size:12px;color:#A3A3A3}
           ol{padding-left:22px;margin:0}
           li{margin:6px 0}
           table{width:100%;border-collapse:collapse;font-size:12px;font-family:ui-monospace,Menlo,monospace}
@@ -235,42 +310,40 @@ jobs:
                       "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\n"
                       f"<title>{html.escape(title)}</title><style>{CSS}</style></head><body><main>\n"
                       f"<h1>SunsetLinux</h1>\n<p class=\"sub\">{subtitle}</p>\n{body}\n"
-                      "<p class=\"note\">层镜像（base / runtime / dsh）不在这个页面 —— "
-                      "它们走频道分发：App 的「内置官方频道」，或终端里 <code>linuxctl update</code>。</p>\n"
-                      "<p class=\"note\"><a href=\"https://github.com/"
-                      + os.environ.get("GITHUB_REPOSITORY", "") + "\">仓库</a> · "
-                      "<a href=\"https://github.com/" + os.environ.get("GITHUB_REPOSITORY", "")
-                      + "/releases\">Releases 发布页</a>（同一份产物 + 发布说明） · "
-                      "本页由 CI 生成（每次发布重写），别手工改 gh-pages。</p>\n"
+                      "<p class=\"note\">层镜像（base / runtime / dsh）走频道分发：App「内置官方频道」，"
+                      "或终端里 <code>linuxctl update</code>。本页由 CI 生成（每次发布重写），别手工改 gh-pages。</p>\n"
+                      f"<p class=\"note\"><a href=\"https://github.com/{repo}\">仓库</a> · "
+                      f"<a href=\"{rel}\">Releases 发布页</a>（离线包 <code>.bin</code> 挂在那里） · "
+                      f"<a href=\"{site}/channel/channel.json\">频道清单</a></p>\n"
                       "</main></body></html>\n")
 
-          # ---- 通道页 ----
-          dl = []
-          if apk:
-              dl.append(f'<a class="btn primary" href="{html.escape(apk["name"])}">下载 App（APK）'
-                        f'<small>{human(apk["size"])} · 覆盖安装即可，数据不丢</small></a>')
-          if modzip:
-              dl.append(f'<a class="btn" href="{html.escape(modzip["name"])}">下载 KernelSU 模块'
-                        f'<small>{human(modzip["size"])} · 用 KernelSU 管理器安装，然后重启一次</small></a>')
-          # 可选产物（没有就不显示）
-          prootb = next((f for f in files if f["name"].startswith("proot-bundle")), None)
-          seed = next((f for f in files if f["name"].startswith("sunsetlinux-seed")), None)
-          if prootb:
-              dl.append(f'<a class="btn" href="{html.escape(prootb["name"])}">下载 proot 运行时（非 root 模式用）'
-                        f'<small>{human(prootb["size"])} · 解包到环境根的 proot/；没它 proot 模式起不来</small></a>')
-          if seed:
-              dl.append(f'<a class="btn" href="{html.escape(seed["name"])}">下载离线种子'
-                        f'<small>{human(seed["size"])} · 解到 /data/sunsetlinux/seeds（别放子目录）</small></a>')
-          dl.append('<a class="btn ghost" href="index.json">index.json（给脚本/机器读）</a>')
-          dl.append('<a class="btn ghost" href="https://github.com/'
-                    + os.environ.get("GITHUB_REPOSITORY", "")
-                    + '/releases">GitHub Releases 发布页（同一份产物 + 发布说明）</a>')
+          # ---- 四个内置组合 ----
+          cards = []
+          for v in variants:
+              apk = by_name.get(v.get("apk") or "")
+              chips = "".join(f'<span class="chip">{html.escape(PARTS_CN.get(p, p))}</span>' for p in v.get("embed", []))
+              if apk:
+                  dl = (f'<a class="dl" href="{html.escape(apk["name"])}">下载 APK'
+                        f'（{human(apk["size"])}）</a>')
+              else:
+                  dl = '<span class="tagline">本次没有产出这个组合</span>'
+              alt = ""
+              if v.get("bundle") and tag:
+                  alt = (f'<a class="alt" href="{html.escape(bundle_base)}/{html.escape(v["bundle"])}">'
+                         f'离线包 {html.escape(v["bundle"])}</a>')
+              sha = f'<p class="kv">sha256 {html.escape((apk or {}).get("sha256",""))}</p>' if apk else ""
+              cards.append(
+                  f'<div class="card"><h3>{html.escape(v.get("label") or v.get("id"))}</h3>'
+                  f'<p class="tagline">{html.escape(v.get("note") or "")}</p>'
+                  f'<div class="chips">{chips}</div>{dl}{alt}{sha}</div>')
 
-          steps = ("<ol><li>装上面的 APK（App）。</li>"
-                   "<li>在 KernelSU 管理器里装模块 zip，然后<b>重启一次</b>（让模块把脚本铺到 /data/sunsetlinux）。</li>"
-                   "<li>打开 App → 部署向导；或 root 终端里跑 "
-                   "<code>sh /data/adb/modules/sunsetlinux/bin/oneshot-setup.sh --run</code>。</li>"
-                   "<li>终端里 <code>linuxctl doctor</code> 可一键自检。</li></ol>")
+          # ---- 模块 ----
+          modcard = ""
+          if modzip:
+              modcard = (f'<div class="card"><h3>KernelSU 模块 {html.escape(str(mod))}</h3>'
+                         f'<p class="tagline">装完<b>重启一次</b>：模块负责开机自启与设备侧构建入口。</p>'
+                         f'<a class="dl" href="{html.escape(modzip["name"])}">下载模块 zip'
+                         f'（{human(modzip["size"])}）</a></div>')
 
           rows = "".join(
               f'<tr><td>{html.escape(f["name"])}</td><td>{human(f["size"])}</td>'
@@ -278,15 +351,22 @@ jobs:
 
           other = "beta" if ch == "stable" else "stable"
           subtitle = (f'<span class="tag">{html.escape(label)}</span> '
-                      f'模块 <code>{html.escape(str(mod))}</code> · '
+                      f'App <code>{html.escape(appver)}</code> · 模块 <code>{html.escape(str(mod))}</code> · '
                       f'commit <code>{html.escape(idx.get("commit","")[:7])}</code> · '
-                      f'构建于 {html.escape(idx.get("built_at",""))} · '
-                      f'run #{idx.get("run_number","")}')
-          body = ("<h2>下载</h2>\n" + "\n".join(dl) +
-                  "\n<h2>安装顺序</h2>\n" + steps +
+                      f'构建于 {html.escape(idx.get("built_at",""))} · run #{idx.get("run_number","")}')
+          body = ("<h2>① 装 App（四个内置组合，选一个）</h2>\n"
+                  "<p class=\"sub\">四个包是<b>同一个 App</b>（同包名、同签名）：区别只在"
+                  "<b>内嵌了什么</b>。换组合 = 覆盖安装另一个 APK，数据不丢。</p>\n"
+                  + "\n".join(cards) +
+                  "\n<h2>② 装 KernelSU 模块</h2>\n" + modcard +
+                  "\n<h2>③ 起环境</h2>\n"
+                  "<ol><li>内嵌了 Ubuntu 的包：装完 App 里点「启动环境」即可（完全离线）。</li>"
+                  "<li>最小版（只带 proot）：去 App「更新」页从官方频道装三层（约 96 MB，几分钟）；"
+                  "或下载上面卡片里的离线包 <code>.bin</code>，在 App 里导入。</li>"
+                  "<li>终端自检：<code>linuxctl doctor</code>。</li></ol>"
                   "\n<h2>文件与校验</h2>\n<table><tr><th>文件</th><th>大小</th><th>sha256</th></tr>"
-                  + rows + "</table>" +
-                  f'\n<p class="note">另一个通道：<a href="../{other}/">{other}</a></p>')
+                  + rows + "</table>"
+                  + f'\n<p class="note">另一个通道：<a href="../{other}/">{other}</a></p>')
           open(os.path.join(out, "index.html"), "w", encoding="utf-8").write(
               page(f"SunsetLinux · 下载（{ch}）", subtitle, body))
 
@@ -294,14 +374,15 @@ jobs:
           if ch == "stable":
               root = "dist/_root"
               os.makedirs(root, exist_ok=True)
+              names = "、".join(html.escape(v.get("label") or v.get("id")) for v in variants) or "四个内置组合"
               rbody = (
-                  '<a class="btn primary" href="stable/">正式版（stable）'
-                  f'<small>模块 {html.escape(str(mod))} · 当前推荐</small></a>\n'
+                  f'<a class="btn primary" href="stable/">正式版（stable）'
+                  f'<small>App {html.escape(appver)} · 模块 {html.escape(str(mod))} · 当前推荐</small></a>\n'
                   '<a class="btn" href="beta/">预发布版（beta）<small>下一版候选，可能不稳定</small></a>\n'
                   '<h2>这是什么</h2>\n'
                   '<ol><li>Android 上的真 chroot + overlayfs Ubuntu 24.04 环境，跑原生 DSH。</li>'
                   '<li>装 App + KernelSU 模块，即可在手机上得到完整的 DSH 运行环境。</li>'
-                  '<li>层镜像可增量更新；环境与 App 生命周期解耦（App 被杀不影响）。</li></ol>')
+                  f'<li>App 有四个包（{names}）：内嵌得越多，装完越不需要联网。</li></ol>')
               open(os.path.join(root, "index.html"), "w", encoding="utf-8").write(
                   page("SunsetLinux · 下载", "Android 上的原生 DSH 运行环境", rbody))
           print("已生成 dist/_publish/index.html" + (" 与 dist/_root/index.html" if ch == "stable" else ""))
