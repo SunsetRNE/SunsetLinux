@@ -480,21 +480,33 @@ chmod +x "$FB/dump.erofs"
 LD="$TMP/doctor-layer-env"
 mkdir -p "$LD/run" "$LD/etc" "$LD/layers"
 dd if=/dev/zero of="$LD/layers/dsh-9.9.9.erofs" bs=512 count=4 2>/dev/null
-awk 'BEGIN{printf "%c%c%c%c", 226, 225, 245, 224}' \
+# ⚠️ 这里**不能**用 `awk 'BEGIN{printf "%c", 226}'`：gawk 在 UTF-8 locale 下会把 226
+# 当成码位 U+00E2 编成**两个字节**（0xC3 0xA2），写出来的 erofs magic 是错的 →
+# 假层被判成 unknown → 本组断言在 CI（gawk + C.UTF-8）上红，而本地（mawk + POSIX）绿。
+# `printf '%b' '\342...'` 在 bash / mksh / dash 下都按八进制写出**单字节**。
+printf '%b' '\342\341\365\340' \
     | dd of="$LD/layers/dsh-9.9.9.erofs" bs=1 seek=1024 conv=notrunc 2>/dev/null
 # runtime 层也要造一份：pnpm 的检查是查 runtime 层的 /opt/node/bin/pnpm
 cp "$LD/layers/dsh-9.9.9.erofs" "$LD/layers/runtime-9.9.9.erofs"
 printf '{"schema":1,"layers":{"dsh":{"version":"9.9.9"},"runtime":{"version":"9.9.9"}}}\n' > "$LD/etc/state.json"
 djson2="$(PATH="$FB:$PATH" LINUX_HOME="$LD" "$SH_BIN" "$SELF_DIR/doctor.sh" 2>/dev/null | tail -n1 || true)"
+# 失败时把"我们看到的层长什么样"一起带进断言消息：CI 的步骤日志要仓库权限才看得到，
+# 而 `::error::` 注释（tools/ci-shell-gate.sh 会生成）只带 FAIL 那一行 —— 所以消息本身
+# 必须自足（magic 是多少、用哪个 dump.erofs、f 层解析成了什么）。
+_ldiag="magic=$(dd if="$LD/layers/dsh-9.9.9.erofs" bs=1 skip=1024 count=4 2>/dev/null | od -An -tx1 | tr -d ' \n')"
+_ldiag="$_ldiag size=$(wc -c < "$LD/layers/dsh-9.9.9.erofs" 2>/dev/null | tr -d ' ')"
+_ldiag="$_ldiag dump=$(PATH="$FB:$PATH" command -v dump.erofs 2>/dev/null)"
+_ldiag="$_ldiag profile=$(printf '%s' "$djson2" | grep -o '"id":"profile"[^}]*}' | head -1)"
+_ldiag="$_ldiag pnpm=$(printf '%s' "$djson2" | grep -o '"id":"pnpm"[^}]*}' | head -1)"
 case "$djson2" in
     *'"id":"profile","detail":"in-layer"'*) ok "层内有 profile 时给出 in-layer（不再被不递归的列表骗成 fail）" ;;
-    *'"id":"profile","detail":"layer-missing-profile"'*) bad "假阴性未修：层里明明有 profile 却报 layer-missing-profile" ;;
-    *) bad "profile 检查没有给出可判定结论：$(printf '%s' "$djson2" | head -c 140)" ;;
+    *'"id":"profile","detail":"layer-missing-profile"'*) bad "假阴性未修：层里明明有 profile 却报 layer-missing-profile（$_ldiag）" ;;
+    *) bad "profile 检查没有给出可判定结论（$_ldiag）" ;;
 esac
 case "$djson2" in
     *'"id":"pnpm","detail":"in-layer"'*|*'"id":"pnpm","detail":"found"'*) ok "runtime 层内 pnpm 可判定（in-layer / found）" ;;
-    *'"id":"pnpm","detail":"missing"'*) bad "假阴性未修：runtime 层里明明有 pnpm 却报 missing（对着路径问就不会错）" ;;
-    *) bad "pnpm 检查没有给出可判定结论：$(printf '%s' "$djson2" | head -c 140)" ;;
+    *'"id":"pnpm","detail":"missing"'*) bad "假阴性未修：runtime 层里明明有 pnpm 却报 missing（$_ldiag）" ;;
+    *) bad "pnpm 检查没有给出可判定结论（$_ldiag）" ;;
 esac
 # 反例：路径真的不在时，必须仍然是 fail（不能为了"不误报"把检查做成永远通过）
 printf '%s\n' '#!/bin/sh' 'echo "<E> erofs: read inode failed @ x"' > "$FB/dump.erofs"
@@ -502,7 +514,7 @@ chmod +x "$FB/dump.erofs"
 djson3="$(PATH="$FB:$PATH" LINUX_HOME="$LD" "$SH_BIN" "$SELF_DIR/doctor.sh" 2>/dev/null | tail -n1 || true)"
 case "$djson3" in
     *'"id":"profile","detail":"layer-missing-profile"'*) ok "层内确实没有 profile 时仍报 fail（检查没有被"修"成永远通过）" ;;
-    *) bad "反例不对：路径不在时应当 fail，实际：$(printf '%s' "$djson3" | head -c 140)" ;;
+    *) bad "反例不对：路径不在时应当 fail，实际（$_ldiag）：$(printf '%s' "$djson3" | head -c 120)" ;;
 esac
 
 # ---------------------------------------------------------------------------

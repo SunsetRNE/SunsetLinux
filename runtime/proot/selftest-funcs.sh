@@ -431,7 +431,11 @@ EOS
 IMG_OK="$TMP/base-24.04.3-l1.erofs"
 IMG_BAD="$TMP/base-broken.erofs"
 dd if=/dev/zero of="$IMG_OK" bs=512 count=4 2>/dev/null
-awk 'BEGIN{printf "%c%c%c%c", 226, 225, 245, 224}' | dd of="$IMG_OK" bs=1 seek=1024 conv=notrunc 2>/dev/null
+# ⚠️ 这里**不能**用 `awk 'BEGIN{printf "%c", 226}'`：gawk 在 UTF-8 locale 下会把 226
+# 当成码位 U+00E2 编成**两个字节**（0xC3 0xA2），写出来的 erofs magic 是错的 →
+# 假层被判成 unknown → 本组断言在 CI（gawk + C.UTF-8）上红，而本地（mawk + POSIX）绿。
+# `printf '%b' '\342...'` 在 bash / mksh / dash 下都按八进制写出**单字节**。
+printf '%b' '\342\341\365\340' | dd of="$IMG_OK" bs=1 seek=1024 conv=notrunc 2>/dev/null
 dd if=/dev/zero of="$IMG_BAD" bs=512 count=4 2>/dev/null
 
 CALLS="$TMP/erofs-calls"; : > "$CALLS"
