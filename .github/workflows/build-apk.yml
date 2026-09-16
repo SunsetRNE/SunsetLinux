@@ -1,0 +1,172 @@
+# ============================================================================
+# 构建**单个**内嵌组合的 APK（可复用工作流，被 pipeline.yml 以矩阵方式调用）
+#
+# 为什么单独抽一个文件：KSU 的 build-manager 那种形状 —— **环境准备一次、编译节点并行**。
+# 以前四个组合挤在 ci.yml 的一个 job 里顺序构建（约 4 分钟），现在一个组合一个节点。
+#
+# 它做的与 ci.yml 的 android job 相同的准备（JDK / SDK / NDK / 签名密钥 / Gradle 缓存），
+# 差别只有三点：
+#   · 只构建**一个**组合（Gradle 任务由 inputs.gradle_task 指定）
+#   · 内嵌离线包来自 pipeline 的 bundles 节点（artifact），不再自己去频道拉
+#   · 模块 zip 来自 pipeline 的 prep 节点（artifact）—— 它必须**先于** Gradle 存在
+#
+# ⚠️ 与 ci.yml 的 android job 有重复的准备步骤：那份是"独立门禁"（PR / 手动跑全量），
+#    这份是"流水线里的单组合节点"。改 NDK 版本 / SDK 包 / 签名逻辑时**两处都要改**
+#    （两处各自都有同样的一段注释在提醒）。
+# ============================================================================
+name: 构建单个 APK（可复用）
+
+on:
+  workflow_call:
+    inputs:
+      variant:
+        description: '组合 id（tools/offline-bundle/variants.json 的键）'
+        type: string
+        required: true
+      gradle_task:
+        description: 'Gradle 任务后缀，如 MinimalDebug / UbuntuProotDshDebug'
+        type: string
+        required: true
+      bundles_available:
+        description: '本次运行是否产出了内嵌离线包（false 时跳过取包，APK 只是不带环境）'
+        type: boolean
+        default: true
+
+jobs:
+  build:
+    name: 编译 ${{ inputs.variant }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v4
+        with:
+          # ★ 不要用它的默认值（`tools platform-tools`）：`tools` 包**已经从 Google 的
+          #   SDK 仓库移除**，sdkmanager 会报 "Failed to find package 'tools'" 并以 1 退出
+          #   —— 实测就是这样把 CI 卡死的（动作本身没坏，是默认包列表过时了）。
+          #   只装确实需要的：platform-tools + 我们的 compileSdk(35) 平台。
+          #   build-tools 交给 AGP 按需下载（licenses 已由本动作接受）。
+          packages: 'platform-tools platforms;android-35'
+          # 接受许可证但**不要把它们打印出来**：默认会把 6 段许可证全文刷进日志
+          # （实测一次几千行），把真正有用的构建输出淹掉。
+          accept-android-sdk-licenses: true
+          log-accepted-android-sdk-licenses: false
+
+      # Gradle 缓存：首次跑要下 Gradle 发行包 + 全部依赖（实测 2m40s 里大半花在这），
+      # 缓存后通常 1 分钟内。key 跟着构建脚本/版本目录变，不会用错缓存。
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('app/**/*.gradle*', 'app/gradle/libs.versions.toml', 'app/gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: gradle-${{ runner.os }}-
+
+      - name: 关掉 Gradle 守护进程（CI 上没必要常驻）
+        run: echo "org.gradle.daemon=false" >> app/gradle.properties
+
+      # 签名：**默认用仓库里那把固定的调试密钥**（app/app/debug.keystore），所以本步可以什么都不做
+      # —— 关键在于"永远不要落到 runner 自己新生成的 ~/.android/debug.keystore"，
+      # 否则每次发布签名都不同：用户装新版报 INSTALL_FAILED_UPDATE_INCOMPATIBLE，
+      # 且 KernelSU 已授予的 root 授权（按包名+签名记录）全部作废。
+      # 配了 Secret 就用私有发布密钥（更安全）；⚠️ 换密钥那次用户必须卸载重装一次。
+      # 终端用的原生 PTY（src/main/cpp/pty.c）需要 NDK 来编：
+      # 我们不走 AGP 的 externalNativeBuild（官方 NDK 只有 x86_64 宿主工具链，
+      # 而 aarch64 环境上那个 clang 跑不了），由 tools/ndk-build-pty.sh 自己驱动。
+      - name: 安装 NDK（编译终端用的原生 PTY）
+        run: |
+          set -euo pipefail
+          yes | sdkmanager --licenses >/dev/null 2>&1 || true
+          sdkmanager --install "ndk;26.1.10909125" >/dev/null
+          echo "NDK 就绪：$ANDROID_SDK_ROOT/ndk/26.1.10909125"
+
+      - name: 准备签名密钥（有 Secret 用发布密钥，否则用仓库内固定调试密钥）
+        env:
+          KS_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KS_PASS: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KS_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KS_KEYPASS: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -n "${KS_B64:-}" ]; then
+            printf '%s' "$KS_B64" | base64 -d > "$RUNNER_TEMP/release.keystore"
+            {
+              echo "SUNSETLINUX_KEYSTORE=$RUNNER_TEMP/release.keystore"
+              echo "SUNSETLINUX_KEYSTORE_PASSWORD=$KS_PASS"
+              echo "SUNSETLINUX_KEY_ALIAS=$KS_ALIAS"
+              echo "SUNSETLINUX_KEY_PASSWORD=$KS_KEYPASS"
+            } >> "$GITHUB_ENV"
+            echo "签名：使用 Secret 提供的**发布密钥**"
+          else
+            echo "签名：未配置 ANDROID_KEYSTORE_BASE64 → 使用仓库内固定的调试密钥" >> "$GITHUB_STEP_SUMMARY"
+            echo "签名：未配置 ANDROID_KEYSTORE_BASE64 → 使用仓库内固定的调试密钥（app/app/debug.keystore，签名稳定、可覆盖安装）"
+          fi
+
+      # ── 内嵌离线包（仅发布路径）────────────────────────────────────────────
+      # 四个组合的 APK 要真的自带环境，就得在**构建前**把离线包放进 dist/bundles/。
+      # 离线包从**签名频道清单**拉层再打包（与 offline-bundle.yml 同一套工具），
+      # 所以 CI 打出来的 APK 与用户从频道装到的层**必然同源**。
+      # 任何一步失败都只是"本次不内嵌"（警告 + 继续），绝不让发布因为网络问题失败。
+      # 模块 zip（prep 产出）与内嵌离线包（bundles 产出）都来自**同一个 run 的制品**：
+      # 前者必须先进 dist/ 才会被 SyncBundledModule 内嵌（首启引导的「一键刷入」靠它），
+      # 后者进 dist/bundles/ 才会被 EmbedOfflineBundle 打进对应组合。
+      - name: 取回模块 zip（prep）
+        uses: actions/download-artifact@v4
+        with:
+          name: module-zip
+          path: dist
+
+      - name: 取回内嵌离线包（bundles）
+        if: ${{ inputs.bundles_available }}
+        uses: actions/download-artifact@v4
+        with:
+          name: offline-bundles
+          path: dist/bundles
+
+      - name: 构建该组合（${{ inputs.variant }}）
+        working-directory: app
+        env:
+          # 单测里有中文方法名，JVM 用 sun.jnu.encoding 决定写 .class 时的编码，
+          # 而它由**启动时的 locale** 决定（-D 覆盖不了）→ 固定 C.UTF-8。
+          LANG: C.UTF-8
+          LC_ALL: C.UTF-8
+        run: ./gradlew --no-daemon :app:assemble${{ inputs.gradle_task }}
+
+      - name: 断言 — APK 内含原生 PTY（终端底座）
+        run: |
+          set -euo pipefail
+          tools/ndk-build-pty.sh --check
+          fail=0
+          for apk in $(find app/app/build/outputs/apk -name '*.apk'); do
+            if unzip -l "$apk" | grep -q 'lib/arm64-v8a/libsunsetlinux_pty.so'; then
+              echo "✓ $(basename "$apk") 带 libsunsetlinux_pty.so"
+            else
+              echo "::error::$apk 缺少 libsunsetlinux_pty.so —— 终端会退回行缓冲（Ctrl-C/vim 不可用）"
+              fail=1
+            fi
+          done
+          exit $fail
+
+      # 内嵌不完整就不要发：App 的首启引导第 2 步是「一键刷入内置模块」，
+      # 它读的正是 assets/module/。缺了它，用户看到的按钮点了只会提示"未内嵌"。
+      - name: 断言 — 这个 APK 内嵌了模块包（一键刷入靠它）
+        run: |
+          set -euo pipefail
+          apk="$(find app/app/build/outputs/apk -name '*.apk' | head -1)"
+          [ -n "$apk" ] || { echo "::error::${{ inputs.variant }} 没有产出 APK"; exit 1; }
+          unzip -l "$apk" | grep -q 'assets/module/sunsetlinux-module.zip' || {
+            echo "::error title=APK 没内嵌模块包::$apk 缺少 assets/module/sunsetlinux-module.zip —— 检查 prep 的模块 zip 制品是否取到"; exit 1; }
+          echo "✓ $(basename "$apk")：$(unzip -p "$apk" assets/module/module.json | tr -d '\n')"
+
+      - name: 上传 ${{ inputs.variant }} 的 APK
+        uses: actions/upload-artifact@v4
+        with:
+          # 每个组合一个制品名：merge 节点按 pattern 全取（一个 run 内制品名不能重复）
+          name: apk-${{ inputs.variant }}
+          path: app/app/build/outputs/apk
+          retention-days: 7

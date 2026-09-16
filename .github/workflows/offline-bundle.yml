@@ -18,15 +18,24 @@
 name: 内置离线包
 
 on:
-  push:
-    paths:
-      - 'tools/offline-bundle/**'
-      - '.github/workflows/offline-bundle.yml'
-      # ★ 发新版本也要重跑：离线包的**发布名带 App 版本**
-      #   （`SunsetLinux-<App 版本>-<组合>.bin`），版本一改，上一版的 .bin 名字就对不上
-      #   这一版的 Release 了（0.2.5 → 0.2.6 实际发生过：Release 上只有 APK，没有 .bin）。
-      - 'app/version.properties'
+  # 由 pipeline.yml 的「② 内嵌离线包」节点调用（同一个 run 里，APK 编译等它产出）。
+  # 也可以手动跑（排障 / 单独重建离线包）。
+  #
+  # ⚠️ 这里**不再**监听 push：以前它和 release.yml 并行跑，靠"等 6 分钟看 Release 出现"
+  #    来对齐（offline-bundle 要挂到 Release 上，而 Release 是 release.yml 建的）。
+  #    现在顺序由流水线的 needs 保证 —— 见 pipeline.yml 的 ②→③→⑤。
+  workflow_call:
+    inputs:
+      attach_release:
+        description: '是否把 .bin 挂到 Release（流水线里传 false：由 ⑤ publish 统一挂）'
+        type: boolean
+        default: true
   workflow_dispatch:
+    inputs:
+      attach_release:
+        description: '是否把 .bin 挂到 Release（Release 还不存在时会等 6 分钟）'
+        type: boolean
+        default: true
 
 permissions:
   contents: write          # 把产物挂到 Release 上
@@ -161,6 +170,7 @@ jobs:
           retention-days: 14
 
       - name: 挂到 Release（v<App 版本>）
+        if: ${{ inputs.attach_release != false }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |

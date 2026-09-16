@@ -48,6 +48,13 @@ on:
         description: '把离线包内嵌进四个组合的 APK（发布时用）'
         type: boolean
         default: false
+      # build_apks：**独立门禁**自己把四个组合都编出来（PR / 手动跑时用）。
+      #   流水线（pipeline.yml）里 APK 由**矩阵节点**并行产出，本门禁只要断言与单测
+      #   → 那边传 false，避免同一批 APK 被编两遍。
+      build_apks:
+        description: '是否在本门禁里构建四个组合的 APK（流水线里由编译矩阵负责，传 false）'
+        type: boolean
+        default: true
 
 # 同一分支的旧运行排队（不取消）：本门禁会被 release.yml 复用，
 # "取消进行中的运行"分不清"这是新推送的独立跑"还是"发布流程正在等的门禁"。
@@ -305,6 +312,7 @@ jobs:
       #   「一键刷入内置模块」只会看到"这个 APK 没有内嵌模块包"（本机自测有、
       #   官方包没有，属于最坏的一类不一致）。
       - name: 打包模块 zip（供 APK 内嵌）
+        if: ${{ inputs.build_apks != false }}
         run: |
           set -euo pipefail
           command -v zip >/dev/null 2>&1 || sudo apt-get install -y -qq zip
@@ -324,7 +332,15 @@ jobs:
         # ★ 四个内置组合（flavor）是同一份代码，单测只需跑一个变体 ——
         #   跑 `testDebugUnitTest` 会变成歧义任务（AGP 直接报 ambiguous），
         #   跑全部四个变体则白等 4 倍时间。assembleDebug 仍然四个全建。
-        run: ./gradlew --no-daemon :app:assembleDebug :app:testUbuntuDebugUnitTest
+        run: |
+          set -euo pipefail
+          if [ "${{ inputs.build_apks }}" = "false" ]; then
+            echo "· 流水线模式：APK 由编译矩阵并行产出，这里只跑单测"
+            ./gradlew --no-daemon :app:testUbuntuDebugUnitTest
+          else
+            echo "· 独立门禁模式：四个组合一起编 + 单测"
+            ./gradlew --no-daemon :app:assembleDebug :app:testUbuntuDebugUnitTest
+          fi
 
       - name: 单测结果摘要
         # 只在构建**真的跑过**时才当"必须有用例"来判定：前面某步先失败时构建会被跳过，
@@ -350,6 +366,7 @@ jobs:
       # ③ APK 带许可原文、关于页有 attribution
       # 终端不能用"静默降级"糊过去：APK 里必须真的带上 PTY .so
       - name: 断言 — APK 内含原生 PTY（终端底座）
+        if: ${{ inputs.build_apks != false }}
         run: |
           set -euo pipefail
           tools/ndk-build-pty.sh --check
@@ -367,6 +384,7 @@ jobs:
       # 内嵌不完整就不要发：App 的首启引导第 2 步是「一键刷入内置模块」，
       # 它读的正是 assets/module/。缺了它，用户看到的按钮点了只会提示"未内嵌"。
       - name: 断言 — APK 内含内置模块包（一键刷入靠它）
+        if: ${{ inputs.build_apks != false }}
         run: |
           set -euo pipefail
           fail=0
@@ -382,11 +400,11 @@ jobs:
           unzip -p "$(find app/app/build/outputs/apk -name '*minimal*.apk' | head -1)" assets/module/module.json
 
       - name: 断言 — proroot 许可合规（不得独立分发；APK 内必须完整）
+        if: ${{ always() && inputs.build_apks != false && steps.android.conclusion == 'success' }}
         run: node tools/proroot/compliance-test.mjs
-        if: always() && steps.android.conclusion == 'success'
 
       - name: 上传 APK 制品（供发布线路复用）
-        if: steps.android.conclusion == 'success'
+        if: ${{ inputs.build_apks != false && steps.android.conclusion == 'success' }}
         uses: actions/upload-artifact@v4
         with:
           name: apk-debug

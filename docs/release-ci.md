@@ -74,7 +74,44 @@ https://<用户名>.github.io/<仓库名>/stable/channel.json
 
 ---
 
-## 二·五、拓扑：**四条线路 + 多节点并行**
+## 二·五、拓扑：**一条流水线到底 + 两条独立线路**
+
+```
+pipeline.yml（推 main/beta 时**只有它跑**）           ← 2026-09-16 起
+  ① prep      环境准备：版本 / 由 variants.json 生成编译矩阵 / 打模块 zip ──▶ 制品 module-zip
+  ② bundles   环境准备：内嵌离线包（四个组合各一份 .bin）──────────────▶ 制品 offline-bundles
+  ③ build     编译矩阵（四节点并行，每节点一个组合）──uses──▶ build-apk.yml ──▶ 制品 apk-<组合>
+  ④ gates     回归门禁（shell/node/android 三节点并行）──uses──▶ ci.yml（build_apks=false）
+  ⑤ publish   合并 → index.json → 下载页 → gh-pages → Release ──uses──▶ publish.yml
+  ⑥ channel   频道发布：channel 分支的签名清单 ——验签——▶ gh-pages /channel/
+  ⑦ report    汇总（哪一节点红、红在哪条断言）
+
+独立线路（不随每次推送跑）：
+  layers.yml（手动，arm64 自建 runner）        构建三层 erofs + gen/sign 频道清单
+  layers-release.yml（layers 分支）            只"收集 + 上传"层产物到 Release
+  channel.yml（channel 分支 / 手动）           私钥签名 + 公钥独立验签 + 发 /channel/
+```
+
+**为什么改成一条**（都是这次真踩到的）：
+
+| 问题 | 以前（三条线靠**时间**对齐） | 现在（靠 `needs`） |
+|---|---|---|
+| 离线包挂 Release | `offline-bundle.yml` 与 `release.yml` 并行跑，前者**等 6 分钟**看 Release 出现没有，等不到就静默不挂（0.2.5 真发生过） | ⑤ publish 统一建 Release + 收 `dist/bundles/*.bin` 一起挂，顺序由 `needs` 保证 |
+| 模块 zip 内嵌 | 模块 zip 是**构建 APK 之后**才打的 → 官方 APK 里没有 `assets/module/`（0.2.12 真发生过，用户点「一键刷入内置模块」看到"未内嵌"） | ① prep 先打模块 zip，③ 每个编译节点都取回来再构建 |
+| APK 编译 | 一个 job 里**顺序**编四个组合（约 4 分钟） | 四个节点**并行**，单组合红不影响其它组合出包 |
+| 发布逻辑 | 内联在 `release.yml` 里，无法复用 | 搬到 `publish.yml`（可复用），`pipeline.yml` 与手动兜底的 `release.yml` 共用同一份 |
+| push 双发 | 推 main/beta 会同时跑 `ci.yml`(经 release) 与 `release.yml` | `release.yml`/`ci.yml`/`offline-bundle.yml` 都**不再监听 push**（保留手动/可复用） |
+
+> ⚠️ 制品契约：编译矩阵每个组合上传 `apk-<组合 id>`，`publish.yml` 用
+> `pattern: apk-*` + `merge-multiple` 收（这样 `ci.yml` 独立门禁的单个 `apk-debug`
+> 也照样能被它收）。改制品名时两边必须同步。
+>
+> ⚠️ 手动兜底：`release.yml`（workflow_dispatch）走的是同一批可复用工作流；
+> 只想重发不重编就直接手动跑 `publish.yml`。
+
+---
+
+## 二·六、旧拓扑（2026-09-16 之前，保留作对照）
 
 ```
 线路① 回归门禁 ci.yml          每条推送/PR，三个 job 并行（各占一个 runner）

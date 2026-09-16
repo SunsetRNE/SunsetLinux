@@ -1,0 +1,579 @@
+# ============================================================================
+# 发布（**可复用工作流**：收集产物 → index.json → 下载页 → gh-pages → Release）
+#
+# 谁调它：
+#   · pipeline.yml   —— 每次推 main/beta 的**唯一**发布路径（prep → 矩阵编译 → 门禁 → 本文件）
+#   · release.yml    —— 手动兜底（workflow_dispatch），出问题时可以单独重发一次
+#
+# 它做四件事（都在一个 job 里，写 gh-pages 的操作必须串行 —— 见 concurrency）：
+#   ① 收集本轮构建产物（APK / 模块 zip / 内嵌离线包 .bin）到 dist/_publish/
+#   ② 生成 index.json（App 的「更新」页与下载页都读它）
+#   ③ 推 gh-pages 的 /stable/ 或 /beta/（+ 站点根页，仅 stable）
+#   ④ 建/更新 GitHub Release（仅 stable；beta 只更新 gh-pages 目录）
+#
+# 输入：
+#   channel: auto | stable | beta   —— auto 时按调用方分支判断（main→stable、beta→beta）
+#
+# ⚠️ 本文件是从 release.yml 的 publish job **原样搬过来的**（注释与踩坑记录都保留）。
+#    搬动的原因见 docs/release-ci.md：以前"门禁在 ci.yml、发布在 release.yml、
+#    离线包在 offline-bundle.yml"三条线并行靠**时间**对齐（离线包那步要等 6 分钟
+#    看 Release 出现），现在改成一条流水线靠 **needs** 对齐。
+# ============================================================================
+name: 发布（可复用）
+
+on:
+  workflow_call:
+    inputs:
+      channel:
+        description: '发布通道：auto（按分支）/ stable / beta'
+        type: string
+        default: auto
+  # 手动兜底：只重发一次（不重新编译），用于"构建产物已经在了、只是发布那步失败"
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: '发布通道'
+        type: choice
+        options: [auto, stable, beta]
+        default: auto
+
+# 与 channel.yml 共用同一个组：都会写 gh-pages。放在 **工作流级**，
+# 这样连"收集 + 生成 index"都在队列里，不会两个通道同时改 gh-pages。
+concurrency:
+  group: gh-pages
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    needs: gate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write            # 需要推 gh-pages 分支
+    # ★ 与 channel.yml 共用同一个组：都会写 gh-pages。放在 **job 级**，
+    #   这样两个分支的门禁可以并行验证，只有"真正写 gh-pages"这一步需要排队。
+    concurrency:
+      group: gh-pages
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 确定发布通道（beta / stable）
+        id: ch
+        env:
+          # workflow_call 时 inputs.channel 来自调用方；workflow_dispatch 时来自人工选择。
+          # auto = 按**调用方分支**判断（main→stable，beta→beta），与以前一致。
+          WANT: ${{ inputs.channel || 'auto' }}
+        run: |
+          want="${WANT:-auto}"
+          if [ "$want" = "auto" ]; then
+            case "${{ github.ref_name }}" in
+              beta) want=beta ;;
+              *)    want=stable ;;
+            esac
+          fi
+          case "$want" in
+            beta)  echo "dir=beta"   >> "$GITHUB_OUTPUT"; echo "label=预发布（beta）"  >> "$GITHUB_OUTPUT" ;;
+            stable) echo "dir=stable" >> "$GITHUB_OUTPUT"; echo "label=正式（stable）" >> "$GITHUB_OUTPUT" ;;
+            *) echo "::error::未知通道：$want（只支持 auto/stable/beta）"; exit 2 ;;
+          esac
+
+      # ★ 不再重编 APK：门禁那个 job 已经编过并把产物上传成制品 `apk-debug`。
+      #   这里只下载，省掉一次完整 Gradle 构建（实测约 2m40s）。
+      - name: 取回门禁构建好的 APK（制品）
+        uses: actions/download-artifact@v4
+        with:
+          # ★ 用 **pattern** 而不是固定名字：APK 可能来自两个不同的生产者 ——
+          #   · pipeline.yml 的编译矩阵：每个组合一个制品（apk-minimal / apk-ubuntu / …）
+          #   · ci.yml 的独立门禁  ：一个制品装四个组合（apk-debug）
+          #   pattern 两种都覆盖，且 merge-multiple 会把它们解到同一个 apk-artifact/ 下
+          #   （下面那段"制品不是平铺的"注释说的层级问题依然成立，所以还是递归找）。
+          pattern: apk-*
+          merge-multiple: true
+          path: apk-artifact
+
+      # 内嵌离线包（pipeline 的 ② 节点产出）。**允许没有**：手动重发时可能只重跑发布，
+      # 那时制品不在 → continue-on-error，收集那步会按"可选产物"处理。
+      - name: 取回内嵌离线包（有就随 Release 一起发）
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: offline-bundles
+          path: dist/bundles
+
+      - name: 把制品 APK 收进 dist/（四个内置组合各一份）
+        run: |
+          set -euo pipefail
+          # 门禁那边上传的是**四个组合**的 debug APK（minimal / ubuntu / ubuntu-proot /
+          # ubuntu-proot-dsh），文件名由 build.gradle.kts 的 androidComponents.onVariants 生成：
+          #   SunsetLinux-<版本>-<组合>-debug.apk
+          # ★ 必须自己建 dist/：这一步跑在 mkmodule 之前，而 dist/ 是 mkmodule 建的。
+          #   漏了这行会 `cp: cannot create regular file 'dist/...'`（实测踩过）。
+          mkdir -p dist
+          # ⚠️ 制品解出来**不是平铺的**：upload-artifact 会保留"相对公共祖先"的目录结构，
+          #    我们上传的是 app/app/build/outputs/apk/*/debug/*.apk → 解出来是
+          #    apk-artifact/<组合>/debug/*.apk。实测就是这么踩的：通配 apk-artifact/*.apk
+          #    一个都没匹配到，直接报"没收到任何 APK 制品"（而制品其实有 46 MB）。
+          #    所以这里递归找，别写死层级。
+          n=0
+          while IFS= read -r f; do
+            [ -f "$f" ] || continue
+            cp -v "$f" dist/
+            n=$((n + 1))
+          done < <(find apk-artifact -type f -name '*.apk' | sort)
+          [ "$n" -ge 1 ] || {
+            echo "::error::没收到任何 APK 制品（apk-artifact/ 下没有 .apk；同步 ci.yml 的 upload-artifact 路径？）"
+            exit 1
+          }
+          # 四个组合缺一个就明确报出来（不许静默少发一个包）
+          for v in minimal ubuntu ubuntu-proot ubuntu-proot-dsh; do
+            ls dist/SunsetLinux-*-"$v"-debug.apk >/dev/null 2>&1 \
+              || echo "::warning::缺少组合 $v 的 APK（本次不发这个组合）"
+          done
+          ( cd dist && sha256sum SunsetLinux-*.apk > SHA256SUMS.apk.txt && cat SHA256SUMS.apk.txt )
+
+      - name: 打包 KernelSU 模块
+        run: |
+          # 版本取 module.prop 里的 version=，构建号用 run_number 便于区分
+          V="$(sed -n 's/^version=//p' module/module.prop | head -n1)"
+          [ -n "$V" ] || { echo "module.prop 里没有 version="; exit 1; }
+          # 产物名统一为 <product>-<组件>-<版本>：去掉 module.prop 里那个 `v` 前缀
+          # （module.prop 自己保留 v1.0.0 没关系，WebUI 会把 v1.0.0 与 1.0.0 视为一致）
+          VER="${V#v}"
+          bash module/mkmodule.sh --version "$VER"
+          echo "MODULE_VERSION=$VER" >> "$GITHUB_ENV"
+
+      - name: 收集产物 + 生成 index.json
+        run: |
+          set -euo pipefail
+          OUT="dist/_publish"
+          rm -rf "$OUT"; mkdir -p "$OUT"
+          # 先明确检查要发布的东西在不在：直接 cp 通配符失败时报的是
+          # `cp: cannot stat 'dist/*.apk'`，很难看出缺的是哪一环（实测踩过两次：
+          # 一次是 APK 没收进 dist、一次是 dist 目录都还没建）。
+          for pat in 'dist/*.apk' 'dist/*module*.zip'; do
+            # shellcheck disable=SC2086
+            ls $pat >/dev/null 2>&1 || { echo "::error::没有匹配 $pat 的产物，发布中止"; exit 1; }
+          done
+          cp -v dist/*.apk "$OUT"/
+          cp -v dist/*module*.zip "$OUT"/
+          cp -v dist/*module*.zip.sha256 "$OUT"/ 2>/dev/null || true
+
+          # 内嵌离线包（.bin / .json）：pipeline 的 bundles 节点产出后会落到 dist/bundles/。
+          # ★ 必须挂进同一个 Release：index.json 里每个变体的 `bundle` 名字对应
+          #   `releases/download/<tag>/SunsetLinux-<ver>-<id>.bin`，缺了它下载页上的
+          #   "内嵌包"链接会 404（以前由 offline-bundle.yml 自己等 Release 出现再挂，
+          #   现在改成同一条流水线里由 needs 保证顺序）。
+          for pat in 'dist/bundles/*.bin' 'dist/bundles/*.json'; do
+            # shellcheck disable=SC2086
+            ls $pat >/dev/null 2>&1 && cp -v $pat "$OUT"/ || true
+          done
+
+          # 可选产物（有就发，没有不算发布失败）：
+          #   · proot 运行时 bundle（~1 MiB）—— **非 root 模式没有它就根本起不来**，
+          #     而 App 至今没随包带它、也没有下载路径（doctor 里那句"App 应随包携带"一直是空的）。
+          #   · 离线种子（~59 MiB）—— 只有构建过才有；proot 模式的 provision 需要它。
+          #
+          # ⚠️ **CI 目前不会产出这两样**（dist/ 是 gitignore 的，runner 上只有源码）——
+          #    所以这一步只在"本地构建过、且把 dist/ 一起带上来"时才有东西可发。
+          #    没有就**明确说出来**，别让它悄悄什么都不做（本项目的规矩：不制造文档/实现漂移）。
+          #    要让它真正产出，下一步：CI 里从 Debian 的 proot arm64 deb 重建 bundle
+          #    （命令已验证可复现：curl deb → dpkg-deb -x → mkproot-bundle.sh --arch arm64；
+          #     跨架构 runner 上需要跳过"运行 --version"那步自检）。
+          found_bundle=0
+          found_seed=0
+          for pat in 'dist/proot-bundle-*.tar.gz' 'dist/proot-bundle-*.tar.gz.sha256'; do
+            # shellcheck disable=SC2086
+            if ls $pat >/dev/null 2>&1; then cp -v $pat "$OUT"/; found_bundle=1; fi
+          done
+          for pat in 'dist/sunsetlinux-seed-*.tar.zst' 'dist/sunsetlinux-seed-*.tar.zst.sha256'; do
+            # shellcheck disable=SC2086
+            if ls $pat >/dev/null 2>&1; then cp -v $pat "$OUT"/; found_seed=1; fi
+          done
+          {
+            echo "### 可选产物"
+            echo ""
+            if [ "$found_bundle" -eq 1 ]; then
+              echo "- ✅ proot 运行时 bundle：已随本次发布"
+            else
+              echo "- ⚠️ **本次没有 proot 运行时 bundle**（CI 还不产出它）：非 root 模式的用户拿不到运行时。"
+              echo "  重建命令见 \`docs/STATUS.md\` §3.11 / \`runtime/proot/README.md\` §2.2"
+            fi
+            if [ "$found_seed" -eq 1 ]; then
+              echo "- ✅ 离线种子：已随本次发布"
+            else
+              echo "- ⚠️ 本次没有离线种子（它只在本地构建过 \`tools/seed\` 时存在）"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          python3 - <<'PY'
+          import json, hashlib, os, glob, datetime, subprocess
+          out="dist/_publish"
+          files=[]
+          for p in sorted(glob.glob(os.path.join(out,"*"))):
+              if p.endswith(".json"): continue
+              h=hashlib.sha256(open(p,'rb').read()).hexdigest()
+              files.append({"name":os.path.basename(p),"size":os.path.getsize(p),"sha256":h})
+          mod=os.environ.get("MODULE_VERSION","")
+          repo=os.environ.get("GITHUB_REPOSITORY","")   # apk_url 要用（APK 挂在 Release 上）
+
+          # App 版本（唯一事实源：app/version.properties）
+          appver=""
+          for line in open("app/version.properties", encoding="utf-8"):
+              if line.strip().startswith("versionName="):
+                  appver=line.split("=",1)[1].strip()
+          # 四个内置组合的元数据：**从 variants.json 读**（不在工作流里再抄一份），
+          # 再和实际产出的 APK 对上 —— 下载页/App 靠它说明"这个包内嵌了什么"。
+          variants=[]
+          spec=json.load(open("tools/offline-bundle/variants.json", encoding="utf-8"))
+          for vid, v in (spec.get("variants") or {}).items():
+              apk=next((f for f in files if f["name"].endswith(f"-{vid}-debug.apk")), None)
+              variants.append({
+                  "id": vid,
+                  "label": v.get("label",""),
+                  "embed": v.get("embed", []),
+                  "note": v.get("note",""),
+                  "apk": apk["name"] if apk else None,
+                  # ★ APK 挂在 Release 上（不是 gh-pages）：内嵌离线包后单文件可到 114 MB，
+                  #   超过 git/Pages 的 100 MB 限制。下载页与 App 都用这个绝对地址。
+                  "apk_url": (f"https://github.com/{repo}/releases/download/v{appver}/{apk['name']}"
+                              if (apk and appver) else None),
+                  "apk_size": apk["size"] if apk else None,
+                  "apk_sha256": apk["sha256"] if apk else None,
+                  # 离线包挂在 Release 上（不在 gh-pages），名字按约定拼
+                  "bundle": f"SunsetLinux-{appver}-{vid}.bin" if appver else None,
+              })
+
+          data={
+            "schema":1,
+            "channel":os.environ.get("CHANNEL_DIR",""),
+            "built_at":datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "commit":os.environ.get("GITHUB_SHA",""),
+            "run_number":int(os.environ.get("GITHUB_RUN_NUMBER","0") or 0),
+            "app_version":appver,
+            "github_release_tag":f"v{appver}" if appver else None,
+            "module_version":mod,
+            "variants":variants,
+            "files":files,
+          }
+          json.dump(data, open(os.path.join(out,"index.json"),"w"), indent=2, ensure_ascii=False)
+          print(json.dumps(data, indent=2, ensure_ascii=False))
+          PY
+        env:
+          CHANNEL_DIR: ${{ steps.ch.outputs.dir }}
+
+      # 人看的下载页。为什么需要它：gh-pages 上只有 index.json / APK / 模块 zip，
+      # 没有 index.html —— 于是：
+      #   · 站点根 https://<owner>.github.io/<repo>/ 直接 404（用户第一反应就是点这里）
+      #   · /stable/ 会被 Pages 当成 index.json 返回，浏览器里是一坨 JSON
+      # 所以每次发布都生成一个自包含的 index.html（内联 CSS、零外部资源、深色单色），
+      # 顺手再生成一份站点根页面（只在 stable 通道生成，免得 beta 覆盖它）。
+      # 人看的下载页。为什么需要它：gh-pages 上只有 index.json / APK / 模块 zip，
+      # 没有 index.html —— 于是站点根 404、/stable/ 直接返回一坨 JSON。
+      # 所以每次发布都生成一个自包含的 index.html（内联 CSS、零外部资源、深色单色）。
+      #
+      # ★ 页面结构按"四个内置组合"重画（2026-09-16）：
+      #   四个 APK 都是同一个 App，区别只在**内嵌了什么**（proot / Ubuntu / dsh）。
+      #   以前只有一个下载按钮，用户根本不知道哪个包该下 —— 现在每个组合一张卡，
+      #   写明"内嵌什么 + 多大 + sha256"，并给出对应的离线包（.bin，挂在 Release 上）。
+      - name: 生成下载页（通道页 + 站点根页）
+        env:
+          CHANNEL_DIR: ${{ steps.ch.outputs.dir }}
+          CHANNEL_LABEL: ${{ steps.ch.outputs.label }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, html
+
+          out = "dist/_publish"
+          ch = os.environ.get("CHANNEL_DIR", "")
+          label = os.environ.get("CHANNEL_LABEL", ch)
+          idx = json.load(open(os.path.join(out, "index.json"), encoding="utf-8"))
+          repo = os.environ.get("GITHUB_REPOSITORY", "")
+          site = f"https://{repo.split('/')[0].lower()}.github.io/{repo.split('/')[-1]}" if repo else ""
+          rel = f"https://github.com/{repo}/releases"
+          tag = idx.get("github_release_tag") or ""
+          reltag = f"{rel}/tag/{tag}" if tag else rel
+          bundle_base = f"{rel}/download/{tag}" if tag else rel
+
+          appver = idx.get("app_version") or ""
+          mod = idx.get("module_version", "")
+          files = idx.get("files", [])
+          variants = idx.get("variants", [])
+          modzip = next((f for f in files if f["name"].endswith(".zip")), None)
+          by_name = {f["name"]: f for f in files}
+
+          def human(n):
+              n = float(n or 0)
+              for u in ("B", "KiB", "MiB", "GiB"):
+                  if n < 1024 or u == "GiB":
+                      return f"{n:.0f} {u}" if u == "B" else f"{n:.1f} {u}"
+                  n /= 1024.0
+
+          PARTS_CN = {
+              "base": "Ubuntu 基础层",
+              "runtime": "运行层（Node + 工具）",
+              "dsh": "DSH 本体 + web profile",
+              "proot": "proot 运行时（免 root 用）",
+          }
+
+          CSS = """
+          :root{color-scheme:dark}
+          *{box-sizing:border-box}
+          body{margin:0;background:#0A0A0A;color:#F5F5F5;
+            font:-apple-system,BlinkMacSystemFont,"Noto Sans CJK SC","PingFang SC",sans-serif;
+            line-height:1.6;-webkit-text-size-adjust:100%}
+          main{max-width:760px;margin:0 auto;padding:28px 20px 64px}
+          h1{font-size:26px;margin:0 0 4px;letter-spacing:.5px}
+          h2{font-size:15px;margin:30px 0 10px;color:#A3A3A3;font-weight:600}
+          .sub{color:#A3A3A3;font-size:13px;margin:0 0 22px}
+          .sub code{color:#F5F5F5}
+          a{color:#F5F5F5}
+          .btn{display:block;padding:15px 18px;margin:10px 0;border:1px solid #3D3D3D;border-radius:16px;
+            background:#141414;text-decoration:none;font-size:16px}
+          .btn.primary{background:#F5F5F5;color:#000;border-color:#F5F5F5;font-weight:600}
+          .btn small{display:block;font-weight:400;font-size:12px;opacity:.7;margin-top:3px}
+          .btn.ghost{background:transparent;font-size:14px;padding:11px 18px}
+          .card{border:1px solid #2A2A2A;border-radius:16px;padding:16px 18px;margin:12px 0;background:#0F0F0F}
+          .card h3{margin:0 0 2px;font-size:17px}
+          .card .tagline{color:#A3A3A3;font-size:13px;margin:0 0 10px}
+          .card .kv{font-family:ui-monospace,Menlo,monospace;font-size:11px;color:#6E6E6E;
+            margin:8px 0 0;word-break:break-all}
+          .chips{margin:0 0 12px}
+          .chip{display:inline-block;border:1px solid #3D3D3D;border-radius:999px;padding:2px 9px;
+            font-size:11px;color:#A3A3A3;margin:0 6px 6px 0}
+          .card a.dl{display:inline-block;padding:10px 16px;border-radius:999px;background:#F5F5F5;
+            color:#000;font-weight:600;text-decoration:none;font-size:14px}
+          .card a.alt{display:inline-block;margin-left:10px;font-size:12px;color:#A3A3A3}
+          ol{padding-left:22px;margin:0}
+          li{margin:6px 0}
+          table{width:100%;border-collapse:collapse;font-size:12px;font-family:ui-monospace,Menlo,monospace}
+          th,td{text-align:left;padding:7px 6px;border-bottom:1px solid #2A2A2A;word-break:break-all}
+          th{color:#6E6E6E;font-weight:500}
+          .note{color:#6E6E6E;font-size:12px;margin-top:18px}
+          .tag{display:inline-block;border:1px solid #3D3D3D;border-radius:999px;padding:2px 10px;font-size:12px;color:#A3A3A3}
+          """
+
+          def page(title, subtitle, body):
+              return ("<!doctype html>\n<html lang=\"zh-CN\"><head><meta charset=\"utf-8\">\n"
+                      "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\n"
+                      f"<title>{html.escape(title)}</title><style>{CSS}</style></head><body><main>\n"
+                      f"<h1>SunsetLinux</h1>\n<p class=\"sub\">{subtitle}</p>\n{body}\n"
+                      "<p class=\"note\">层镜像（base / runtime / dsh）走频道分发：App「内置官方频道」，"
+                      "或终端里 <code>linuxctl update</code>。本页由 CI 生成（每次发布重写），别手工改 gh-pages。</p>\n"
+                      f"<p class=\"note\"><a href=\"https://github.com/{repo}\">仓库</a> · "
+                      f"<a href=\"{rel}\">Releases 发布页</a>（离线包 <code>.bin</code> 挂在那里） · "
+                      f"<a href=\"{site}/channel/channel.json\">频道清单</a></p>\n"
+                      "</main></body></html>\n")
+
+          # ---- 四个内置组合 ----
+          cards = []
+          for v in variants:
+              apk = by_name.get(v.get("apk") or "")
+              chips = "".join(f'<span class="chip">{html.escape(PARTS_CN.get(p, p))}</span>' for p in v.get("embed", []))
+              apk_href = v.get("apk_url") or (apk or {}).get("name") or ""
+              if apk:
+                  dl = (f'<a class="dl" href="{html.escape(apk_href)}">下载 APK'
+                        f'（{human(apk["size"])}）</a>')
+              else:
+                  dl = '<span class="tagline">本次没有产出这个组合</span>'
+              alt = ""
+              if v.get("bundle") and tag:
+                  alt = (f'<a class="alt" href="{html.escape(bundle_base)}/{html.escape(v["bundle"])}">'
+                         f'离线包 {html.escape(v["bundle"])}</a>')
+              sha = f'<p class="kv">sha256 {html.escape((apk or {}).get("sha256",""))}</p>' if apk else ""
+              cards.append(
+                  f'<div class="card"><h3>{html.escape(v.get("label") or v.get("id"))}</h3>'
+                  f'<p class="tagline">{html.escape(v.get("note") or "")}</p>'
+                  f'<div class="chips">{chips}</div>{dl}{alt}{sha}</div>')
+
+          # ---- 模块 ----
+          modcard = ""
+          if modzip:
+              modcard = (f'<div class="card"><h3>KernelSU 模块 {html.escape(str(mod))}</h3>'
+                         f'<p class="tagline">装完<b>重启一次</b>：模块负责开机自启与设备侧构建入口。</p>'
+                         f'<a class="dl" href="{html.escape(modzip["name"])}">下载模块 zip'
+                         f'（{human(modzip["size"])}）</a></div>')
+
+          rows = "".join(
+              f'<tr><td>{html.escape(f["name"])}</td><td>{human(f["size"])}</td>'
+              f'<td>{html.escape(f["sha256"])}</td></tr>' for f in files)
+
+          other = "beta" if ch == "stable" else "stable"
+          subtitle = (f'<span class="tag">{html.escape(label)}</span> '
+                      f'App <code>{html.escape(appver)}</code> · 模块 <code>{html.escape(str(mod))}</code> · '
+                      f'commit <code>{html.escape(idx.get("commit","")[:7])}</code> · '
+                      f'构建于 {html.escape(idx.get("built_at",""))} · run #{idx.get("run_number","")}')
+          body = ("<h2>① 装 App（四个内置组合，选一个）</h2>\n"
+                  "<p class=\"sub\">四个包是<b>同一个 App</b>（同包名、同签名）：区别只在"
+                  "<b>内嵌了什么</b>。换组合 = 覆盖安装另一个 APK，数据不丢。</p>\n"
+                  "<p class=\"sub\">APK 放在 <b>GitHub Releases</b>（内嵌环境后单文件可到 114 MB，"
+                  "超过 Pages 的 100 MB 上限）；模块 zip 与 index.json 仍在站内。</p>\n"
+                  + "\n".join(cards) +
+                  "\n<h2>② 装 KernelSU 模块</h2>\n" + modcard +
+                  "\n<h2>③ 起环境</h2>\n"
+                  "<ol><li>内嵌了 Ubuntu 的包：装完 App 里点「启动环境」即可（完全离线）。</li>"
+                  "<li>最小版（只带 proot）：去 App「更新」页从官方频道装三层（约 96 MB，几分钟）；"
+                  "或下载上面卡片里的离线包 <code>.bin</code>，在 App 里导入。</li>"
+                  "<li>终端自检：<code>linuxctl doctor</code>。</li></ol>"
+                  "\n<h2>文件与校验</h2>\n<table><tr><th>文件</th><th>大小</th><th>sha256</th></tr>"
+                  + rows + "</table>"
+                  + f'\n<p class="note">另一个通道：<a href="../{other}/">{other}</a></p>')
+          open(os.path.join(out, "index.html"), "w", encoding="utf-8").write(
+              page(f"SunsetLinux · 下载（{ch}）", subtitle, body))
+
+          # ---- 站点根页（只在 stable 生成；beta 发布不碰它，免得来回覆盖）----
+          if ch == "stable":
+              root = "dist/_root"
+              os.makedirs(root, exist_ok=True)
+              names = "、".join(html.escape(v.get("label") or v.get("id")) for v in variants) or "四个内置组合"
+              rbody = (
+                  f'<a class="btn primary" href="stable/">正式版（stable）'
+                  f'<small>App {html.escape(appver)} · 模块 {html.escape(str(mod))} · 当前推荐</small></a>\n'
+                  '<a class="btn" href="beta/">预发布版（beta）<small>下一版候选，可能不稳定</small></a>\n'
+                  '<h2>这是什么</h2>\n'
+                  '<ol><li>Android 上的真 chroot + overlayfs Ubuntu 24.04 环境，跑原生 DSH。</li>'
+                  '<li>装 App + KernelSU 模块，即可在手机上得到完整的 DSH 运行环境。</li>'
+                  f'<li>App 有四个包（{names}）：内嵌得越多，装完越不需要联网（APK 在 Releases 页）。</li></ol>')
+              open(os.path.join(root, "index.html"), "w", encoding="utf-8").write(
+                  page("SunsetLinux · 下载", "Android 上的原生 DSH 运行环境", rbody))
+          print("已生成 dist/_publish/index.html" + (" 与 dist/_root/index.html" if ch == "stable" else ""))
+          PY
+
+      - name: 发布到 gh-pages 的对应目录
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: dist/_publish
+          destination_dir: ${{ steps.ch.outputs.dir }}
+          keep_files: true          # ★ 关键：不要抹掉另一个通道的目录
+          # ★ APK **不走 gh-pages**，只挂 Release：内嵌离线包之后
+          #   ubuntu-proot-dsh 那份有 114 MB —— 超过 git 单文件 100 MB 硬限，
+          #   往 gh-pages 分支推会直接失败（而且 Pages 站点还有 1 GB 上限）。
+          #   Release 资产没有这些限制，下载地址也能跨域名（App/CLI 都跟 302）。
+          exclude_assets: '*.apk'
+
+      # 站点根页：destination_dir 留空 = gh-pages 根目录。keep_files: true 只增不删，
+      # 所以 /stable/ 与 /beta/ 不受影响（发布通道那一步已经在用同一个机制）。
+      # 只在 stable 跑，避免 beta 发布把根页的"当前推荐版本"覆盖成 beta 的。
+      - name: 发布站点根页（仅 stable）
+        if: steps.ch.outputs.dir == 'stable'
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: dist/_root
+          keep_files: true
+
+      # ── GitHub Releases：给"人看的发布页"（与 gh-pages 双发布，产物是同一份）────
+      #   ★ 两类 tag 分工不同，别混：
+      #     · `v<App 版本>`（例 v0.2.4）= **产品发布**（本步骤），资产 = APK / 模块 zip / index.json
+      #     · `layers-<日期>`            = **层的纯存储**（layers-release.yml），资产 = .erofs.zst/.gz
+      #   同一版本重复发布是**幂等**的（Release 在就覆盖资产 + 刷新说明），
+      #   所以"只升模块版本"的推送不会把 Releases 页刷成一堆重复条目。
+      #   只在 stable 跑：beta 是"下一版候选"，看 /beta/ 就够，不该往 Releases 页塞预发布。
+      - name: 发布到 GitHub Releases（仅 stable）
+        if: steps.ch.outputs.dir == 'stable'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          OUT="dist/_publish"
+          # App 版本从 app/version.properties 读（唯一事实源；构建脚本只读它，不在这里再抄一份）
+          APP_VER="$(sed -n 's/^versionName=//p' app/version.properties | head -n1 | tr -d '[:space:]')"
+          [ -n "$APP_VER" ] || { echo "::error::读不出 app/version.properties 的 versionName（发布中止）"; exit 1; }
+          TAG="v$APP_VER"
+          TITLE="SunsetLinux $APP_VER（模块 $MODULE_VERSION）"
+          REPO="${{ github.repository }}"
+          OWNER_LC="$(printf '%s' "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
+          SITE="https://${OWNER_LC}.github.io/${GITHUB_REPOSITORY#*/}"
+
+          {
+            echo "Android 上的原生 DSH 运行环境：真 chroot + overlayfs 的 Ubuntu 24.04，跑原生 DSH。"
+            echo ""
+            echo "| 组件 | 版本 | 说明 |"
+            echo "|---|---|---|"
+            echo "| App（APK） | \`$APP_VER\` | 覆盖安装即可，数据不丢；签名固定（debug 密钥随仓库提交） |"
+            echo "| KernelSU 模块 | \`$MODULE_VERSION\` | 用 KernelSU 管理器安装，装完**重启一次** |"
+            echo ""
+            echo "### 安装顺序"
+            echo ""
+            echo "1. 装 \`sunsetlinux-launcher-debug.apk\`（App）。"
+            echo "2. KernelSU 管理器里装 \`sunsetlinux-module-$MODULE_VERSION.zip\`，然后**重启一次**。"
+            echo "3. **层镜像**（base / runtime / dsh）不用自己构建："
+            echo "   打开 App →「更新」页 → 官方频道 → 一键安装（App 自己解 zstd，约 96 MB，几分钟）；"
+            echo "   或从终端按 [Releases \`layers-*\`](https://github.com/$REPO/releases) 里的 gzip 产物手装。"
+            echo "4. 启动环境：App 首页点「启动环境」，或 \`/data/sunsetlinux/bin/linuxctl start\`。"
+            echo ""
+            echo "### 产物与校验"
+            echo ""
+            echo "| 文件 | 大小 | sha256 |"
+            echo "|---|---|---|"
+            for f in "$OUT"/*; do
+              [ -f "$f" ] || continue
+              n="$(basename "$f")"
+              sz="$(stat -c '%s' "$f" 2>/dev/null || echo 0)"
+              sha="$(sha256sum "$f" | awk '{print $1}')"
+              echo "| \`$n\` | $sz | \`$sha\` |"
+            done
+            echo ""
+            echo "### 其他入口"
+            echo ""
+            echo "- 下载页（同一条通道，含历史说明）：$SITE/stable/"
+            echo "- 签名频道清单（App 内置频道读它）：$SITE/channel/channel.json"
+            echo "- 层镜像存储（\`layers-*\` tag）：https://github.com/$REPO/releases"
+            echo ""
+            echo "_本说明由 CI 生成（每次发布重写）；commit \`${{ github.sha }}\`，run #${{ github.run_number }}。_"
+          } > dist/_release-notes.md
+
+          # 资产清单：`dist/_publish/` 里除下载页 HTML 之外的全部（index.html 是给 Pages 的，
+          # 挂到 Release 上只会让人困惑；下面那句 delete-asset 是给老 Release 清历史的）
+          ASSETS=""
+          for f in "$OUT"/*; do
+            [ -f "$f" ] || continue
+            case "$(basename "$f")" in index.html) continue ;; esac
+            ASSETS="$ASSETS $f"
+          done
+          if [ -z "${ASSETS# }" ]; then echo "::error::没有可发布的资产（dist/_publish 是空的？）"; exit 1; fi
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG 已存在 → 覆盖资产 + 刷新说明（幂等，不新建条目）"
+            # shellcheck disable=SC2086
+            gh release upload "$TAG" $ASSETS --clobber
+            gh release edit "$TAG" --title "$TITLE" --notes-file dist/_release-notes.md
+            # 清历史遗留资产名（换命名后它们不该继续出现在 Release 上，否则用户会下错）
+            for legacy in index.html sunsetlinux-launcher-debug.apk \
+                          minimal.bin minimal.json ubuntu.bin ubuntu.json \
+                          ubuntu-proot.bin ubuntu-proot.json \
+                          ubuntu-proot-dsh.bin ubuntu-proot-dsh.json; do
+              gh release delete-asset "$TAG" "$legacy" --yes >/dev/null 2>&1 || true
+            done
+          else
+            echo "新建 Release $TAG"
+            # shellcheck disable=SC2086
+            gh release create "$TAG" --title "$TITLE" --notes-file dist/_release-notes.md $ASSETS
+          fi
+          echo "- Release：https://github.com/$REPO/releases/tag/$TAG" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 输出下载地址
+        run: |
+          SITE="https://${{ github.repository_owner }}.github.io/${{ github.repository }}"
+          DIR="${{ steps.ch.outputs.dir }}"
+          {
+            echo "### ${{ steps.ch.outputs.label }} 已发布"
+            echo ""
+            echo "- 目录：\`$DIR/\`"
+            echo "- 索引：$SITE/$DIR/index.json"
+            echo "- 模块版本：\`$MODULE_VERSION\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+# ---------------------------------------------------------------------------
+# 三层镜像 / 签名频道：**不在本工作流里**
+#
+# 原因：三层两式约 150 MB，且构建需要 arm64 + 真 chroot（runner 是 x86-64，要 qemu）。
+# 每次推送都重建既慢又浪费，而且层的日常增量本来就由频道机制承担
+# （用户升级只下变化的层，如 dsh 层约 31 MB）。
+#
+# 做法：在有 arm64 的机器（或本机）执行 `rootfs/build-layers.sh`，
+# 再 `sunsetlinux-channel gen-manifest → sign`，把 channel.json / .sig 与层文件
+# 手动放到 gh-pages 的同一目录下即可。签名私钥只应存在于你的离线备份与
+# 仓库 Secret `CHANNEL_SIGNING_KEY`，**绝不提交**。
+# ---------------------------------------------------------------------------
