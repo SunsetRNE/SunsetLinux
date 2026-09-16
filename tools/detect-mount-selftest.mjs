@@ -16,6 +16,7 @@
  *   · 没给时只认 `/data/adb/modules[._update]/sunsetlinux`（真有 module.prop 才算），
  *     **绝不用 cwd 猜**；两条都不成立 → `module_needs_mount` 返回 2（未知），
  *     JSON 里是 `null`、报告里写"未知" —— 不硬断言。
+ *   · 上下文不可信（看不到 /data/adb）时整项**不适用**，同样不下结论。
  *
  * 用法：node tools/detect-mount-selftest.mjs
  * 退出码：0 通过；1 违例。
@@ -35,17 +36,35 @@ let fail = 0;
 const ok = (m) => { pass++; console.log(`  \x1b[32mok\x1b[0m   ${m}`); };
 const bad = (m) => { fail++; console.log(`  \x1b[31mFAIL\x1b[0m ${m}`); };
 
+const tmp = mkdtempSync(join(tmpdir(), 'sunsetlinux-detect-'));
+
+/**
+ * 假的 Android 侧结构：/data/adb/{ksu,modules}。
+ * 脚本的上下文守卫要求 `$ADB_DIR` 与 `$PROBE_MODULES_DIR` 都存在，否则它会（正确地）
+ * 判为"不适用"、不再对"是否需要挂载"下结论 —— CI runner 上没有 /data/adb，
+ * 不造假结构的话那几条断言就全成了"测不到"（第一次推上去就是这么红的）。
+ */
+const FAKE_ADB = join(tmp, 'adb');
+mkdirSync(join(FAKE_ADB, 'ksu'), { recursive: true });
+mkdirSync(join(FAKE_ADB, 'modules'), { recursive: true });
+
 /** 按 doctor 的方式跑探测（子 shell + source），返回解析后的 JSON。 */
-function probe({ cwd, moduleRoot }) {
-  const script = '. "$1"; detect_mount_json';
+function probe({ cwd, moduleRoot, trusted = true }) {
   const env = { ...process.env };
   if (moduleRoot) env.MODULE_ROOT = moduleRoot;
   else delete env.MODULE_ROOT;
-  const out = execFileSync('sh', ['-c', script, '_', DETECT], { cwd, env, encoding: 'utf8' });
+  env.ADB_DIR = trusted ? FAKE_ADB : join(tmp, 'no-such-adb');
+  env.PROBE_MODULES_DIR = trusted
+    ? join(FAKE_ADB, 'modules')
+    : join(tmp, 'no-such-adb', 'modules');
+  const out = execFileSync('sh', ['-c', '. "$1"; detect_mount_json', '_', DETECT], {
+    cwd,
+    env,
+    encoding: 'utf8',
+  });
   return JSON.parse(out.trim().split('\n').pop());
 }
 
-const tmp = mkdtempSync(join(tmpdir(), 'sunsetlinux-detect-'));
 try {
   // ① 事故复现：cwd 里有 system/，但没给 MODULE_ROOT → **不得**报 true
   const cwdWithSystem = join(tmp, 'cwd-with-system');
@@ -84,11 +103,27 @@ try {
   // ⑤ 报告文字也要跟着三态走（未知时不能写"是"）
   const report = execFileSync('sh', ['-c', '. "$1"; detect_mount_report', '_', DETECT], {
     cwd: cwdWithSystem,
-    env: { ...process.env, MODULE_ROOT: '' },
+    env: {
+      ...process.env,
+      MODULE_ROOT: '',
+      ADB_DIR: FAKE_ADB,
+      PROBE_MODULES_DIR: join(FAKE_ADB, 'modules'),
+    },
     encoding: 'utf8',
   });
   if (/本模块是否需要挂载: 未知/.test(report)) ok('报告在未知时写"未知"（不再硬断言"是"）');
   else bad(`报告文案不对：\n${report.split('\n').filter((l) => l.includes('是否需要挂载')).join('\n')}`);
+
+  // ⑥ 上下文不可信（看不到 /data/adb）：必须"不适用"，且不对是否需要挂载下结论
+  const e = probe({ cwd: tmp, trusted: false });
+  if ((e.applicable === false || e.trusted === false) && e.module_needs_mount == null) {
+    ok('看不到 /data/adb 时判为不适用，且不硬断言需要挂载（CI runner 上就是这种环境）');
+  } else {
+    bad(
+      `不可信上下文处理不对：applicable=${e.applicable} trusted=${e.trusted} ` +
+      `needs=${JSON.stringify(e.module_needs_mount)}`,
+    );
+  }
 } finally {
   rmSync(tmp, { recursive: true, force: true });
 }
