@@ -6,8 +6,10 @@
 # 做基本校验并给用户明确提示。
 #
 # **本脚本刻意不做的事**：
-#   - 不自动 provision（首次部署涉及 mount/chroot，耗时且要联网，必须由用户在
-#     root 终端显式执行 device-provision.sh，或由 App 的 ProvisionActivity 触发）
+#   - 不在这里 provision（安装阶段没有 /data 完整就绪的保证，且要跑十几分钟到半小时，
+#     装着"卡住"体验极差）。首次部署有两条路，都写在安装输出里：
+#       ① **装完重启**：模块 service.sh 在 late_start 自己建层（零点击，1.0.9 起）；
+#       ② 手动跑 device-provision.sh（想自己盯着进度时用）
 #   - 不修改 SELinux 策略（需要时见同目录 sepolicy.rule 的说明）
 #   - 不删除 /data/sunsetlinux（那是用户数据，卸载也不删，见 uninstall.sh）
 #
@@ -73,29 +75,39 @@ else
   ui_print "- 已存在，保留现有内容（幂等）"
 fi
 
-# --- 3) 首次部署提示 ---------------------------------------------------------
+# --- 3) 首次部署提示（★ 这一段是用户读得最多的地方：先把**推荐路径**说清楚）----
+#
+# 顺序上刻意"先重启、后手动"：1.0.9 起模块会在开机时自己建层，用户什么都不用做；
+# 把半小时的手动命令放前面，只会让人以为必须手动跑（真机反馈）。
+# 历史上这里还踩过两个坑，都写进注释防止回退：
+#   · ui_print 的双引号串里**不能**再出现 ASCII 双引号 —— 会把句子截断，
+#     后半句被当真命令执行（真机上就是"只在没有任何"后面没了）；
+#   · 命令一律写 /system/bin/sh：裸 `sh` 在模块环境里可能是 busybox ash。
 if [ ! -f "$LINUX_HOME/layers/dsh.erofs" ] && [ ! -f "$LINUX_HOME/layers/dsh.squashfs" ]; then
+  VER="$(sed -n 's/^version=//p' "$MODDIR/module.prop" 2>/dev/null | head -n1)"
   ui_print ""
   ui_print "****************************************"
-  ui_print " 还需要做一次「首次部署」（provision）"
+  ui_print "  首次部署：装完**重启一次**就行"
   ui_print "****************************************"
-  ui_print " 请在自己的 root 终端执行（KernelSU 管理器 / MT 管理器「以 root 执行」/ adb shell su）："
+  ui_print " 重启后模块会在开机时自己把环境建出来（零点击，不需要你敲任何命令）："
+  ui_print "   Ubuntu base → Node + pnpm → DSH 三层只读镜像 + 可写层（约十几分钟到半小时，"
+  ui_print "   日志：$LINUX_HOME/run/provision.log；期间可以正常用手机）。"
   ui_print ""
-  ui_print "   /system/bin/sh $MODDIR/bin/device-provision.sh --seeds $LINUX_HOME/seeds"
+  ui_print " 两条可选的加速/排查路径："
+  ui_print "   · 想自己盯着进度，就在 root 终端跑（KernelSU 管理器 / MT 管理器「以 root 执行」）："
+  ui_print "       /system/bin/sh $MODDIR/bin/device-provision.sh --seeds $LINUX_HOME/seeds"
+  ui_print "   · 想在装完就用：打开 SunsetLinux App →「部署向导」，或直接在「更新」页"
+  ui_print "     从频道装预构建的层（最快，不用在手机上编译）。"
   ui_print ""
-  ui_print " ★ 不需要 bash、也不需要 Termux：1.0.6 起 device-provision.sh 是 mksh 原生的，"
-  ui_print "   设备自带的 sh 直接跑（1.0.5 及更早会在这里要求 bash —— 而 Android 根本没带 bash），"
-  ui_print "   并且 profiles/ 随包携带（1.0.5 漏打包，设备侧构建会退化成空壳）。"
+  ui_print " ★ 为什么写 /system/bin/sh 而不是 sh：Android 上 sh 可能解析到 busybox 的 ash，"
+  ui_print "   而设备侧脚本是按 mksh（/system/bin/sh）写的。"
+  ui_print " ★ profiles/ 随包携带（1.0.6 起），所以设备侧构建不会退化成空壳。"
   ui_print ""
-  ui_print " ★ 更省事：**装完重启就行** —— 模块会在开机时自己建层（零点击，"
-  ui_print "   只在"没有任何 base 层"时触发，且每个模块安装只尝试一次，不会反复重跑）。"
-  ui_print ""
-  ui_print " 它会原生完成：Ubuntu base → Node+pnpm → DSH 三层镜像 + 可写层。"
-  ui_print " 也可以打开 SunsetLinux App 用「首次部署向导」触发同一脚本。"
-  ui_print ""
-  ui_print " 部署完成后："
+  ui_print " 部署完成后（也可以只看 App 的状态卡）："
   ui_print "   /system/bin/sh $LINUX_HOME/bin/linuxctl.sh status    # 看 JSON 状态"
   ui_print "   /system/bin/sh $LINUX_HOME/bin/linuxctl.sh start     # 手动启动（开机也会自动启）"
+  ui_print ""
+  [ -n "$VER" ] && ui_print " 本次安装的模块版本：$VER"
   ui_print ""
 else
   ui_print "- 已检测到 DSH 层，开机将由 service.sh 自动启动"

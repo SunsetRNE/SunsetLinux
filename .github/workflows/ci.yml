@@ -109,6 +109,11 @@ jobs:
       - name: 断言 — 设备侧脚本能被 mksh 解析（含 shebang 与欠债名单）
         run: node tools/shell-compat-check.mjs --verbose
 
+      # 模块安装脚本的**行为级**回归：真机上那段文案曾被 ASCII 双引号截断
+      # （`ui_print "…"…"…"` → 后半句被当参数吞掉，mksh -n/bash -n 都看不见）
+      - name: 断言 — 模块安装脚本文案与沙箱运行（mksh）
+        run: node tools/customize-selftest.mjs
+
       - name: 断言 — shell 语法（全套 .sh）
         run: |
           fail=0
