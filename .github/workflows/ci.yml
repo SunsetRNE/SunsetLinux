@@ -66,43 +66,31 @@ jobs:
       - name: 准备工具（proot 供非 root 自测；zstd 供需；mksh 是设备侧真实 shell）
         run: sudo apt-get update -qq && sudo apt-get install -y -qq proot zstd mksh
 
+      # ★ 全部走 tools/ci-shell-gate.sh：失败时用 `::error::` 注释带出"红的是哪几条断言"。
+      #   步骤日志要仓库权限才看得到，而 check-run 的 annotations 匿名可读
+      #   （维护者在手机上排查 CI 就是靠这个）。
       - name: 脚本断言 — root 运行时
-        run: bash runtime/root/selftest.sh
+        run: bash tools/ci-shell-gate.sh bash runtime/root/selftest.sh
 
       # 设备侧真正跑的是 /system/bin/sh（mksh），不是 bash。这一关用 mksh 再跑一遍
       # 同一套断言 —— 语法闸门只管"能不能解析"，这里才验证"跑起来行为一致"。
-      #
-      # ★ 失败时必须把**具体哪几条断言红了**带出来：日志默认要仓库权限才看得到，
-      #   而 `::error::` 注释任何人都能读（维护者在手机上排查时就是靠这个）。
-      #   踩过的坑：mksh 那一关红了，日志里"Process completed with exit code 1."，
-      #   完全看不出是哪一条 —— 只能靠本地复现，而本地（不同的 /proc、不同的 locale）
-      #   恰恰复现不出来。
       - name: 脚本断言 — root 运行时（mksh，模拟设备侧）
-        run: |
-          set +e
-          out="$(mksh runtime/root/selftest.sh 2>&1)"
-          rc=$?
-          printf '%s\n' "$out" | tail -60
-          if [ "$rc" -ne 0 ]; then
-            summary="$(printf '%s\n' "$out" | grep -a 'FAIL' | head -5 | tr '\n' ' ' | cut -c1-900)"
-            printf '::error title=root 运行时（mksh）断言失败::%s\n' "${summary:-（没有 FAIL 行，见步骤输出）}"
-          fi
-          exit "$rc"
+        run: bash tools/ci-shell-gate.sh mksh runtime/root/selftest.sh
 
       - name: 脚本断言 — proot 运行时
-        run: bash runtime/proot/selftest.sh
+        run: bash tools/ci-shell-gate.sh bash runtime/proot/selftest.sh
 
       - name: 脚本断言 — proot 运行时（mksh，模拟设备侧）
-        run: mksh runtime/proot/selftest.sh
+        run: bash tools/ci-shell-gate.sh mksh runtime/proot/selftest.sh
 
       # proot 的 host 侧脚本（start.sh / linuxctl.sh）必须能被 mksh 解析；但"能解析"
       # 证明不了"改完之后语义还对"（例：`[[ =~ ]]`→case 改错、`/dev/tcp` 在 mksh 下失效）。
       # 这一关从真实脚本里抽取纯函数做回归，bash 与 mksh 各跑一遍（两边结果必须一致）。
       - name: 脚本断言 — proot 纯函数（bash）
-        run: bash runtime/proot/selftest-funcs.sh
+        run: bash tools/ci-shell-gate.sh bash runtime/proot/selftest-funcs.sh
 
       - name: 脚本断言 — proot 纯函数（mksh，模拟设备侧）
-        run: mksh runtime/proot/selftest-funcs.sh
+        run: bash tools/ci-shell-gate.sh mksh runtime/proot/selftest-funcs.sh
 
       # 懒人脚本的**冒烟回归**：只跑只读"体检"模式。守的是"能解析 ≠ 能跑"那一类问题 ——
       # 实测踩过：一次编辑把 `bad()` 定义并进了注释，`mksh -n` 照样通过，真机上只表现成
