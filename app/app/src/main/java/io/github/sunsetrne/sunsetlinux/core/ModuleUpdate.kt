@@ -217,15 +217,49 @@ object ModuleInstaller {
         }
 
         onStage("刷入模块", 0, 1)
+        val outcome = flashZip(zip, artifact.version, log)
+        runCatching { zip.delete() }
+        return outcome
+    }
+
+    /**
+     * 刷入**已经在本地**的模块 zip（内嵌包走的正是这条路）。
+     *
+     * 与 [install] 的唯一区别是"包从哪来"：这里不下载、不校验 sha256（调用方在把 assets
+     * 落盘时已经验过，见 [BundledModule.extract]），其余（`/data/local/tmp` 中转、
+     * ksud/magisk 分支、退出码翻译）完全共用，避免两条路各写一遍又漂移。
+     *
+     * **阻塞**，调用方放 IO 线程。不删除 [zip]（内嵌包会被反复用）。
+     */
+    fun installLocal(
+        zip: File,
+        version: String,
+        label: String,
+        onLine: (String) -> Unit,
+    ): Outcome {
+        val log = StringBuilder()
+        log.append("=== $label ===\n")
+        log.append("· 本地包 ${zip.name}  ${formatBytes(zip.length())}\n")
+        return flashZip(zip, version, log, onLine)
+    }
+
+    /** 真正调 `su` + ksud/magisk 的那一步；[install] 与 [installLocal] 共用。 */
+    private fun flashZip(
+        zip: File,
+        version: String,
+        log: StringBuilder,
+        onLine: ((String) -> Unit)? = null,
+    ): Outcome {
         val result = try {
             Proc.stream(
-                cmd = listOf("su", "-c", installScript(zip.absolutePath, artifact.name)),
-                onLine = { line -> log.append("  $line\n") },
+                cmd = listOf("su", "-c", installScript(zip.absolutePath, zip.name)),
+                onLine = { line ->
+                    log.append("  $line\n")
+                    onLine?.invoke(line)
+                },
             )
         } catch (t: Throwable) {
             return Outcome(false, log.append("✗ 起不了 su：${t.message}\n").toString(), t.message)
-        } finally {
-            runCatching { zip.delete() }
         }
 
         if (!result.ok) {
@@ -237,7 +271,7 @@ object ModuleInstaller {
             }
             return Outcome(false, log.append("✗ 刷入失败：$hint\n").toString(), hint)
         }
-        log.append("✓ 已刷入 ${artifact.version}：**重启后生效**（KernelSU 落的是 modules_update/）\n")
+        log.append("✓ 已刷入 $version：**重启后生效**（KernelSU 落的是 modules_update/）\n")
         return Outcome(true, log.toString(), null)
     }
 }

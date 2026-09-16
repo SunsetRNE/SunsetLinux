@@ -89,14 +89,43 @@ find_layer() {
     [ -n "$best" ] && { printf '%s' "$best"; return 0; }
     return 1
 }
-# 列出层内容（用于 profile/pnpm 存在性检查），按格式选工具
-layer_list() {
-    local f="$1" fmt
+# 层内**某个路径是否存在**：0=在 1=不在 2=判不了（工具不可用）
+#
+# ⚠️ 为什么不能拿 `dump.erofs --ls --path=/` 的输出去 grep：
+#   它**不递归**，根目录只列出 `root` / `usr` 两个名字。
+#   早先的 profile / pnpm 检查正是这么写的，于是**永远匹配不上**，真机上无论层里有没有
+#   都报 [fail]「dsh 层内没有 /root/.dsh/profiles/**」+ [warn]「runtime 层里没有 pnpm」——
+#   两个假阴性，把用户引向"重装层/重跑 provision"（其实层是好的）。
+#   正确做法是**直接问那条路径**：erofs 用 `dump.erofs --path=<p>`（不存在的路径会打印
+#   "read inode failed"），squashfs 用 `unsquashfs -l <img> <dir>`。
+layer_has_path() {
+    local f="$1" p="$2" fmt out=""
+    [ -f "$f" ] || return 2
     fmt="$(layer_format "$f" 2>/dev/null || echo unknown)"
     case "$fmt" in
-        squashfs) have unsquashfs && unsquashfs -l "$f" 2>/dev/null ;;
-        erofs)    have dump.erofs && dump.erofs --ls --path=/ "$f" 2>/dev/null ;;
+        erofs)
+            have dump.erofs || return 2
+            out="$(dump.erofs --path="$p" "$f" 2>&1 || true)"
+            case "$out" in
+                *"read inode failed"*|*"No such file"*) return 1 ;;
+                "") return 2 ;;
+                *) return 0 ;;
+            esac ;;
+        squashfs)
+            have unsquashfs || return 2
+            out="$(unsquashfs -l "$f" "$p" 2>/dev/null || true)"
+            case "$out" in *"$p"*) return 0 ;; *) return 1 ;; esac ;;
+        *) return 2 ;;
     esac
+}
+
+# 环境是否真的在跑（ready + supervisor 进程都活着）。§1d/§3/§8 都要用，
+# 所以放在最前面统一定义一次 —— 三处各写一遍迟早漂移（"运行中"与"没在跑"会互相矛盾）。
+env_running() {
+    [ -f "$RUN_DIR/ready" ] || return 1
+    local p=""
+    p="$(head -n1 "$RUN_DIR/supervisor.pid" 2>/dev/null | tr -dc '0-9' || true)"
+    [ -n "$p" ] && [ -d "/proc/$p" ]
 }
 
 # JSON 字符串转义（不依赖 jq）
@@ -137,17 +166,29 @@ fi
 
 # ===========================================================================
 head_ "1. 内核能力（证据来源标注在括号里）"
+# 内核配置来源，优先级：
+#   ① SUNSETLINUX_KCONFIG_FILE（测试/排障用：指一份配置文本，让本节的判定在任何机器上
+#      都可复现 —— 真机上 /proc/config.gz 可读，CI 容器里往往不可读，没有这个接缝就
+#      "squashfs 不得报 fail"这类闸门在 CI 上永远跑不到）；
+#   ② /proc/config.gz（真机常规来源，需要 CONFIG_IKCONFIG_PROC）；
+#   ③ /boot/config-<kver>（少数内核把配置放这儿）。
 KC=""
-if [ -r /proc/config.gz ]; then
+SRC=""
+if [ -n "${SUNSETLINUX_KCONFIG_FILE:-}" ] && [ -r "${SUNSETLINUX_KCONFIG_FILE}" ]; then
+    KC="$(cat "$SUNSETLINUX_KCONFIG_FILE" 2>/dev/null || true)"
+    [ -n "$KC" ] && SRC="$SUNSETLINUX_KCONFIG_FILE"
+fi
+if [ -z "$KC" ] && [ -r /proc/config.gz ]; then
     if have zcat; then KC="$(zcat /proc/config.gz 2>/dev/null)"; fi
     [ -z "$KC" ] && KC="$(gzip -dc /proc/config.gz 2>/dev/null || true)"
+    [ -n "$KC" ] && SRC="/proc/config.gz"
 fi
 if [ -z "$KC" ] && [ -r /boot/config-"$(uname -r)" ]; then
     KC="$(cat /boot/config-"$(uname -r)" 2>/dev/null || true)"
+    [ -n "$KC" ] && SRC="/boot/config-$(uname -r)"
 fi
 
 if [ -n "$KC" ]; then
-    SRC="/proc/config.gz"
     # ⚠ 这里**刻意不用** `printf '%s' "$KC" | grep -q ...`：
     #   KC 有 200 KB，grep -q 命中后立刻退出 → printf 收到 SIGPIPE（退出码 141），
     #   在 `set -o pipefail` 下整条管道被判为失败，于是"匹配上了却报未启用"。
@@ -177,7 +218,8 @@ CONFIG_${name}=m
         done <<< "$KC"
         printf 'n'
     }
-    for opt in NAMESPACES UTS_NS NET_NS OVERLAY_FS EXT4_FS TMPFS SQUASHFS; do
+    # 必需项：缺任何一个都真的会影响 root 模式（overlay/erofs/loop 挂载）
+    for opt in NAMESPACES UTS_NS NET_NS OVERLAY_FS EXT4_FS TMPFS; do
         v="$(kcval "$opt")"
         case "$v" in
             y)
@@ -191,6 +233,22 @@ CONFIG_${name}=m
                 add_finding fail "config_$opt" "未启用" ;;
         esac
     done
+    # squashfs 单独判：本项目的三层只读镜像**支持 erofs 与 squashfs 两种**，
+    # 内核没有 squashfs 只说明"不能用 squashfs 层"，而 erofs 是 Android 原生格式、
+    # 默认就有（§2 会实测）。所以这里**不是 fail** —— 真机上打成 fail 会让自检
+    # 在完全能跑的环境里报红（用户看到的 4 项 fail 里有两项就是这么来的）。
+    v="$(kcval SQUASHFS)"
+    case "$v" in
+        y)
+            ok "CONFIG_SQUASHFS=y （$SRC）"
+            add_finding ok config_SQUASHFS "=y" ;;
+        m)
+            warn "CONFIG_SQUASHFS=m（模块，需先加载；$SRC）"
+            add_finding warn config_SQUASHFS "=m 需加载模块" ;;
+        *)
+            info "CONFIG_SQUASHFS 未启用 —— **不是问题**：本机只用 erofs 层（§2 会实测内核是否支持 erofs）"
+            add_finding ok config_SQUASHFS "未启用（改用 erofs，见 §2）" ;;
+    esac
 else
     info "取不到 /proc/config.gz（内核未开 CONFIG_IKCONFIG_PROC），改用实测探测"
     # 实测：overlay / squashfs 会在 /proc/filesystems 里出现（注册后即列出）
@@ -474,21 +532,42 @@ if [ -n "$SUP_PID" ] && [ -r "/proc/$SUP_PID/mountinfo" ]; then
 fi
 
 # ③ loop 设备占用：只报"谁在用"，并确认我们的都指向 $LINUX_HOME
+#
+# ⚠️ 旧实现的两个计数都是错的（真机输出自相矛盾：说"在用 1 个，且都指向
+#   /data/sunsetlinux"，下面却列出 4 个 loop，其中 swap/APEX 都不属于我们）：
+#     · 总数用 `grep -c ":'"` —— losetup -a 的行形如 `/dev/block/loop49: [65103]:2924912 (file)`，
+#       `:'` 根本匹配不到，于是总数恒为 0；
+#     · "我们的"用 `grep -c "$LINUX_HOME"` 但工具是 `grep -c ":'"` 那套，且没按行前缀判设备。
+#   现在：**以 `/dev/` 开头的行**才算 loop 设备，backing 路径含 $LINUX_HOME 的才算我们的。
 if have losetup; then
     _lo="$(losetup -a 2>/dev/null || true)"
     if [ -z "$_lo" ]; then
         info "当前没有 loop 设备在用（我们的 erofs/upper 只在环境运行时占用）"
     else
-        _ours_n="$(printf '%s\n' "$_lo" | grep -c "$LINUX_HOME" 2>/dev/null || true)"
-        case "${_ours_n:-}" in ''|*[!0-9]*) _ours_n=0 ;; esac
-        _all_n="$(printf '%s\n' "$_lo" | grep -c ":'" 2>/dev/null || true)"
+        _all_n="$(printf '%s\n' "$_lo" | awk '/^\/dev\//{n++} END{printf "%d", n+0}')"
+        _ours_n="$(printf '%s\n' "$_lo" | awk -v h="$LINUX_HOME" '/^\/dev\// && index($0,h)>0 {n++} END{printf "%d", n+0}')"
         case "${_all_n:-}" in ''|*[!0-9]*) _all_n=0 ;; esac
-        if [ "$_all_n" -gt "$_ours_n" ]; then
-            warn "loop 设备：我们在用 $_ours_n 个，另有 $(( _all_n - _ours_n )) 个被别的模块占用（我们走 losetup -f 取空闲，不抢）"
-        else
+        case "${_ours_n:-}" in ''|*[!0-9]*) _ours_n=0 ;; esac
+        _other_n=$(( _all_n - _ours_n ))
+        if [ "$_ours_n" -gt 0 ] && [ "$_other_n" -eq 0 ]; then
             ok "loop 设备：在用 $_ours_n 个，且都指向 $LINUX_HOME（未与其它模块争用）"
+        elif [ "$_ours_n" -gt 0 ]; then
+            # 别的 loop 不是"抢用"：我们用 losetup -f 取空闲设备，与 swap/APEX/别的模块并存是常态。
+            # 旧版把这条打成 [warn]，等于给正常现象报警。
+            info "loop 设备：我们在用 $_ours_n 个（指向 $LINUX_HOME）；另有 $_other_n 个是别的（swap/APEX/其它模块），我们用 losetup -f 取空闲，不争用"
+        else
+            info "loop 设备：在用 $_all_n 个，都不是本项目的（不争用）"
         fi
         printf '%s\n' "$_lo" | head -n 4 | sed 's/^/        /'
+        # ★ 残留信号：环境没在跑，却有 loop 指着我们的镜像 → 上次 start 失败留下的。
+        #   这条值得单独说，因为它会直接影响下一次挂载（真机就在这条上卡过）。
+        if ! env_running; then
+            case "$_lo" in
+                *"$UPPER_IMG"*)
+                    warn "有 loop 设备仍指向 $UPPER_IMG，但环境并没有在跑 —— 上次启动失败的残留"
+                    info "下一次 start 会先自动清理它；要手动清：linuxctl stop（幂等），必要时 losetup -d /dev/block/loopN" ;;
+            esac
+        fi
     fi
 fi
 
@@ -589,9 +668,10 @@ else
         0) KFMT="$KFMT squashfs"
            ok "内核支持 squashfs（/proc/filesystems）"
            add_finding ok kernel_squashfs "supported" ;;
-        1) bad "内核**不支持** squashfs（/proc/filesystems 无 squashfs，且 CONFIG_SQUASHFS is not set）→ squashfs 层无法挂载"
-           info "必须改用 erofs 层（内核内建 CONFIG_EROFS_FS=y）。见下面 erofs 检查"
-           add_finding fail kernel_squashfs "unsupported" ;;
+        1) # 不 fail：squashfs 只是"两种可选只读格式"里的一种；下面会实测 erofs。
+           #    真机上这里打成 fail 是**假警报**（环境跑得好好的也报红）。
+           info "内核不支持 squashfs（/proc/filesystems 无 squashfs）→ 层必须用 erofs（下面是实测结果）"
+           add_finding ok kernel_squashfs "unsupported（层改用 erofs）" ;;
     esac
     fs_supported erofs
     case $? in
@@ -714,13 +794,43 @@ else
     else
         warn "看不到 loop 设备，跳过可挂性测试"
     fi
+    # ★ 读写试挂：这才是 start.sh 真正做的那一步（`-o loop,rw,noatime`）。
+    #
+    # 为什么必须单独试一次：真机上出现过**只读能挂、读写挂不上（mount 只报 'I/O error'）**，
+    # 于是 §3 说"可挂载"、§8 说"挂载 upper 失败" —— 报告自相矛盾，用户完全无从下手。
+    # 读写试挂会写一次超级块（挂载计数），所以：环境在跑时**跳过**（不去打扰运行中的 overlay），
+    # 只在停机状态下做，挂完立刻卸载 —— 与 linuxctl start 的第一步等价，不引入新状态。
+    if env_running; then
+        info "环境在运行：跳过读写试挂（避免干扰运行中的 overlay；要试先 stop）"
+    elif [ -w /dev ] || [ -e /dev/block/loop-control ]; then
+        TMPMNT2="$(mktemp -d 2>/dev/null || echo /tmp/sunsetlinux-doctor-mnt-rw)"
+        mkdir -p "$TMPMNT2"
+        if "$MOUNT" -t ext4 -o loop,rw,noatime "$UPPER_IMG" "$TMPMNT2" 2>/dev/null; then
+            ok "upper.img 可**读写**挂载（ext4, loop, rw）—— 与 start.sh 的第一步一致"
+            add_finding ok upper_mountable_rw "可读写挂载"
+            "$UMOUNT" "$TMPMNT2" 2>/dev/null || "$UMOUNT" -l "$TMPMNT2" 2>/dev/null || warn "试挂点卸载失败：$TMPMNT2"
+        else
+            bad "upper.img **只读能挂、读写挂不上** → linuxctl start 必然卡在「挂载 upper」"
+            add_finding fail upper_mountable_rw "rw 挂载失败"
+            info "内核侧的原因（ext4 写超级块 / 日志恢复失败）只会以 'I/O error' 的形式返回，"
+            info "所以要同时看 dmesg：dmesg | grep -iE 'loop|ext4|jbd2' | tail -20"
+            info "两个已知去处：① 清掉残留 loop（下方 §1d 会点名）后重试；② 「设置 → 层模式」切 dir（全程不碰 loop/upper.img）"
+        fi
+        rmdir "$TMPMNT2" 2>/dev/null || true
+    fi
     if have e2fsck; then
-        if e2fsck -fn "$UPPER_IMG" >/dev/null 2>&1; then
+        _fsck_out="$(e2fsck -fn "$UPPER_IMG" 2>&1)"
+        _fsck_rc=$?
+        if [ "$_fsck_rc" = "0" ]; then
             ok "e2fsck -fn 通过（文件系统一致）"
             add_finding ok upper_fsck "ok"
         else
-            warn "e2fsck -fn 报问题（只读检查，未修改）；可考虑 linuxctl reset"
-            add_finding warn upper_fsck "e2fsck 报问题"
+            # 把 e2fsck 的第一条实质结论带出来（只读检查，未修改）——
+            # "报问题"三个字对定位没用，"recovering journal / needs recovery"才是线索。
+            _fsck_line="$(printf '%s\n' "$_fsck_out" | grep -v '^e2fsck ' | head -n1)"
+            warn "e2fsck -fn 报问题（rc=$_fsck_rc，只读检查未修改）：${_fsck_line:-见原始输出}"
+            add_finding warn upper_fsck "e2fsck rc=$_fsck_rc：${_fsck_line:-报问题}"
+            info "修法：linuxctl start 会在挂载前做一次 e2fsck -p（自动），或手动 e2fsck -fp $UPPER_IMG"
         fi
     fi
 fi
@@ -776,6 +886,11 @@ if [ -r /sys/fs/selinux/enforce ]; then
     info "SELinux enforcing=$enf（本脚本**不修改** SELinux，也建议不要关）"
 fi
 AVC_HITS=0
+# ★ 相关性要和计数分开记：厂商 HAL 扫 ksu 进程的 avc 噪声动辄几百条，
+#   它们是 **info**（人读的那行早就这么显示了），但旧代码给 JSON 的 finding
+#   一律打 warn —— 于是 `{"level":"warn","id":"avc_denied"}` 与上面那行
+#   "都与本项目无关" 互相打脸（真机截图里就是这个）。现在两者同一判据。
+AVC_RELEVANT=0
 if have dmesg; then
     n="$(dmesg 2>/dev/null | grep -ci 'avc: *denied' || true)"
     case "${n:-}" in ''|*[!0-9]*) n=0 ;; esac
@@ -784,6 +899,7 @@ if have dmesg; then
         # avc 噪声在真机上动辄几百条，一律 warn 会让真正的信号被淹没（真机反馈）。
         if dmesg 2>/dev/null | grep -i 'avc: *denied' | grep -qE 'sunsetlinux|/data/sunsetlinux'; then
             warn "dmesg 里有 $n 条 'avc: denied'，其中**有涉及 /data/sunsetlinux 的**（要看具体行）"
+            AVC_RELEVANT=1
         else
             info "dmesg 里有 $n 条 'avc: denied'，但都**与本项目无关**（没有一条提到 /data/sunsetlinux；多为厂商 HAL 扫 ksu 进程）"
         fi
@@ -801,6 +917,7 @@ if have logcat; then
     if [ "$n2" -gt 0 ]; then
         if logcat -d -b all 2>/dev/null | grep -i 'avc: *denied' | grep -qE 'sunsetlinux|/data/sunsetlinux'; then
             warn "logcat 里有 $n2 条 'avc: denied'，其中有涉及 /data/sunsetlinux 的（要看具体行）"
+            AVC_RELEVANT=1
         else
             info "logcat 里有 $n2 条 'avc: denied'，但都**与本项目无关**（没有提到 /data/sunsetlinux）"
         fi
@@ -813,8 +930,14 @@ else
     info "无 logcat 命令，跳过"
 fi
 if [ "$AVC_HITS" -gt 0 ]; then
-    add_finding warn avc_denied "$AVC_HITS 条 avc denial（检查是否涉及 $LH 或 su 域）"
-    info "若确认与 $LH 相关，再考虑加 sepolicy.rule（本项目默认**不带**，见 module/README 说明）"
+    if [ "$AVC_RELEVANT" = "1" ]; then
+        add_finding warn avc_denied "$AVC_HITS 条 avc denial，其中**有涉及 $LH 的**（看上文具体行）"
+        info "若确认与 $LH 相关，再考虑加 sepolicy.rule（本项目默认**不带**，见 module/README 说明）"
+    else
+        # 与本项目无关的 denial = 不是本项目的问题，JSON 里也必须是 ok/中性，
+        # 否则 App 的"自检未通过"会挂在这些噪声上。
+        add_finding ok avc_denied "$AVC_HITS 条，均与本项目无关（未提到 $LH 或 su 域）"
+    fi
 else
     add_finding ok avc_denied "无"
 fi
@@ -865,22 +988,28 @@ if [ -f "$RUN_DIR/dsh.pid" ] && [ -d "$ROOTFS_DIR/usr/local/lib/node_modules/@de
     fi
 fi
 if [ -z "$PROBE_OK" ]; then
-    # 环境没起来：检查层文件里有没有那个路径
+    # 环境没起来：检查层文件里有没有那个路径。
+    # ★ 用 layer_has_path（对着**目标路径**问），不要拿不递归的 `--ls --path=/` 输出 grep ——
+    #   后者永远是"没有"，真机上就是这么误报 [fail] 的。
     dl="$(find_layer dsh 2>/dev/null || true)"
-    lst=""
-    [ -n "$dl" ] && lst="$(layer_list "$dl")"
-    if [ -n "$lst" ]; then
-        case "$lst" in
-            *"/root/.dsh/profiles/web/package.json"*)
+    if [ -n "$dl" ]; then
+        layer_has_path "$dl" "/root/.dsh/profiles/web/package.json"
+        case $? in
+            0)
                 ok "dsh 层内含 /root/.dsh/profiles/web/package.json"
                 add_finding ok profile "in-layer" ;;
-            *)
+            1)
                 bad "dsh 层内**没有** /root/.dsh/profiles/** → dsh web 界面会退化成桌面版"
-                info "修复：用包含 profile 的层替换（docs/dsh-profile.md §3.1 / §5）；或重跑 device-provision.sh"
+                info "修复：换一份带 profile 的 dsh 层（docs/dsh-profile.md §3.1 / §5）——"
+                info "  linuxctl update dsh <dsh-<版本>.erofs> --version <版本>"
+                info "或重跑 device-provision.sh（模块 ≥1.0.6 随包带 profiles/，构建时会装好 profile）"
                 add_finding fail profile "layer-missing-profile" ;;
+            *)
+                info "环境未运行且无 dump.erofs/unsquashfs，跳过 profile 检查（启动后可用 linuxctl exec -- ls /root/.dsh/profiles/web 复核）"
+                add_finding warn profile "unchecked" ;;
         esac
     else
-        info "环境未运行且无 dump.erofs/unsquashfs，跳过 profile 检查（启动后可用 linuxctl exec -- ls /root/.dsh/profiles/web 复核）"
+        info "找不到 dsh 层文件，跳过 profile 检查"
         add_finding warn profile "unchecked"
     fi
 fi
@@ -895,19 +1024,23 @@ if [ -n "$PNPM_OK" ]; then
     add_finding ok pnpm "found"
 else
     rl="$(find_layer runtime 2>/dev/null || true)"
-    rlst=""
-    [ -n "$rl" ] && rlst="$(layer_list "$rl")"
-    if [ -n "$rlst" ]; then
-        case "$rlst" in
-            *"opt/node/bin/pnpm"*)
+    if [ -n "$rl" ]; then
+        # 同上：必须对着路径问，不能靠不递归的目录列表（真机上误报 [warn] 的另一处）
+        layer_has_path "$rl" "/opt/node/bin/pnpm"
+        case $? in
+            0)
                 ok "runtime 层内含 /opt/node/bin/pnpm（dsh plugin 可用）"
                 add_finding ok pnpm "in-layer" ;;
-            *)
+            1)
                 warn "runtime 层里没有 pnpm → 用户无法用 dsh plugin add 装第三方插件"
+                info "修复：换用带 pnpm 的 runtime 层（rootfs/profiles/runtime.packages 里列着 node+pnpm，重跑 device-provision.sh 即会带上）"
+                add_finding warn pnpm "missing" ;;
+            *)
+                warn "未找到 pnpm（dsh plugin 会报 'pnpm not found on PATH'）"
                 add_finding warn pnpm "missing" ;;
         esac
     else
-        warn "未找到 pnpm（dsh plugin 会报 'pnpm not found on PATH'）"
+        warn "未找到 pnpm 且没有 runtime 层文件可查（dsh plugin 会报 'pnpm not found on PATH'）"
         add_finding warn pnpm "missing"
     fi
 fi
@@ -933,8 +1066,26 @@ else
     info "run/dsh.url 不存在（环境未运行或尚未打印 URL）"
 fi
 if [ -s "$RUN_DIR/last-error" ]; then
-    bad "run/last-error：$(cat "$RUN_DIR/last-error")"
-    add_finding fail last_error "$(cat "$RUN_DIR/last-error")"
+    _le="$(head -n1 "$RUN_DIR/last-error" 2>/dev/null)"
+    if env_running; then
+        # 环境都在跑了，这条失败记录必然是**上一次**的 —— 把它当 fail 报，
+        # 用户会以为"现在也是坏的"（App 的「自检未通过」也会因此常年挂着）。
+        info "run/last-error 里是**上一次**的失败记录（当前环境已在运行，这条是历史的）：$_le"
+        add_finding ok last_error "历史记录：$_le"
+    else
+        bad "run/last-error：$_le"
+        add_finding fail last_error "$_le"
+        # 针对"挂载 upper 失败"这一类给出可执行下一步：它是最常见、也是最难自己看懂的
+        # （内核只回一句 'I/O error'）。新 start.sh 会在失败前自动做四件事，并在日志里
+        # 留下内核原文，所以这里的指引必须与实现一致。
+        case "$_le" in
+            *"挂载 upper 失败"*|*upper.img*)
+                info "这一类失败与 §3 的「读写试挂」是同一件事（只读能挂 ≠ 读写能挂）"
+                info "新 start.sh 的顺序：清残留 loop → e2fsck -p → 显式 losetup 重试 → 仍失败则记下 dmesg 原文"
+                info "要立刻可用：设置 → 层模式 → dir（全程不碰 loop/upper.img，代价是磁盘占用）"
+                info "要看内核原话：dmesg | grep -iE 'loop|ext4|jbd2' | tail -20" ;;
+        esac
+    fi
 fi
 
 # ===========================================================================

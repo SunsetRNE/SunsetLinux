@@ -498,6 +498,60 @@ su -c '/data/sunsetlinux/bin/linuxctl doctor'
 | 已装状态读不到时 | —— | **不给刷入按钮**，先让用户修 root 授权（与"读不到 ≠ 没装"一致） |
 | 重启 | —— | 只报告"重启后生效"（KernelSU 落 `modules_update/`），**App 不替用户重启**，脚本里有单测断言不许出现 `reboot` |
 
+### 3.10.21 引导第 2 步的模块包内嵌 + doctor 三处假警报 + upper 读写挂载自愈（App 0.2.11 / 模块 1.0.17）
+
+用户给了首启引导第 2 步的截图（"在勾选的地方做 Root 模块刷写引导，内置模块包"）与整段真机
+doctor 输出（"顺便解决一下日志问题"）。三件事：
+
+**① 引导第 2 步原来不可执行。** 文案写"选择模块包：`dist/sunsetlinux-module-0.1.0.zip`" ——
+那个路径在开发者机器上；于是「我已经装好模块并重启」勾选框前面没有任何可点的东西。
+现在 `dist/sunsetlinux-module-*.zip` 在构建期被内嵌成
+`assets/module/sunsetlinux-module.zip` + `assets/module/module.json`（版本/文件名/大小/sha256，
+由 `SyncBundledModule` 算出；`dist/` 为空时输出"未内嵌"并如实说明）。卡片上：
+
+| 动作 | 实现 | 失败时 |
+|---|---|---|
+| 一键刷入内置模块 | assets 落盘（**校验构建期 sha256**）→ `ksud module install`（Magisk 走 `magisk --install-module`） | 明说失败原因，并指向导出/手动路径 |
+| 导出模块包到 Download | `su cp` 到 `/sdcard/Download/` | 退到 FileProvider 分享，让用户自己存 |
+| 打开管理器 | 已知包名 4 个（KernelSU / KernelSU-Next / MMRL / Magisk） | 一个都没装就明说，不弹空 chooser |
+
+勾选框的启用条件 = **用户断言 或 设备侧事实**（模块已装 + 已启用 + 已重启生效）—— 事实成立时
+不再逼用户复述"我装好了"。App **不替用户重启**（KernelSU 落 `modules_update/`，重启才生效）。
+
+**② 诊断页的"原因"是章节名。** `✗ 自检未通过：== 0. 运行环境 ==` —— 流式 doctor 的
+`CtlResult.message` 取的是 stdout 第一行非空内容，而 doctor 第一行非空内容就是第一个小节标题。
+改为解析 JSON 尾行的 `fails`/`warns`，并附上报告里带 `[fail]` 的原文（最多 6 条）。
+
+**③ 真机一次自检报 4 项 fail，其中 3 项是假的**（逐条核过）：
+
+| 原 fail | 根因 | 现在 |
+|---|---|---|
+| `CONFIG_SQUASHFS 未启用` / `内核不支持 squashfs` | 本项目三层只读镜像用 erofs；squashfs 只是另一种可选格式，缺它不影响任何东西 | 降 info/ok；只有"两种格式都不可用"时 §2 才真 fail |
+| `dsh 层内没有 /root/.dsh/profiles/**` | 拿 `dump.erofs --ls --path=/` 的输出 grep 深层路径，而它**不递归**（根目录只有 `root`/`usr`）→ 永远匹配不上 | 新增 `layer_has_path()`：对着目标路径问（erofs `--path=`、squashfs `unsquashfs -l`） |
+| `runtime 层里没有 pnpm` | 同一处假阴性 | 同上 |
+| （顺带）loop 计数 | `grep -c ":'"` 恒为 0 → "在用 1 个"却列出 4 个 | 按 `/dev/` 行前缀统计；不指向我们的 loop 只报 info |
+| （顺带）avc denial | 人类可读说"与本项目无关"，JSON 却给 `warn` | 相关性作为唯一判据：无关 → `ok` |
+
+**④ 唯一真 fail：`挂载 upper 失败：… -o loop,rw,noatime … I/O error`。** 证据链（全部只读核对）：
+`upper.img` 的 mtime 停在创建时刻（**从未成功读写挂载过**）、`-o loop,ro` 能挂、`e2fsck -fn` 通过、
+ext4 特性全在内核支持面内、且存在**指向该镜像的残留 loop**。ext4 只在 rw 挂载时写超级块/恢复日志，
+那条路径上的写失败被内核统一报成 EIO，光看 errno 推不出原因。`start.sh` 因此改成逐级自愈：
+清残留 loop（只清没被任何进程挂载的）→ `e2fsck -p` → 显式 `losetup -f --show` + `mount` 两步走 →
+抓 `dmesg | grep -iE 'loop|ext4|jbd2'` 原文进 `run/start.log` 并把摘要压进 `last-error`；
+四次都失败则**自动降级 dir 层模式**（全程不碰 loop/upper.img），并把原因与代价写进日志。
+
+- doctor 也补了对应检查：新增 `SUNSETLINUX_KCONFIG_FILE` 接缝（指一份内核配置文本，让
+  "内核没开 squashfs 不得报 fail"这条闸门在 CI 容器里也跑得到）、**§3 新增读写试挂**（只读能挂 ≠ 读写能挂，这正是 §3 与 §8 自相矛盾的那次）、
+  §8 区分"历史记录 / 当前故障"（环境在跑时 last-error 是历史，不再当 fail）、e2fsck 结论带原文。
+- 测试：`runtime/root/selftest.sh` 新增 6 条（squashfs 不得 fail、层内路径正/反例、
+  `mount_upper_rw` 在 toybox `-o loop` 失败后靠显式 losetup 挂上、失败后确实先清 loop 且跑过 `e2fsck -p`），
+  bash+mksh **42/0**；App 单测 **134/0**（本机 locale 为 POSIX 时 Kotlin 增量编译会因中文测试名
+  写出不可映射的文件名而 ICE：`gradlew --stop` 后以 `LANG=C.UTF-8` 重跑即过，与本次改动无关）；
+  模块 zip `dist/sunsetlinux-module-v1.0.17.zip`（209116 B，
+  sha256 `88c00d8e762bec43c4d2c4b3dcedee064ba1436940760c2b953c62a06af27dd9`）；
+  APK `SunsetLinux-0.2.11-minimal-debug.apk` 内含同一份模块包（`module.json` 的 sha256 与包一致），
+  签名 `5d5fa724…69f7`（仓库内固定密钥 ⇒ 可覆盖安装、KSU 授权不失效）。
+
 ### 3.10.20 无 loop 层模式（dir）+ doctor §1e（App 0.2.10 / 模块 1.0.15）
 
 用户选了「A. 加"无 loop 目录模式"（作兼容开关）」。真机上最容易出问题的不是 overlayfs，

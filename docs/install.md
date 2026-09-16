@@ -166,21 +166,29 @@ su -c 'sh /data/adb/modules/sunsetlinux/bin/oneshot-setup.sh --run'
 这一步是"**环境不被 App 杀死**"的关键：模块在 `late_start` 调用 `linuxctl start`，
 环境由 init 派生，App 被杀/被冻都不影响它。
 
-1. 用**打包脚本**生成模块 zip（**不要**自己 `cd module && zip` —— 那样打出来的模块没有
-   `bin/`、`lib/`、`webroot/`，装上去是残的：`post-fs-data.sh` 无事可做、
-   `/data/sunsetlinux/bin/linuxctl` 永远不会出现、App 也就无法控制环境）：
+1. **最简单的一条（App 0.2.11 起）**：装好 App 后打开**首启引导 → 第 2 步**，点
+   「一键刷入内置模块」。模块 zip **已经内嵌在 APK 里**（构建期由
+   `app/app/build.gradle.kts` 的 `SyncBundledModule` 从 `dist/sunsetlinux-module-*.zip`
+   取，连版本与 sha256 一起写进 `assets/module/module.json`），App 会把它落到
+   `/data/local/tmp` 再交给 `ksud module install`（Magisk 走 `magisk --install-module`）——
+   与「关于 → 更新模块」是同一条通道，只是包从 assets 来而不是从网上来。
+   没有 su / 没有 ksud 时，同一个卡片上还有「导出模块包到 Download」，导出后按下面第 2 步手动装。
+
+2. 也可以自己（或从 Release 下载）**打包**模块 zip —— 注意**不要**自己 `cd module && zip`，
+   那样打出来的模块没有 `bin/`、`lib/`、`webroot/`，装上去是残的：`post-fs-data.sh`
+   无事可做、`/data/sunsetlinux/bin/linuxctl` 永远不会出现、App 也就无法控制环境：
 
    ```bash
-   bash module/mkmodule.sh --version 0.1.0
-   # 产物：dist/sunsetlinux-module-0.1.0.zip（+ .sha256）
+   bash module/mkmodule.sh            # 版本取自 module/module.prop
+   # 产物：dist/sunsetlinux-module-<版本>.zip（+ .sha256）
    ```
 
    脚本会铺 `bin/`（运行时脚本 + `layer-spec.sh` + `selftest.sh` + 夹具）、
    `lib/`（`detect-mount.sh`）、`webroot/`（模块 WebUI），并在缺失关键项时**拒绝打包**。
 
-2. 在 KernelSU 管理器里「安装模块」→ 选 `dist/sunsetlinux-module-<ver>.zip` → 重启。
+3. 在 KernelSU 管理器里「模块 → 从本地安装」→ 选 `dist/sunsetlinux-module-<ver>.zip` → 重启。
 
-3. 重启后验证：
+4. 重启后验证：
 
    ```bash
    su -c '/data/sunsetlinux/bin/linuxctl status'

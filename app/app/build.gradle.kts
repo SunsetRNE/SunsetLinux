@@ -1,5 +1,6 @@
 import javax.inject.Inject
 import org.gradle.process.ExecOperations
+import java.security.MessageDigest
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -296,6 +297,91 @@ abstract class EmbedOfflineBundle : DefaultTask() {
 }
 
 
+abstract class SyncBundledModule : DefaultTask() {
+    /** 版本事实源：`module/module.prop`。 */
+    @get:InputFile
+    @get:PathSensitive(PathSensitivity.RELATIVE)
+    abstract val moduleProp: RegularFileProperty
+
+    /** 候选产物：`dist/sunsetlinux-module-*.zip`。 */
+    @get:InputFiles
+    @get:PathSensitive(PathSensitivity.NAME_ONLY)
+    abstract val candidates: ConfigurableFileCollection
+
+    @get:OutputDirectory
+    abstract val outputDir: DirectoryProperty
+
+    @TaskAction
+    fun sync() {
+        val out = File(outputDir.get().asFile, "module").apply {
+            deleteRecursively()
+            mkdirs()
+        }
+        val wanted = moduleProp.get().asFile.readLines()
+            .map { it.trim() }
+            .firstOrNull { it.startsWith("version=") }
+            ?.removePrefix("version=")
+            ?.trim()
+            .orEmpty()
+
+        fun versionOf(zip: File): String =
+            zip.name.removePrefix("sunsetlinux-module-").removeSuffix(".zip").trim().removePrefix("v")
+
+        fun key(v: String): List<Int> =
+            v.split('.', '-', '_', '+').map { seg -> seg.takeWhile { it.isDigit() }.toIntOrNull() ?: 0 }
+
+        val zips = candidates.files.filter { it.isFile && it.name.endsWith(".zip") }
+        val pick = zips.firstOrNull { versionOf(it) == wanted.removePrefix("v") }
+            ?: zips.maxWithOrNull(
+                Comparator { a, b ->
+                    val x = key(versionOf(a))
+                    val y = key(versionOf(b))
+                    (0 until maxOf(x.size, y.size)).firstNotNullOfOrNull { i ->
+                        val c = (x.getOrElse(i) { 0 }).compareTo(y.getOrElse(i) { 0 })
+                        if (c != 0) c else null
+                    } ?: 0
+                },
+            )
+
+        if (pick == null) {
+            logger.lifecycle(
+                "未内嵌模块包（dist/ 下没有 sunsetlinux-module-*.zip）—— " +
+                    "首启引导第 2 步会显示「未内嵌」并给出手动路径；要内嵌先跑 module/mkmodule.sh",
+            )
+            return
+        }
+
+        val to = File(out, "sunsetlinux-module.zip")
+        pick.copyTo(to, overwrite = true)
+        val digest = MessageDigest.getInstance("SHA-256")
+        to.inputStream().use { input ->
+            val buf = ByteArray(64 * 1024)
+            while (true) {
+                val n = input.read(buf)
+                if (n <= 0) break
+                digest.update(buf, 0, n)
+            }
+        }
+        val sha = digest.digest().joinToString("") { "%02x".format(it) }
+        val version = versionOf(pick).ifEmpty { wanted }
+        File(out, "module.json").writeText(
+            buildString {
+                append("{\n")
+                append("  \"schema\": 1,\n")
+                append("  \"version\": \"").append(wanted.ifEmpty { "v$version" }).append("\",\n")
+                append("  \"file\": \"sunsetlinux-module-").append(version).append(".zip\",\n")
+                append("  \"asset\": \"module/sunsetlinux-module.zip\",\n")
+                append("  \"size\": ").append(to.length()).append(",\n")
+                append("  \"sha256\": \"").append(sha).append("\",\n")
+                append("  \"source\": \"").append(pick.name).append("\"\n")
+                append("}\n")
+            },
+        )
+        logger.lifecycle("已内嵌模块包：${pick.name} → assets/module/（${to.length() / 1024} KB，sha256 ${sha.take(12)}…）")
+    }
+}
+
+
 /**
  * 把 `runtime/proot/` 里的脚本铺成 `assets/proot-runtime/`。
  *
@@ -526,6 +612,19 @@ androidComponents {
             )
         }
         variant.sources.assets?.addGeneratedSourceDirectory(embed, EmbedOfflineBundle::outputDir)
+
+        // ②b 内置 KernelSU 模块包：首启引导第 2 步「一键刷入」靠它（四个组合都带 ——
+        //     模块与组合无关，而用户在任何组合下都可能选 Root 模式）。
+        val moduleTaskName = "syncBundledModule" + variant.name.replaceFirstChar { it.uppercase() }
+        val bundledModule = tasks.register<SyncBundledModule>(moduleTaskName) {
+            group = "build"
+            description = "把 dist/sunsetlinux-module-*.zip 内嵌进 assets/module/（没有则跳过）"
+            moduleProp.set(File(rootDir.parentFile, "module/module.prop"))
+            candidates.from(
+                fileTree(File(rootDir.parentFile, "dist")) { include("sunsetlinux-module-*.zip") },
+            )
+        }
+        variant.sources.assets?.addGeneratedSourceDirectory(bundledModule, SyncBundledModule::outputDir)
 
         // ③ proot 宿主脚本（四个组合都带；root 模式下用不到，但"免 root 版"必须靠它才能起）
         val prootTaskName = "syncProotRuntime" + variant.name.replaceFirstChar { it.uppercase() }

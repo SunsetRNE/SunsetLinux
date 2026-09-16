@@ -435,6 +435,136 @@ case "$out" in
     *) bad "start 在无 bash 的 PATH 下没有给出预期错误：$(printf '%s' "$out" | tail -2)" ;;
 esac
 
+# ---------------------------------------------------------------------------
+# 真机事故回归（2026-09-16，第三起）：doctor 在**完全能跑**的环境里报 4 项 fail
+#
+# 真机输出里 4 项 fail 有两项是假警报：
+#   · `CONFIG_SQUASHFS 未启用` / `内核不支持 squashfs` —— 本项目只用 erofs 层，
+#     内核没有 squashfs 根本不是问题（erofs 是 Android 原生格式，§2 会实测）；
+#   · `dsh 层内没有 /root/.dsh/profiles/**` —— 检查实现拿 `dump.erofs --ls --path=/`
+#     的输出 grep 深层路径，而那个列表**不递归**，于是永远匹配不上（层是好的也报 fail）。
+# 这里断言：squashfs 这条**永远不能是 fail**；profile/pnpm 必须"对着路径问"。
+# ---------------------------------------------------------------------------
+head_ "doctor 的误报回归（squashfs / 层内路径）"
+DE="$TMP/doctor-fix-env"
+mkdir -p "$DE/run" "$DE/etc" "$DE/layers"
+# 用 SUNSETLINUX_KCONFIG_FILE 喂一份**明确没有 squashfs** 的内核配置：
+# 真机 /proc/config.gz 可读、CI 容器里往往不可读，没有这个接缝这条闸门就只会在真机上才有效。
+KCFG="$TMP/fake-kconfig"
+{
+    echo '# CONFIG_SQUASHFS is not set'
+    echo 'CONFIG_NAMESPACES=y'
+    echo 'CONFIG_UTS_NS=y'
+    echo 'CONFIG_NET_NS=y'
+    echo 'CONFIG_OVERLAY_FS=y'
+    echo 'CONFIG_EXT4_FS=y'
+    echo 'CONFIG_TMPFS=y'
+} > "$KCFG"
+djson="$(SUNSETLINUX_KCONFIG_FILE="$KCFG" LINUX_HOME="$DE" "$SH_BIN" "$SELF_DIR/doctor.sh" 2>/dev/null | tail -n1 || true)"
+case "$djson" in
+    *'"level":"fail","id":"config_SQUASHFS"'*) bad "squashfs 未启用仍被报成 fail（erofs 可用时它只是可选格式）" ;;
+    *'"level":"fail","id":"kernel_squashfs"'*) bad "内核不支持 squashfs 仍被报成 fail（应当只是 info/ok）" ;;
+    *'"id":"config_SQUASHFS"'*) ok "内核没开 squashfs 时不再报 fail（判定走的是内核配置那条路）" ;;
+    *'"schema":1'*) bad "内核配置接缝没生效：JSON 里没有 config_SQUASHFS 结论" ;;
+    *) bad "doctor 没有输出可解析的 JSON：$(printf '%s' "$djson" | head -c 120)" ;;
+esac
+
+# 层内路径检查：造一个假 erofs 层 + 假 dump.erofs，让目标路径"存在"。
+# 只改判据的数据来源，不碰真实层 —— 这样两种回答（在/不在）都要能被区分出来。
+FB="$TMP/fakebin"; mkdir -p "$FB"
+printf '%s\n' '#!/bin/sh' \
+    'p=""; for a in "$@"; do case "$a" in --path=*) p="${a#--path=}" ;; esac; done' \
+    'case "$p" in /root/.dsh/profiles/web/package.json|/opt/node/bin/pnpm) echo "Path : $p"; echo "Size: 1  On-disk size: 1  regular file" ;; *) echo "<E> erofs: read inode failed @ $p" ;; esac' \
+    > "$FB/dump.erofs"
+chmod +x "$FB/dump.erofs"
+LD="$TMP/doctor-layer-env"
+mkdir -p "$LD/run" "$LD/etc" "$LD/layers"
+dd if=/dev/zero of="$LD/layers/dsh-9.9.9.erofs" bs=512 count=4 2>/dev/null
+awk 'BEGIN{printf "%c%c%c%c", 226, 225, 245, 224}' \
+    | dd of="$LD/layers/dsh-9.9.9.erofs" bs=1 seek=1024 conv=notrunc 2>/dev/null
+# runtime 层也要造一份：pnpm 的检查是查 runtime 层的 /opt/node/bin/pnpm
+cp "$LD/layers/dsh-9.9.9.erofs" "$LD/layers/runtime-9.9.9.erofs"
+printf '{"schema":1,"layers":{"dsh":{"version":"9.9.9"},"runtime":{"version":"9.9.9"}}}\n' > "$LD/etc/state.json"
+djson2="$(PATH="$FB:$PATH" LINUX_HOME="$LD" "$SH_BIN" "$SELF_DIR/doctor.sh" 2>/dev/null | tail -n1 || true)"
+case "$djson2" in
+    *'"id":"profile","detail":"in-layer"'*) ok "层内有 profile 时给出 in-layer（不再被不递归的列表骗成 fail）" ;;
+    *'"id":"profile","detail":"layer-missing-profile"'*) bad "假阴性未修：层里明明有 profile 却报 layer-missing-profile" ;;
+    *) bad "profile 检查没有给出可判定结论：$(printf '%s' "$djson2" | head -c 140)" ;;
+esac
+case "$djson2" in
+    *'"id":"pnpm","detail":"in-layer"'*|*'"id":"pnpm","detail":"found"'*) ok "runtime 层内 pnpm 可判定（in-layer / found）" ;;
+    *'"id":"pnpm","detail":"missing"'*) bad "假阴性未修：runtime 层里明明有 pnpm 却报 missing（对着路径问就不会错）" ;;
+    *) bad "pnpm 检查没有给出可判定结论：$(printf '%s' "$djson2" | head -c 140)" ;;
+esac
+# 反例：路径真的不在时，必须仍然是 fail（不能为了"不误报"把检查做成永远通过）
+printf '%s\n' '#!/bin/sh' 'echo "<E> erofs: read inode failed @ x"' > "$FB/dump.erofs"
+chmod +x "$FB/dump.erofs"
+djson3="$(PATH="$FB:$PATH" LINUX_HOME="$LD" "$SH_BIN" "$SELF_DIR/doctor.sh" 2>/dev/null | tail -n1 || true)"
+case "$djson3" in
+    *'"id":"profile","detail":"layer-missing-profile"'*) ok "层内确实没有 profile 时仍报 fail（检查没有被"修"成永远通过）" ;;
+    *) bad "反例不对：路径不在时应当 fail，实际：$(printf '%s' "$djson3" | head -c 140)" ;;
+esac
+
+# ---------------------------------------------------------------------------
+# 真机事故回归（2026-09-16，第四起）：可写层 ext4 读写挂载失败（`I/O error`）
+#
+# 真机上 `mount -t ext4 -o loop,rw,noatime upper.img` 只回一句 I/O error，
+# 而只读挂载与 e2fsck 都正常 → 环境永远起不来。修法是"逐级自愈"：
+#   ① 清掉指向我们镜像的残留 loop  ② e2fsck -p  ③ 显式 losetup + mount 两步走
+# 这里用假的 mount/losetup 驱动（不碰真设备），断言：
+#   · toybox 的 `-o loop` 路径失败后，脚本仍能靠显式 losetup 挂上（返回 0）；
+#   · 第一次失败时**必须**先清残留 loop 并跑过 e2fsck -p（自愈顺序不能省）。
+# ---------------------------------------------------------------------------
+head_ "可写层挂载的自愈路径（ext4 rw 失败不带走 start）"
+UE="$TMP/upper-env"
+mkdir -p "$UE/run" "$UE/rootfs" "$UE/rootfs/upper" "$FB" "$UE/bin"
+: > "$UE/upper.img"
+: > "$UE/calls"
+printf '%s\n' '#!/bin/sh' \
+    'echo "mount $*" >> "$CALLS_FILE"' \
+    'case "$*" in *"/dev/block/loop"*) exit 0 ;; esac' \
+    'exit 1' > "$UE/bin/mount"
+printf '%s\n' '#!/bin/sh' \
+    'echo "losetup $*" >> "$CALLS_FILE"' \
+    'case "$1" in -a) echo "/dev/block/loop99: [65103]:2924912 ($UPPER_IMG)" ;; -f) echo "/dev/block/loop99" ;; -d) exit 0 ;; esac' \
+    'exit 0' > "$UE/bin/losetup"
+printf '%s\n' '#!/bin/sh' 'echo "e2fsck $*" >> "$CALLS_FILE"' 'exit 0' > "$UE/bin/e2fsck"
+chmod +x "$UE/bin/mount" "$UE/bin/losetup" "$UE/bin/e2fsck"
+uh="$TMP/upper-harness.sh"
+{
+    echo 'have() { command -v "$1" >/dev/null 2>&1; }'
+    echo 'record_mount() { echo "record_mount $*" >> "$CALLS_FILE"; }'
+    sed -n '/^kernel_hint()/,/^}/p'       "$SELF_DIR/start.sh"
+    sed -n '/^kernel_hint_log()/,/^}/p'   "$SELF_DIR/start.sh"
+    sed -n '/^cleanup_stale_loops()/,/^}/p' "$SELF_DIR/start.sh"
+    sed -n '/^e2fsck_preen()/,/^}/p'      "$SELF_DIR/start.sh"
+    sed -n '/^mount_upper_rw()/,/^}/p'    "$SELF_DIR/start.sh"
+} > "$uh"
+for fn in kernel_hint cleanup_stale_loops e2fsck_preen mount_upper_rw; do
+    grep -q "^$fn()" "$uh" || bad "抽取 $fn 失败（函数被改名了？）"
+done
+uout="$(
+    PATH="$UE/bin:$PATH" \
+    MOUNT="$UE/bin/mount" UMOUNT="$UE/bin/mount" \
+    LH="$UE" LINUX_HOME="$UE" ROOTFS_DIR="$UE/rootfs" RUN_DIR="$UE/run" \
+    DAEMON_LOG="$UE/run/start.log" UPPER_IMG="$UE/upper.img" LAYERS_DIR="$UE/layers" \
+    CALLS_FILE="$UE/calls" \
+    "$SH_BIN" -c 'set -uo pipefail; . "$1"; log() { :; }; warn_soft() { :; }; mount_upper_rw && echo "RESULT=ok" || echo "RESULT=fail"' _ "$uh" 2>&1 || true
+)"
+case "$uout" in
+    *"RESULT=ok"*) ok "toybox 的 -o loop 失败后，显式 losetup 路径把 upper 挂上了（自愈生效）" ;;
+    *) bad "自愈没生效（upper 仍然挂不上）：$(printf '%s' "$uout" | tail -2)" ;;
+esac
+calls="$(cat "$UE/calls" 2>/dev/null || true)"
+case "$calls" in
+    *"losetup -a"*) : ;;
+    *) bad "失败后没有先清残留 loop（cleanup_stale_loops 没跑）" ;;
+esac
+case "$calls" in
+    *"e2fsck -p"*) ok "失败后先清了残留 loop，并跑过 e2fsck -p（自愈顺序正确）" ;;
+    *) bad "失败后没有跑 e2fsck -p（needs_recovery 这类问题修不掉）" ;;
+esac
+
 printf '\n=========================================\n'
 printf '  通过 %d，失败 %d\n' "$pass" "$fail"
 printf '=========================================\n'

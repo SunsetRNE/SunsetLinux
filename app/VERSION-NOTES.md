@@ -21,6 +21,59 @@
 | 0.2.8 | 10 | **免 root 模式换 proroot 首选 + proot 降级**：proroot（LD_PRELOAD，无 ptrace 开销）随 APK 的 jniLibs 打包，proot 仍随包内嵌；`SUNSETLINUX_ROOTLESS=auto|proroot|proot`（App 设置里可选），`status`/`doctor`/App 都如实报实际用了谁。proroot 是专有许可 —— 只随 APK 分发、不得再分发修改版，带许可原文 + 关于页 attribution，并有合规闸门 |
 | 0.2.9 | 11 | **终端接上原生 PTY**：`/dev/ptmx` + forkpty 路线（NDK 编译的小 `.so` 随 APK），Ctrl-C/Ctrl-D/Tab/方向键真的生效，`vim`/`htop` 这类全屏程序能跑，窗口大小按控件尺寸发 `TIOCSWINSZ`；输出用最小 VT 模拟器渲染（`\r` 覆盖、`ESC[K`、定位、SGR 剥离）；原生库不可用时**优雅降级**回行缓冲并明说 |
 | 0.2.10 | 12 | **加"无 loop 层模式"开关（dir）**：把三层解包成目录 + 目录 overlayfs，**完全不碰 loop / erofs / upper.img**；「设置 → 层模式」可切、也读 `SUNSETLINUX_LAYER_MODE` 与 `etc/config.json` 的 `layer_mode`（默认 loop 省磁盘）。模块 **1.0.15**：dir 模式实现 + doctor §1e 层模式检查 |
+| 0.2.11 | 13 | **首启引导第 2 步改成真正的刷模块引导（模块包内嵌）**：APK 里带 `assets/module/sunsetlinux-module.zip`（构建期从 `dist/` 取，连版本 + sha256 写进 `module.json`），卡片上「一键刷入内置模块」直接 `ksud module install`，「导出模块包到 Download」「打开 KernelSU / Magisk 管理器」作为手动路径；模块被设备侧确认已启用时勾选框自动打上。诊断页「✗ 自检未通过」不再打印第一个小节标题，改为 fail 计数 + 带 `[fail]` 的原文。模块 **1.0.17**：doctor 修 4 处误报 + 可写层 ext4 挂载自愈（见下） |
+
+## 0.2.11 —— 让"装模块"这一步在 App 里真的能做（+ doctor 不再误报）
+
+**问题一：引导第 2 步是不可执行的。** 原文写"选择模块包：`dist/sunsetlinux-module-0.1.0.zip`" ——
+那个路径在开发者机器/仓库里，用户手机上不存在；截图里那个「我已经装好模块并重启」勾选框
+卡住的正是这一步。现在：
+
+- 模块 zip **内嵌进 APK**（`SyncBundledModule`，四个组合都带；`dist/` 为空时输出"未内嵌"并如实说明，
+  不给一个点了必然失败的按钮）；
+- 「一键刷入内置模块」→ assets 落盘（**落盘时校验构建期记下的 sha256**）→ `ksud module install`
+  （Magisk 走 `magisk --install-module`）；刷完只提示重启，**绝不替用户重启**；
+- 「导出模块包到 Download」（`su cp`；失败退到 FileProvider 分享）给"从本地安装"用；
+- 「打开 KernelSU / Magisk 管理器」（已知包名 4 个，一个都没有就明说）；
+- 勾选框的启用条件 = 用户断言 **或** 设备侧事实（模块已装 + 已启用 + 已重启生效）。
+
+**问题二：诊断页的"原因"是章节名。** 流式 doctor 的 `CtlResult.message` 取的是 stdout 第一行
+非空内容 = `== 0. 运行环境 ==`，于是用户看到 `✗ 自检未通过：== 0. 运行环境 ==`。
+现在解析 JSON 尾行的 `fails`/`warns` 并附上报告里带 `[fail]` 的原文（最多 6 条）。
+
+**模块 1.0.17 一起修掉的 doctor 误报**（真机一次自检报了 4 项 fail，其中 3 项是假的）：
+
+| 误报 | 根因 | 现在 |
+|---|---|---|
+| `CONFIG_SQUASHFS 未启用` / `内核不支持 squashfs` | 本项目三层只读镜像用 **erofs**（Android 原生格式）；squashfs 只是"另一种可选格式"，缺它不影响任何东西 | 降为 info/ok；**只有当"两种格式都不可用"时** §2 才真报 fail |
+| `dsh 层内没有 /root/.dsh/profiles/**` | 检查拿 `dump.erofs --ls --path=/` 的输出 grep 深层路径，而那个列表**不递归**（根目录只有 `root`/`usr`）→ 层是好的也永远匹配不上 | 新增 `layer_has_path()`：对着**目标路径**问（erofs `--path=`、squashfs `unsquashfs -l`），自测里加了正反两例 |
+| `runtime 层里没有 pnpm` | 同上（同一个假阴性） | 同上 |
+| `run/last-error：挂载 upper 失败…` | 这条**是真的**，但只报一句 `I/O error` 无从下手 | §3 新增**读写试挂**（只读能挂 ≠ 读写能挂），§8 区分"历史记录 / 当前故障"并给三条例行下一步 |
+
+顺带：loop 设备计数（旧代码 `grep -c ":'"` 恒为 0，输出"在用 1 个"却列出 4 个）、
+与本项目无关的 avc denial 在 JSON 里被打成 warn（与人类可读那行"都与本项目无关"自相矛盾）、
+e2fsck 结论只说"报问题"不带原文 —— 都一并修了。
+
+### 模块 1.0.17 —— 可写层 ext4 读写挂载失败不再让环境起不来
+
+真机（6.1.141-android14，`u:r:ksu:s0`）实测：`mount -t ext4 -o loop,rw,noatime upper.img` 只回
+`mount: '/dev/block/loop49'->'…/rootfs/upper': I/O error`，而**同一镜像 `-o loop,ro` 能挂、
+`e2fsck -fn` 说"文件系统一致"**，`upper.img` 的 mtime 还停在创建时刻（说明从未成功读写挂载过）。
+ext4 只在读写挂载时才写超级块 / 恢复日志，那条路径上的任何写失败都被内核统一报成 EIO ——
+光看 errno 什么都推不出来。所以 `start.sh` 改成**逐级自愈**，每一步都留在 `run/start.log`：
+
+1. 清掉**指向我们镜像的残留 loop**（上次启动失败留下的；只清没被任何进程挂载的）；
+2. `e2fsck -p`（自动修"没干净卸载"留下的 needs_recovery / 孤立 inode；不做更激进的 `-fy`）；
+3. **显式 `losetup -f --show` + `mount`** 两步走（错误可归因，绕开 toybox 的 `-o loop` 合并路径）；
+4. 仍失败 → 把 `dmesg | grep -iE 'loop|ext4|jbd2'` 的原文写进日志，并把摘要压成一行进 `last-error`。
+
+**最后一道**：四次都失败就**自动降级到 dir 层模式**（解包成目录 + 目录 overlay，全程不碰 loop /
+upper.img）并把原因与代价（约 1.6 GB 磁盘）写进日志 —— 用户要的是"环境能起来"，不是"必须用 loop"。
+想固定这个选择：`linuxctl start --layer-mode dir` 或「设置 → 层模式」。
+
+自测新增 6 条：squashfs 不得打成 fail、层内路径检查的正例/反例、
+`mount_upper_rw` 在"toybox `-o loop` 失败"时靠显式 losetup 挂上、失败后**确实**先清了残留 loop 并跑过 `e2fsck -p`。
+
 
 ## 0.2.10 —— 加一条"不碰 loop"的层模式（兼容开关）
 

@@ -113,11 +113,48 @@ class DiagnosticsActivity : ComponentActivity() {
                 io.github.sunsetrne.sunsetlinux.core.CtlResult.fail(t.message ?: "doctor 执行失败")
             }
             emit("")
-            emit(if (result.ok) "✓ 自检通过" else "✗ 自检未通过：${result.message}")
+            emit(if (result.ok) "✓ 自检通过" else "✗ 自检未通过：${doctorSummary(lines.toList(), result.message)}")
             emit("")
             emit("提示：把上面这段（或「导出排障包」）发给开发者即可定位。")
             withMain { running.value = false }
         }
+    }
+
+    /**
+     * 给"自检未通过"准备一句**有意义**的话。
+     *
+     * 真机上这里印的是 `✗ 自检未通过：== 0. 运行环境 ==` —— 因为 `CtlResult.message` 在
+     * 流式输出里取的是 stdout 第一行非空内容，而 doctor 的第一行非空内容正好是第一个
+     * 小节标题。用户看到的"原因"其实是个章节名，等于没有信息。
+     *
+     * 现在：优先用 JSON 尾行的 `fails`/`warns` 计数 + 报告里带 `[fail]` 的行原文；
+     * JSON 解析不出来（旧版 doctor / 输出被截断）再退回原来的 `message`。
+     */
+    private fun doctorSummary(allLines: List<String>, fallback: String): String {
+        val failLines = allLines.filter { it.contains("[fail]") }
+            .map { it.substringAfter("[fail]").trim().trimEnd() }
+            .filter { it.isNotBlank() }
+        val tail = allLines.lastOrNull { it.trimStart().startsWith("{\"schema\"") }
+        var fails = -1
+        var warns = -1
+        if (tail != null) {
+            runCatching {
+                val o = org.json.JSONObject(tail.trim())
+                fails = o.optInt("fails", -1)
+                warns = o.optInt("warns", -1)
+            }
+        }
+        val head = when {
+            fails > 0 -> "$fails 项 fail" + if (warns > 0) "、$warns 项 warn" else ""
+            fails == 0 -> "JSON 说有 0 项 fail（但退出码非 0，可能被截断）"
+            else -> fallback
+        }
+        val detail = if (failLines.isEmpty()) {
+            ""
+        } else {
+            "\n   · " + failLines.take(6).joinToString("\n   · ")
+        }
+        return head + detail
     }
 
     private fun emit(line: String) = withMain { if (lines.size < 2000) lines.add(line) }

@@ -39,6 +39,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import io.github.sunsetrne.sunsetlinux.core.EnvMode
+import io.github.sunsetrne.sunsetlinux.core.formatBytes
 import io.github.sunsetrne.sunsetlinux.ui.components.DshCard
 import io.github.sunsetrne.sunsetlinux.ui.components.LogPanel
 import io.github.sunsetrne.sunsetlinux.ui.components.Pill
@@ -198,10 +199,25 @@ fun WelcomeScreen(
                 when (state.step) {
                     WelcomeStep.MODE -> Button(onClick = { state.next() }) { Text("下一步") }
 
-                    WelcomeStep.BRANCH -> Button(
-                        onClick = { state.next() },
-                        enabled = if (state.mode == EnvMode.ROOT) state.moduleAcknowledged else true,
-                    ) { Text(if (state.mode == EnvMode.ROOT) "已装好模块，继续" else "继续") }
+                    WelcomeStep.BRANCH -> {
+                        val ready = state.moduleReady
+                        Button(
+                            onClick = { state.next() },
+                            enabled = if (state.mode == EnvMode.ROOT) {
+                                state.moduleAcknowledged || ready
+                            } else {
+                                true
+                            },
+                        ) {
+                            Text(
+                                when {
+                                    state.mode != EnvMode.ROOT -> "继续"
+                                    ready -> "模块已就绪，继续"
+                                    else -> "已装好模块，继续"
+                                },
+                            )
+                        }
+                    }
 
                     WelcomeStep.DEPLOY -> {
                         if (provisioned == true) {
@@ -411,10 +427,72 @@ private fun StepBranch(state: WelcomeState, onOpenProvision: () -> Unit) {
 
         DshCard(Modifier.fillMaxWidth()) {
             Column(Modifier.fillMaxWidth()) {
-                SectionLabel("第 2 步：安装模块")
+                SectionLabel("第 2 步：刷入模块")
                 Spacer(Modifier.height(8.dp))
-                NumberedLine(1, "在 KernelSU 管理器里选「模块」→「从本地安装」")
-                NumberedLine(2, "选择模块包：dist/sunsetlinux-module-0.1.0.zip")
+
+                val bundled = state.bundled
+                if (bundled != null) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Pill(bundled.label, color = Accent, filled = true)
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            text = formatBytes(bundled.size),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = TextMuted,
+                        )
+                    }
+                    Spacer(Modifier.height(10.dp))
+                    Text(
+                        text = "模块包**已内置在本 App 里**，不用去别处找：点下面的按钮，App 会把它" +
+                            "落到设备上并交给 `ksud module install` 刷入（与 KernelSU 管理器的" +
+                            "「从本地安装」是同一件事）。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = TextSecondary,
+                    )
+                    Spacer(Modifier.height(10.dp))
+                    Button(
+                        onClick = { state.flashBundledModule() },
+                        enabled = state.suAvailable == true && !state.flashing,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text(if (state.flashing) "正在刷入…" else "一键刷入内置模块 ${bundled.shortVersion}")
+                    }
+                    Spacer(Modifier.height(6.dp))
+                    OutlinedButton(
+                        onClick = { state.exportBundledModule() },
+                        enabled = !state.flashing,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text("导出模块包到 Download（手动安装用）") }
+                    Spacer(Modifier.height(2.dp))
+                    TextButton(
+                        onClick = { state.openModuleManager() },
+                        enabled = !state.flashing,
+                    ) { Text("打开 KernelSU / Magisk 管理器") }
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        text = "刷入后**必须重启手机**（KernelSU 落的是 modules_update/，重启才生效）。" +
+                            "重启后回到这里点「重新检测」；模块检测为已启用时，下面的勾选框会自动打上。",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = WarnTone,
+                    )
+                } else {
+                    WarnBox(
+                        "这个 APK 没有内嵌模块包（干净检出或 CI 未附产物时会这样）。" +
+                            "两条替代路径：① 侧边栏「关于 → 更新模块」从官方站下载并刷入；" +
+                            "② 把仓库里的 dist/sunsetlinux-module-<版本>.zip 传到手机，用下面的手动步骤装。"
+                    )
+                    Spacer(Modifier.height(10.dp))
+                }
+
+                Spacer(Modifier.height(10.dp))
+                Text("手动安装（KernelSU 管理器）：", style = MaterialTheme.typography.labelSmall, color = TextMuted)
+                Spacer(Modifier.height(4.dp))
+                NumberedLine(1, "KernelSU 管理器 → 「模块」→「从本地安装」")
+                NumberedLine(
+                    2,
+                    "选择模块包：Download/" + (bundled?.fileName ?: "sunsetlinux-module-<版本>.zip") +
+                        "（上一步导出的那个；也可以直接点「一键刷入」跳过这步）",
+                )
                 NumberedLine(3, "安装完成后**重启手机**（模块在 late_start 阶段生效）")
                 NumberedLine(4, "重启后回到这里，点下面的「重新检测」，再继续部署层")
                 Spacer(Modifier.height(10.dp))
@@ -429,9 +507,10 @@ private fun StepBranch(state: WelcomeState, onOpenProvision: () -> Unit) {
 
         Spacer(Modifier.height(12.dp))
 
+        val ready = state.moduleReady
         Surface(
             shape = RoundedCornerShape(16.dp),
-            color = Mono2,
+            color = if (ready) StateRunning.copy(alpha = 0.12f) else Mono2,
             modifier = Modifier.fillMaxWidth(),
         ) {
             Row(
@@ -441,15 +520,25 @@ private fun StepBranch(state: WelcomeState, onOpenProvision: () -> Unit) {
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Checkbox(
-                    checked = state.moduleAcknowledged,
+                    checked = state.moduleAcknowledged || ready,
                     onCheckedChange = { state.acknowledgeModule(it == true) },
                 )
                 Column(Modifier.weight(1f)) {
-                    Text("我已经装好模块并重启", style = MaterialTheme.typography.bodyMedium)
                     Text(
-                        "勾选后才能进入下一步（层部署需要 /data/sunsetlinux 已就绪）",
+                        text = if (ready) "模块已启用（已装 + 已重启）" else "我已经装好模块并重启",
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                    Text(
+                        text = when {
+                            ready -> "设备侧检测到模块已生效，可以直接进入下一步。"
+                            state.module?.pendingReboot == true ->
+                                "当前：${state.module?.label}。重启手机后回到这里点「重新检测」，勾选框会自动打上。"
+                            state.module?.installed == false && state.module?.readable == true ->
+                                "还没检测到模块。用上面的「一键刷入内置模块」或手动安装，装完重启。"
+                            else -> "勾选后才能进入下一步（层部署需要 /data/sunsetlinux 已就绪）"
+                        },
                         style = MaterialTheme.typography.labelSmall,
-                        color = TextMuted,
+                        color = if (ready) StateRunning else TextMuted,
                     )
                 }
             }

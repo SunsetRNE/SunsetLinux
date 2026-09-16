@@ -51,6 +51,7 @@ CONFIG_JSON="$ETC_DIR/config.json"   # resolve_layer_mode 要读它（此前只�
 LAYERS_DIR="$LH/layers"
 LAYERS_MNT="$LH/layers-mnt"
 UPPER_DIR="$LH/upper"
+UPPER_IMG="$LH/upper.img"
 
 # ── 层模式（loop / dir）────────────────────────────────────────────────────
 #   loop（默认）：losetup + erofs 挂载 + upper.img(ext4) + overlayfs —— 省磁盘，但要用 loop 设备
@@ -513,6 +514,142 @@ do_bind() {
 }
 
 # ---------------------------------------------------------------------------
+# 可写层 upper.img 的挂载：**自愈 + 可诊断**
+#
+# 真机实测的失败形态（2026-09-16，6.1.141-android14）：
+#     mount: '/dev/block/loop49'->'/data/sunsetlinux/rootfs/upper': I/O error
+# 而同一镜像 `-o loop,ro` 能挂、`e2fsck -fn` 也说"文件系统一致"。
+# 原因：ext4 只有在**读写**挂载时才会写超级块 / 恢复日志，这条路径上的任何写失败
+# 都被内核统一报成 EIO —— 光看 errno 什么都推不出来，必须看 dmesg。所以这里：
+#   ① 先清掉指向我们镜像的**残留 loop**（上次启动失败留下的，真机上确实存在）
+#   ② e2fsck -p（自动修复"上次没干净卸载"留下的 needs_recovery）
+#   ③ 显式 `losetup` + `mount` 两步走（错误可归因，绕开 toybox 的 `-o loop` 合并路径）
+#   ④ 每次都把 dmesg 里 loop/ext4/jbd2 的原文记进 $DAEMON_LOG，并压成一行给 last-error
+# 全失败 → 返回 1，由 build_mount_tree 决定是否切 dir 模式（那条路不碰 loop）。
+# ---------------------------------------------------------------------------
+UPPER_ERR=""
+
+# 抓内核里与本项目挂载相关的原文（mount 只回一句 'I/O error'，原因只在这里）。
+kernel_hint() {
+    have dmesg || { printf '%s' "（拿不到 dmesg）"; return 0; }
+    local out=""
+    # `|| true`：grep 无命中会返回 1，在 `set -o pipefail` 下会让命令替换整体失败，
+    # 进而被 `set -e` 带走 —— 那会把"挂载失败"变成"脚本静默退出"（真机上踩过同类）。
+    out="$(dmesg 2>/dev/null | grep -iE 'loop|ext4|jbd2|overlay' | tail -n 5 | tr '\n' '|' | sed 's/|*$//' || true)"
+    printf '%s' "${out:-（dmesg 里没有 loop/ext4/jbd2 相关行）}"
+}
+
+kernel_hint_log() {
+    have dmesg || return 0
+    log "—— 内核原文（dmesg | grep -iE 'loop|ext4|jbd2' | tail -20）——"
+    dmesg 2>/dev/null | grep -iE 'loop|ext4|jbd2' | tail -n 20 >> "$DAEMON_LOG" 2>/dev/null || true
+}
+
+# 清掉"backing 指向 $LH 下镜像"且**没有被任何进程挂载**的残留 loop。
+# 为什么必须清：残留 loop 会让下一次 ext4 读写挂载失败（真机就在这条上卡了整天）。
+# 为什么只清没挂载的：挂着的 loop 属于别人的活挂载，硬拔会打断它。
+cleanup_stale_loops() {
+    have losetup || return 0
+    local devs dev mm hit mi
+    devs="$(losetup -a 2>/dev/null \
+            | awk -v h="$LH" '/^\/dev\// && index($0,h)>0 {sub(/:$/,"",$1); print $1}' || true)"
+    [ -n "$devs" ] || return 0
+    for dev in $devs; do
+        mm="$(cat "/sys/block/$(basename "$dev")/dev" 2>/dev/null || true)"
+        hit=""
+        if [ -n "$mm" ]; then
+            for mi in /proc/[0-9]*/mountinfo; do
+                [ -r "$mi" ] || continue
+                if grep -q " $mm " "$mi" 2>/dev/null; then hit="$mi"; break; fi
+            done
+        fi
+        if [ -n "$hit" ]; then
+            log "残留 loop $dev 仍被挂载（$hit），跳过 detach"
+            continue
+        fi
+        if losetup -d "$dev" 2>>"$DAEMON_LOG"; then
+            log "清掉残留 loop：$dev（上次启动失败留下的，不指向任何活挂载）"
+        else
+            log "WARN: 无法 detach 残留 loop $dev（继续尝试挂载）"
+        fi
+    done
+    return 0
+}
+
+# e2fsck -p：修"没干净卸载"留下的 needs_recovery / 孤立 inode。
+# 为什么敢自动做：这是只读 overlay 的**可写层**（用户数据在上层文件里，不动下层），
+# 而 -p（preen）本身就是设计给"无人值守启动"的；修不了会退非 0，那时我们不做
+# 更激进的 -fy（自动大改用户数据风险太高，交给用户跑 linuxctl reset）。
+e2fsck_preen() {
+    local fsck=""
+    for fsck in /system/bin/e2fsck "$ROOTFS_DIR/sbin/e2fsck" "$ROOTFS_DIR/usr/sbin/e2fsck"; do
+        [ -x "$fsck" ] || continue
+        log "e2fsck -p $UPPER_IMG（自动修日志/孤立 inode，工具：$fsck）"
+        if "$fsck" -p "$UPPER_IMG" >>"$DAEMON_LOG" 2>&1; then
+            log "e2fsck -p 通过"
+            return 0
+        fi
+        log "WARN: e2fsck -p 未通过（详情见 $DAEMON_LOG 尾部）"
+        return 1
+    done
+    # PATH 里的 e2fsck（`[ -x e2fsck ]` 判不出来：那是相对路径，永远不成立）
+    if have e2fsck; then
+        log "e2fsck -p $UPPER_IMG（自动修日志/孤立 inode，工具：PATH 里的 e2fsck）"
+        if e2fsck -p "$UPPER_IMG" >>"$DAEMON_LOG" 2>&1; then
+            log "e2fsck -p 通过"
+            return 0
+        fi
+        log "WARN: e2fsck -p 未通过（详情见 $DAEMON_LOG 尾部）"
+        return 1
+    fi
+    log "WARN: 没有 e2fsck，跳过可写层体检"
+    return 1
+}
+
+# 挂 ext4 可写层。成功返回 0，并把 UPPER_ERR 留空；失败返回 1 且 UPPER_ERR 可读。
+mount_upper_rw() {
+    local dst="$ROOTFS_DIR/upper" dev=""
+    UPPER_ERR=""
+    [ -f "$UPPER_IMG" ] || { UPPER_ERR="缺少可写层镜像 $UPPER_IMG"; return 1; }
+    mkdir -p "$dst" || { UPPER_ERR="无法创建挂载点 $dst"; return 1; }
+
+    cleanup_stale_loops
+
+    # ① 与历史行为一致的第一步（toybox 的 `-o loop` 自己分配 loop 设备）
+    log "mount upper <- $UPPER_IMG -t ext4 -o loop,rw,noatime"
+    if "$MOUNT" -t ext4 -o loop,rw,noatime "$UPPER_IMG" "$dst" 2>>"$DAEMON_LOG"; then
+        record_mount upper
+        return 0
+    fi
+    UPPER_ERR="$(kernel_hint)"
+    warn_soft "第一次挂载 upper 失败：$UPPER_ERR"
+
+    # ② 清残留后再试一次（清完可能就好了：真机上就是残留 loop 加没干净卸载）
+    e2fsck_preen || true
+
+    # ③ 显式 losetup + mount：两步走，错误能归因到具体哪一步
+    dev="$(losetup -f --show "$UPPER_IMG" 2>>"$DAEMON_LOG" || true)"
+    if [ -z "$dev" ]; then
+        warn_soft "losetup -f --show 失败（没有空闲 loop 设备？）"
+    else
+        log "显式 losetup：$dev <- $UPPER_IMG"
+        if "$MOUNT" -t ext4 -o rw,noatime "$dev" "$dst" 2>>"$DAEMON_LOG"; then
+            record_mount upper
+            log "显式 losetup 路径挂载成功（记下：本机 toybox 的 -o loop 不可靠，已自动兜住）"
+            return 0
+        fi
+        UPPER_ERR="$(kernel_hint)"
+        warn_soft "显式 losetup 后仍挂不上：$UPPER_ERR"
+        # 把这次尝试留下的 loop 拔掉，别给下一次留垃圾
+        "$UMOUNT" -l "$dst" 2>/dev/null || true
+        losetup -d "$dev" 2>>"$DAEMON_LOG" || true
+    fi
+
+    kernel_hint_log
+    return 1
+}
+
+# ---------------------------------------------------------------------------
 # 失败回滚：反序卸载已登记的挂载点。任何一步失败都走这里。
 # ---------------------------------------------------------------------------
 unmount_recorded() {
@@ -633,30 +770,45 @@ build_mount_tree() {
         ovl_opts="lowerdir=$DIRS_DIR/dsh:$DIRS_DIR/runtime:$DIRS_DIR/base"
         ovl_opts="$ovl_opts,upperdir=$DIRS_UPPER,workdir=$DIRS_WORK"
     else
-        [ -f "$LH/upper.img" ] || die "缺少可写层镜像 $LH/upper.img（先跑 linuxctl provision；或用 --layer-mode dir）"
+        # --- §4 步 3：ext4 可写层（loop），带自愈（见 mount_upper_rw）--------
+        if mount_upper_rw; then
+            mkdir -p "$UPPER_DIR/upper" "$UPPER_DIR/work" || die "无法创建 overlay upper/work 目录"
 
-        # --- §4 步 3：ext4 可写层（loop）----------------------------------
-        # 说明：这里用 `-o loop` 让内核自动分配 loop 设备。内核 CONFIG_EXT4_FS=y。
-        do_mount upper "$LH/upper.img" -t ext4 -o loop,rw,noatime
-        mkdir -p "$UPPER_DIR/upper" "$UPPER_DIR/work" || die "无法创建 overlay upper/work 目录"
+            # --- §4 步 4（前半）：把三层只读镜像 loop 挂成目录 -------------
+            # **对 architecture.md §4 的必要修正**：原文写 `lowerdir=layers/dsh:...`，
+            # 直接把镜像文件路径当 lowerdir。这要求镜像能被 overlayfs 直接当 lower，
+            # 而 overlayfs 的 lowerdir 必须是**目录**（squashfs/erofs 镜像是块设备内容，
+            # 不是目录）。因此先把每层 loop 挂到 $LAYERS_MNT/<name>，再用这些目录组 lowerdir。
+            # 代价：多 3 个 loop 挂载；收益：格式无关（erofs/squashfs 都行），且能对每层
+            # 单独做健康检查。
+            mkdir -p "$LAYERS_MNT"
+            for l in $LAYER_NAMES; do
+                mount_layer "$l" "$(find_layer "$l")"
+            done
+            base_for_util="$LAYERS_MNT/base"
 
-        # --- §4 步 4（前半）：把三层只读镜像 loop 挂成目录 -----------------
-        # **对 architecture.md §4 的必要修正**：原文写 `lowerdir=layers/dsh:...`，
-        # 直接把镜像文件路径当 lowerdir。这要求镜像能被 overlayfs 直接当 lower，
-        # 而 overlayfs 的 lowerdir 必须是**目录**（squashfs/erofs 镜像是块设备内容，
-        # 不是目录）。因此先把每层 loop 挂到 $LAYERS_MNT/<name>，再用这些目录组 lowerdir。
-        # 代价：多 3 个 loop 挂载；收益：格式无关（erofs/squashfs 都行），且能对每层
-        # 单独做健康检查。
-        mkdir -p "$LAYERS_MNT"
-        for l in $LAYER_NAMES; do
-            mount_layer "$l" "$(find_layer "$l")"
-        done
-        base_for_util="$LAYERS_MNT/base"
+            # --- §4 步 4（后半）：overlay 合并层 ---------------------------
+            # 顺序：最右 = 最底层。dsh 在最上 → 更新 dsh 层即可换 DSH 版本。
+            ovl_opts="lowerdir=$LAYERS_MNT/dsh:$LAYERS_MNT/runtime:$LAYERS_MNT/base"
+            ovl_opts="$ovl_opts,upperdir=$UPPER_DIR/upper,workdir=$UPPER_DIR/work"
+        else
+            # ---- 自愈失败 → 自动降级到 dir 模式 ---------------------------
+            # 为什么要自动切、而不是 die：loop + ext4 这条链在部分设备/内核上就是
+            # 挂不上（真机：只读能挂、读写 EIO），而 overlayfs over 目录是内核确认
+            # 支持的最基本用法。用户要的是"环境能起来"，不是"必须用 loop"。
+            # 代价：磁盘（解包后约 1.6 GB）。这条降级会把原因与代价都写进日志。
+            warn_soft "loop 可写层挂不上：$UPPER_ERR"
+            warn_soft "自动降级到 dir 层模式（不碰 loop / upper.img；代价是解包后约 1.6 GB 磁盘）"
+            log "要固定这个选择：linuxctl start --layer-mode dir，或设置 → 层模式 → dir"
 
-        # --- §4 步 4（后半）：overlay 合并层 -------------------------------
-        # 顺序：最右 = 最底层。dsh 在最上 → 更新 dsh 层即可换 DSH 版本。
-        ovl_opts="lowerdir=$LAYERS_MNT/dsh:$LAYERS_MNT/runtime:$LAYERS_MNT/base"
-        ovl_opts="$ovl_opts,upperdir=$UPPER_DIR/upper,workdir=$UPPER_DIR/work"
+            LAYER_MODE=dir
+            printf 'dir\n' > "$RUN_DIR/layer-mode" 2>/dev/null || true
+            materialize_dirs
+            base_for_util="$DIRS_DIR/base"
+            mkdir -p "$DIRS_UPPER" "$DIRS_WORK" || die "无法创建目录模式 upper/work：$DIRS_UPPER"
+            ovl_opts="lowerdir=$DIRS_DIR/dsh:$DIRS_DIR/runtime:$DIRS_DIR/base"
+            ovl_opts="$ovl_opts,upperdir=$DIRS_UPPER,workdir=$DIRS_WORK"
+        fi
     fi
     # base 层挂上/解开之后才可能取到 util-linux 的 mount，这里补一次探测，
     # 让后面的 proc/sys/dev 挂载有真正的回退路径可用

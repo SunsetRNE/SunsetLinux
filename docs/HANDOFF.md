@@ -2,7 +2,7 @@
 
 > 用途：**对话记录可能被删/会被换掉**，所以把"现在到哪了、还剩什么、怎么接着做"落进仓库。
 > 和 `docs/STATUS.md`（项目总账）配合看：STATUS 讲**项目本身**做到什么程度，本文讲**这次协作的落点**。
-> 最后更新：**2026-09-16**（第 12 条：`device-provision.sh` mksh 化 → 模块 1.0.5；真机现状见 §〇）
+> 最后更新：**2026-09-16**（第 33 条：引导第 2 步的模块包内嵌 + doctor 3 处假警报 + upper 读写挂载自愈 → App 0.2.11 / 模块 1.0.17）
 
 ---
 
@@ -82,6 +82,30 @@ CI 四条线路：① `ci.yml` 回归门禁（shell / node / android 三并行�
 | 30 | *(本次)* | **真机 doctor 定位：start.sh 被 set -e 带走 + 挂载探测误报**（用户贴出完整 doctor 输出）| ① 唯一真 blocker：`start.sh` 的 mount 探测命令**本来就设计成失败**，而 `out="$(mount --rbind …)"; rc=$?` 在 `set -e` 下让脚本在探测第一行退出（真机 cmdprobe 0 字节、linux.log 停在"开始探测…"），**真正的挂载步骤一行没跑到** —— 本地 1:1 复现（--probe-only 退出 1）；修法：4 处改 `rc=0; out="$(…)" || rc=$?`、probe_get 加 || true、整段探测 set +e；并加回归「--probe-only 必须落 probed=」。② 误报 `本模块需要挂载: 是`：doctor 用 `sh -c` 跑探测 → `$0`=`sh` → detect-mount 的"取脚本上一级"退化成 cwd（用户在 `/` 跑 → `/system` 必在）→ 现在必须显式 MODULE_ROOT，否则三态"未知"；新增 tools/detect-mount-selftest.mjs（5 条）接入 CI。③ avc 242 条全是厂商 HAL 扫 ksu，分级为 info。模块 **1.0.13** |
 | 31 | *(本次)* | **挂载冲突检查（§1d）+ 机制澄清**（用户："我主要是怕挂载冲突的问题，模块本身就有自动挂载机制，项目的模块再写个挂载，怕不是会冲突哟"）| 查清 KernelSU 侧：挂载已交给 **metamodule**（单实例、`metamount.sh` 把常规模块的 `system/` overlay 到 Android 系统路径、必须 `source=KSU`；`magic_mount_rs` 是内核级路径重定向、不产生 mount 条目）。我们的挂载目标全在 `$LINUX_HOME/**`、在 `unshare -m` 的私有 namespace 里、模块本身**没有 `system/`** → 三条硬理由说明**不冲突**；且"交给 metamodule 挂"不可行（钩子契约 + 单实例会顶掉用户的 magic_mount_rs）。新增 `docs/mount-conflict.md` 与 doctor **§1d**（五条判据：模块自身、私有 ns 隔离、全局泄漏、loop 占用、运行期存续），selftest 加一条断言。模块 **1.0.14** |
 | 32 | *(本次)* | **无 loop 层模式（dir）+ doctor §1e**（用户选了"加无 loop 目录模式作兼容开关"）| `start.sh --layer-mode loop|dir`：dir = `fsck.erofs --extract` 把三层解成目录 + `dirs-upper/` 真目录 + 目录 overlayfs，**不碰 loop/erofs/upper.img**；优先级 命令行>env>config.json>loop，非法值立刻报错；App「设置 → 层模式」可切、「关于」/`status.layer_mode` 显示实际用的；doctor §1e 报模式+解包器+三层戳+占用。selftest 新增 14 条（解析优先级/幂等/换层只重解/解包器缺失明确失败），bash+mksh 34/0。App **0.2.10** / 模块 **1.0.15** |
+| 33 | *(本次)* | **首启引导第 2 步改成真正的刷模块引导（模块包内嵌进 APK）+ 修掉 doctor 的 3 处假警报与"只读能挂、读写挂不上"**（用户给了引导页截图："在勾选的地方做 Root 模块刷写引导，内置模块包"；并把真机 doctor 输出整段贴过来："顺便解决一下日志问题"）| ① 引导第 2 步原来写"选择模块包：`dist/sunsetlinux-module-0.1.0.zip`" —— 那个路径**在用户手机上不存在**，勾选框因此卡死。现在构建期把 `dist/sunsetlinux-module-*.zip` 内嵌成 `assets/module/sunsetlinux-module.zip` + `module.json`（版本/sha256/大小，`SyncBundledModule`），卡片上「一键刷入内置模块」= assets 落盘（校验 sha256）→ `ksud module install`，「导出模块包到 Download」「打开 KernelSU/Magisk 管理器」为手动路径，勾选框 = 用户断言 **或** 设备侧事实（已装+已启用+已重启）。② 诊断页 `✗ 自检未通过：== 0. 运行环境 ==` —— `CtlResult.message` 取的是 stdout 第一行，而 doctor 第一行非空内容就是第一个小节标题；改成解析 JSON 尾行的 fails/warns + 带 `[fail]` 的原文。③ doctor 的假警报：`CONFIG_SQUASHFS 未启用`/`内核不支持 squashfs` 判成 fail（本项目只用 erofs）、`dsh 层内没有 /root/.dsh/profiles/**` 与 `runtime 层里没有 pnpm`（检查拿 `dump.erofs --ls --path=/` 的**不递归**输出 grep 深层路径，永远匹配不上）、loop 计数（`grep -c ":'"` 恒为 0，输出"在用 1 个"却列 4 个）、与本项目无关的 avc denial 在 JSON 里被打成 warn。④ 唯一真 fail（`挂载 upper 失败…I/O error`）：`start.sh` 改逐级自愈（清残留 loop → `e2fsck -p` → 显式 `losetup`+`mount` → 抓 dmesg 原文进 last-error），四次都失败自动降级 dir 层模式。证据：selftest bash+mksh **42/0**（新增 6 条：squashfs 不得 fail、层内路径正/反例、`mount_upper_rw` 在 toybox `-o loop` 失败后靠显式 losetup 挂上、失败后确实先清 loop 并跑过 e2fsck -p）；App 单测 **134/0**（注意：本机 locale 是 POSIX，Kotlin 增量编译会因中文测试名写出不可映射的文件名而 ICE——`gradlew --stop` 后用 `LANG=C.UTF-8` 重跑即过，与本次改动无关）；模块 zip `dist/sunsetlinux-module-v1.0.17.zip`（209116 B，sha256 `88c00d8e…7dd9`）；APK `SunsetLinux-0.2.11-minimal-debug.apk` 内含 `assets/module/sunsetlinux-module.zip`（sha256 与 `module.json` 一致），签名 `5d5fa724…69f7`（仓库内固定密钥 ⇒ 可覆盖安装、KSU 授权不失效）。App **0.2.11** / 模块 **1.0.17** |
+
+### 第 33 条的两个现场（截图与 doctor 输出）
+
+**现场 A**：引导页第 2 步的「我已经装好模块并重启」前面没有任何可点的东西 ——
+文案指向的 zip 在开发者机器上。**现场 B**：真机 doctor 报 `4 项 fail, 2 项 warn`，
+其中 3 项是假警报（squashfs、profile、pnpm），唯一的真 fail 是
+`run/last-error：挂载 upper 失败：mount /data/sunsetlinux/upper.img -t ext4 -o loop,rw,noatime …`。
+
+那条真 fail 的证据链（真机 read-only 核对，**没有任何一步改动设备**）：
+
+| 事实 | 命令/来源 | 结论 |
+|---|---|---|
+| `upper.img` 的 mtime 停在 03:12（创建时刻） | `adb-shell stat /data/sunsetlinux/upper.img` | **从未成功读写挂载过**（rw 挂载会写超级块 → mtime 会变） |
+| `mount -t ext4 -o loop,ro` 成功、`e2fsck -fn` 通过 | doctor §3 | 镜像本身没问题，失败是 **rw 专属路径** |
+| `mount: '…/loop49'->'…/rootfs/upper': I/O error` | `run/start.log` | ext4 只在 rw 挂载时写超级块/恢复日志，那条路径上的写失败被内核统一报成 EIO |
+| `loop49: […]:2924912 (/data/sunsetlinux/upper.img)` 且环境没在跑 | doctor §1d | 上次失败的**残留 loop**（新 start 现在会先清掉它） |
+| `/system/etc/mke2fs.conf` 的 ext4 features 全在内核支持面内（`has_journal,extent,huge_file,dir_nlink,extra_isize,uninit_bg`） | `adb-shell cat /system/etc/mke2fs.conf` | 排除"不支持的 ext4 特性"这一常见解释 |
+
+**没拿到的东西**：`dmesg` 被 DSHA 守卫拦（`/proc/kmsg`、`logcat -b kernel` 都是空的）——
+所以内核那句 ext4/jbd2 原文还没看到，新 `start.sh` 会把它抓进 `run/start.log` 与 `last-error`；
+下一次真机复现（不管成没成）都能直接读到。**兜底**：四次自愈都失败会自动切 dir 层模式
+（那条路完全不碰 loop/upper.img），用户不会再被卡在"环境起不来"。
+
 
 ### 第 12 条到底修了什么 —— 一句话：**真机上根本跑不了首次部署**
 
