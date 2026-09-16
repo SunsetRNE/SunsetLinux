@@ -498,6 +498,44 @@ su -c '/data/sunsetlinux/bin/linuxctl doctor'
 | 已装状态读不到时 | —— | **不给刷入按钮**，先让用户修 root 授权（与"读不到 ≠ 没装"一致） |
 | 重启 | —— | 只报告"重启后生效"（KernelSU 落 `modules_update/`），**App 不替用户重启**，脚本里有单测断言不许出现 `reboot` |
 
+### 3.10.18 真机「start.sh 失败 / 层永远挂不上」第二起：探测被 `set -e` 带走（模块 1.0.13）
+
+用户贴的 `linuxctl doctor` 里，唯一真 blocker 是 `== 8` 的 `start.sh 失败`。设备日志
+`run/linux.log` 停在「开始探测 toybox 的 mount/unshare 选项支持」，`run/cmdprobe` 是
+**0 字节** —— 说明脚本在探测第一行就没了。本地 1:1 复现（`start.sh --probe-only` 退出 1、
+cmdprobe 0 字节），根因：
+
+```
+set -euo pipefail
+out="$(mount --rbind /nonexistent …)"; rc=$?     # ← 这次"预期失败"直接终止整个脚本
+```
+
+探测命令**本来就是设计成失败的**（拿不存在的源去 mount，只看它是否把参数判成语法错误）。
+而 `set -e` 下"只含赋值的简单命令"以命令替换的退出码为准 → 脚本当场退出。
+
+后果极重：`linuxctl start` **从来没走到真正的挂载步骤**，用户看到的就是「层都在、却永远未挂载」。
+
+| 事 | 之前 | 现在 |
+|---|---|---|
+| 探测里的 4 处 `out="$(mount …)"; rc=$?` | 预期失败 → 脚本退出 | `rc=0; out="$(…)" \|\| rc=$?` |
+| `probe_get` 里的 `sed … \| head` | `pipefail` 下读失败也会带走脚本 | 加 `\|\| true` |
+| `run_probes` 整体 | 裸跑在 `set -e` 下 | 整段 `set +e` … `set -e`（未来新增探测也不会再踩） |
+| 回归 | 没有 | `runtime/root/selftest.sh` 新增"`--probe-only` 必须跑完并落 `probed=`"，bash+mksh 双跑 |
+
+同一份 doctor 里还暴露一个**误报**：`本模块是否需要挂载: 是`（模块是纯脚本模块，安装时
+同一段逻辑说"否"）。根因：doctor 用 `sh -c '. <detect>; detect_mount_json'` 跑探测，
+`$0` 是 `sh` → detect-mount.sh 的"默认取脚本上一级"退化成**当前工作目录**；用户在 `/` 下
+跑时 `/system` 必然存在 → 误判。现在：调用方必须显式给 `MODULE_ROOT`（doctor 用已安装模块
+路径、customize.sh 用 `$MODDIR`），没给则只认 `/data/adb/modules[._update]/sunsetlinux`，
+两条都不成立返回 2 = **未知**（报告写"未知"，不硬断言）；新增
+`tools/detect-mount-selftest.mjs`（5 条，含"cwd 里有 system/ 也不许误报"）并接入 CI。
+
+顺带把 avc 噪声分级：只有 denial 里**确实提到 `/data/sunsetlinux`** 才 warn，否则降为 info
+（真机上那 242 条全是厂商 HAL 扫 ksu 进程，与本项目无关）。
+
+模块 **1.0.13**（start.sh / doctor.sh / detect-mount.sh / customize.sh 都随模块走；
+开机 `post-fs-data.sh` 会把它们同步到 `$LINUX_HOME/bin`）。
+
 ### 3.10.17 终端接上原生 PTY（App 0.2.9）
 
 | 事 | 之前 | 现在 |

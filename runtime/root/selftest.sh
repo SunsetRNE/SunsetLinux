@@ -217,6 +217,30 @@ if LINUX_HOME="$LH2" "$SH_BIN" "$SELF_DIR/linuxctl.sh" update dsh "$FIXTURES/ero
 fi
 
 # ---------------------------------------------------------------------------
+# 真机事故回归（2026-09-16，第二起）：**探测把 start.sh 自己带走了**
+#
+# `run_probes` 里的探测命令是**设计成失败**的（拿不存在的源去 mount，只看它是不是
+# 把参数判成语法错误）。而 `set -e` + `out="$(mount …)"; rc=$?` 这种写法会让那次
+# "预期失败"直接终止整个脚本：真机上 cmdprobe 是 0 字节、linux.log 停在"开始探测…"，
+# 用户看到的是「start.sh 失败 / 未挂载」，而真正的挂载步骤一行都没跑到。
+#
+# 这里断言：--probe-only 必须跑完并把 probed= 落盘（本机没有 /system/bin/mount 时，
+# 探测会被 [ -x ] 跳过，但 probed= 仍必须写下来 —— 那正是"跑完了"的证据）。
+# ---------------------------------------------------------------------------
+head_ "start.sh 的 mount 探测必须能跑完（set -e 不能把脚本带走）"
+PE="$TMP/probe-env"
+mkdir -p "$PE"
+if LINUX_HOME="$PE" "$SH_BIN" "$SELF_DIR/start.sh" --probe-only >"$TMP/probe.out" 2>&1; then
+    if grep -q '^probed=' "$PE/run/cmdprobe" 2>/dev/null; then
+        ok "探测跑完并落盘：$(tr '\n' ' ' < "$PE/run/cmdprobe" | cut -c1-90)"
+    else
+        bad "探测没落盘（cmdprobe 是空的）：真机上就是"start.sh 失败、层永远挂不上""
+    fi
+else
+    bad "start.sh --probe-only 非 0 退出（见 $TMP/probe.out）：$(tail -1 "$TMP/probe.out" 2>/dev/null)"
+fi
+
+# ---------------------------------------------------------------------------
 # 真机事故回归（2026-09-16）：层都在、却永远挂不上
 #
 # 两个原因：模块 service.sh 用裸 `sh "$CTL"` 发起（模块 PATH 里可能是 busybox ash，

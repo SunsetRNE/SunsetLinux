@@ -126,6 +126,9 @@ ui_print "------------------------------"
 DETECT="$MODDIR/lib/detect-mount.sh"
 if [ -f "$DETECT" ]; then
   # 逐行打印探测报告（不把整段塞进一次 ui_print，安装器日志更好读）
+  # ★ 显式给模块根：detect-mount.sh 不允许再"猜"（真机上猜成 cwd 会误报需要挂载）
+  MODULE_ROOT="$MODDIR"
+  export MODULE_ROOT
   # shellcheck source=/dev/null
   . "$DETECT" 2>/dev/null || true
   if command -v detect_mount_report >/dev/null 2>&1; then

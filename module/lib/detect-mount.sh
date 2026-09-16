@@ -146,13 +146,25 @@ metamodule_names_csv() {
 # 3) 本模块是否需要挂载
 #    判定：模块根下是否存在会被 overlay 到系统分区的目录。
 #    我们**没有**这些目录 → 纯脚本模块 → 不需要挂载实现。
-#    （自定义 MODULE_ROOT 便于测试；默认取本脚本所在模块根的上一级）
+#
+# ★ 真机事故（2026-09-16）：这里的"默认取脚本上一级"一旦被 `sh -c "…source…"` 调用，
+#   `$0` 就是 `sh`，`dirname sh/..` → **当前工作目录**；而用户在 `/` 下跑 doctor 时
+#   `/system` 必然存在 → 误报「本模块需要挂载系统路径」（真机 doctor 里就显示成"是"）。
+#   现在：**不猜 cwd**。优先用调用方显式给的 MODULE_ROOT；没给就只认已安装模块的真实路径；
+#   两条都不成立时返回 2 = 未知（调用方显示"未知"，不硬断言）。
 # ---------------------------------------------------------------------------
 MODULE_ROOT="${MODULE_ROOT:-}"
 
 module_needs_mount() {
     local root="$MODULE_ROOT"
-    [ -n "$root" ] || root="$(cd -- "$(dirname -- "$0")/.." 2>/dev/null && pwd)" || root="."
+    if [ -z "$root" ]; then
+        local c
+        for c in /data/adb/modules/sunsetlinux /data/adb/modules_update/sunsetlinux; do
+            [ -f "$c/module.prop" ] && { root="$c"; break; }
+        done
+    fi
+    # 还是不知道模块根在哪 → 未知（绝不用 cwd 猜，见上面的注释）
+    [ -n "$root" ] || return 2
     local d
     for d in system system_ext vendor product odm my_product my_heytap oplus; do
         [ -d "$root/$d" ] && return 0
@@ -188,11 +200,19 @@ detect_mount_json() {
     mm_present="$(metamodule_framework_present)"
     mm_ids="$(metamodule_ids | tr '\n' ',' | sed 's/,$//')"
     mm_csv="$(metamodule_names_csv)"
-    if module_needs_mount; then needs=true; else needs=false; fi
+    if module_needs_mount; then
+        needs=true
+    elif [ $? -eq 2 ]; then
+        needs=null          # 未知：不知道模块根在哪，不硬断言（见 module_needs_mount 注释）
+    else
+        needs=false
+    fi
 
     # 结论（给 App/WebUI 直接显示，避免前端再拼逻辑）
     local concl=""
-    if [ "$needs" = "false" ]; then
+    if [ "$needs" = "null" ]; then
+        concl="无法判定本模块是否需要挂载（不知道模块根在哪）：请显式指定 MODULE_ROOT=<模块目录> 后重试"
+    elif [ "$needs" = "false" ]; then
         concl="本模块不挂载任何系统路径，无需 metamodule 支持；KernelSU 的挂载实现变动不影响它"
     else
         if [ "$impl" = "kernelsu" ] && [ "$mm_present" = "no" ] && [ -z "$mm_ids" ]; then
@@ -237,6 +257,8 @@ detect_mount_report() {
 
     if module_needs_mount; then
         printf '本模块是否需要挂载: 是\n'
+    elif [ $? -eq 2 ]; then
+        printf '本模块是否需要挂载: 未知（不知道模块根在哪；用 MODULE_ROOT=<模块目录> 指定）\n'
         if [ "$impl" = "kernelsu" ] && [ -z "$mm_csv" ]; then
             printf '结论            : 需要挂载但当前没有 metamodule。\n'
             printf '                  请先装一个 metamodule 实现，否则本模块的\n'

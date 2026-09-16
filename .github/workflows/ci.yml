@@ -104,6 +104,11 @@ jobs:
       - name: 脚本断言 — device-provision.sh 冒烟（mksh + bash）
         run: node tools/provision-selftest.mjs
 
+      # 真机误报回归：detect-mount.sh 不许拿"当前工作目录"当模块根
+      # （用户在 / 下跑 doctor 时 /system 必然存在 → 误报"本模块需要挂载系统路径"）
+      - name: 断言 — 挂载实现探测不误报（MODULE_ROOT 契约）
+        run: node tools/detect-mount-selftest.mjs
+
       # 设备上只有 /system/bin/sh（mksh），没有 bash：这一关专门防"本地 bash 跑得通、
       # 真机一行都跑不了"的语法漂移（历史上真的发生过，见 tools/shell-compat-check.mjs 注释）
       - name: 断言 — 设备侧脚本能被 mksh 解析（含 shebang 与欠债名单）

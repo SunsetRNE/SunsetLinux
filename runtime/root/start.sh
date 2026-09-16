@@ -149,7 +149,8 @@ spawn_detached() {  # spawn_detached <use_setsid> <cmd> [args...]
 
 probe_get() {  # probe_get <key> [default]
     local v=""
-    [ -f "$PROBE_FILE" ] && v="$(sed -n "s/^$1=//p" "$PROBE_FILE" 2>/dev/null | head -n1)"
+    # `|| true`：读探测文件失败不能让整个 start.sh 退出（set -e + pipefail 下很容易踩）
+    [ -f "$PROBE_FILE" ] && { v="$(sed -n "s/^$1=//p" "$PROBE_FILE" 2>/dev/null | head -n1)" || true; }
     [ -n "$v" ] && printf '%s' "$v" || printf '%s' "${2:-none}"
 }
 probe_set() {
@@ -169,25 +170,29 @@ probe_mount_syntax() {
     local m="$1" tmp out rc
     tmp="$RUN_DIR/.probe-$$"
     mkdir -p "$tmp" 2>/dev/null || tmp=/tmp
-    out="$("$m" --rbind /nonexistent-sunsetlinux-probe "$tmp" 2>&1)"; rc=$?
+    rc=0
+    out="$("$m" --rbind /nonexistent-sunsetlinux-probe "$tmp" 2>&1)" || rc=$?
     case "$out" in
         *[Uu]sage*|*[Bb]ad*option*|*unknown*option*|*[Ii]nvalid*|*unrecognized*)
             probe_set mount_rbind short ;;
         *)  [ "$rc" -ne 0 ] && probe_set mount_rbind long || probe_set mount_rbind long ;;
     esac
-    out="$("$m" -o rbind /nonexistent-sunsetlinux-probe "$tmp" 2>&1)"; rc=$?
+    rc=0
+    out="$("$m" -o rbind /nonexistent-sunsetlinux-probe "$tmp" 2>&1)" || rc=$?
     case "$out" in
         *[Uu]sage*|*[Bb]ad*option*|*unknown*option*|*[Ii]nvalid*|*unrecognized*)
             probe_set mount_rbind_o none ;;
         *)  probe_set mount_rbind_o short ;;
     esac
-    out="$("$m" --make-rslave "$tmp" 2>&1)"; rc=$?
+    rc=0
+    out="$("$m" --make-rslave "$tmp" 2>&1)" || rc=$?
     case "$out" in
         *[Uu]sage*|*[Bb]ad*option*|*unknown*option*|*[Ii]nvalid*|*unrecognized*)
             probe_set mount_make_rslave short ;;
         *)  probe_set mount_make_rslave long ;;
     esac
-    out="$("$m" -o remount,bind "$tmp" 2>&1)"; rc=$?
+    rc=0
+    out="$("$m" -o remount,bind "$tmp" 2>&1)" || rc=$?
     case "$out" in
         *[Uu]sage*|*[Bb]ad*option*|*unknown*option*|*[Ii]nvalid*|*unrecognized*)
             probe_set mount_remount_bind none ;;
@@ -240,10 +245,18 @@ run_probes() {
     fi
     : > "$PROBE_FILE" 2>/dev/null || true
     log "开始探测 toybox 的 mount/unshare 选项支持（结果写入 $PROBE_FILE）"
-    [ -x "$MOUNT" ] && probe_mount_syntax "$MOUNT"
-    [ -x "$UNSHARE" ] && probe_unshare_syntax "$UNSHARE"
-    find_layer base >/dev/null 2>&1 && detect_util_mount
+    # ★ 这一整段必须关掉 `set -e`：探测命令**本来就是设计成失败的**
+    #   （拿不存在的源去 mount，只看它是不是把参数判成语法错误）。
+    #   真机事故（2026-09-16）：`out="$(mount --rbind …)"; rc=$?` 在 `set -e` 下，
+    #   那次"预期失败"直接让 start.sh 在探测第一行退出 —— cmdprobe 是 0 字节、
+    #   linux.log 停在"开始探测…"，用户侧看到的就是「start.sh 失败 / 未挂载」，
+    #   而真正的挂载步骤一行都没跑到。
+    set +e
+    if [ -x "$MOUNT" ]; then probe_mount_syntax "$MOUNT"; fi
+    if [ -x "$UNSHARE" ]; then probe_unshare_syntax "$UNSHARE"; fi
+    if find_layer base >/dev/null 2>&1; then detect_util_mount; fi
     printf 'probed=%s\n' "$(date +%s)" >> "$PROBE_FILE" 2>/dev/null || true
+    set -e
     log "探测结果：rbind=$(probe_get mount_rbind) | rbind_o=$(probe_get mount_rbind_o) | make_rslave=$(probe_get mount_make_rslave) | unshare_propagation=$(probe_get unshare_propagation) | util_mount=$(probe_get util_mount)"
 }
 

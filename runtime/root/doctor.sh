@@ -344,7 +344,16 @@ if [ -z "$DETECT_MOUNT" ]; then
     add_finding warn detect_mount "脚本缺失"
 else
     # 在子 shell 里 source，避免它的变量/函数污染 doctor 的命名空间
-    MM_JSON="$(sh -c ". \"$DETECT_MOUNT\"; detect_mount_json" 2>/dev/null || true)"
+    # ★ 必须把模块根**显式**传进去：被 `sh -c` 起来时 `$0` 是 "sh"，
+    #   detect-mount.sh 里任何"用 $0 推模块根"的写法都会退化成当前工作目录，
+    #   而用户在 `/` 下跑时 `/system` 必然存在 → 误报"需要挂载系统路径"（真机踩过）。
+    DETECT_ROOT=""
+    for _c in /data/adb/modules/sunsetlinux /data/adb/modules_update/sunsetlinux; do
+        [ -f "$_c/module.prop" ] && { DETECT_ROOT="$_c"; break; }
+    done
+    [ -n "$DETECT_ROOT" ] || DETECT_ROOT="$(cd -- "$SELF_DIR/.." 2>/dev/null && pwd || printf '')"
+    # 把 detect 脚本当 $1 传，$0 用占位符 —— 顺便让 $0 不再是无意义的 "sh"
+    MM_JSON="$(MODULE_ROOT="$DETECT_ROOT" sh -c '. "$1"; detect_mount_json' _ "$DETECT_MOUNT" 2>/dev/null || true)"
     if [ -z "$MM_JSON" ]; then
         info "[skip] 挂载实现探测执行失败，跳过"
         add_finding warn detect_mount "执行失败"
@@ -620,7 +629,13 @@ if have dmesg; then
     n="$(dmesg 2>/dev/null | grep -ci 'avc: *denied' || true)"
     case "${n:-}" in ''|*[!0-9]*) n=0 ;; esac
     if [ "$n" -gt 0 ]; then
-        warn "dmesg 里有 $n 条 'avc: denied'（可能与本项目无关，需看具体路径）"
+        # 只有**确实涉及我们**的 denial 才值得用户紧张：厂商 HAL 扫 ksu 进程产生的
+        # avc 噪声在真机上动辄几百条，一律 warn 会让真正的信号被淹没（真机反馈）。
+        if dmesg 2>/dev/null | grep -i 'avc: *denied' | grep -qE 'sunsetlinux|/data/sunsetlinux'; then
+            warn "dmesg 里有 $n 条 'avc: denied'，其中**有涉及 /data/sunsetlinux 的**（要看具体行）"
+        else
+            info "dmesg 里有 $n 条 'avc: denied'，但都**与本项目无关**（没有一条提到 /data/sunsetlinux；多为厂商 HAL 扫 ksu 进程）"
+        fi
         dmesg 2>/dev/null | grep -i 'avc: *denied' | tail -n 5 | sed 's/^/        /'
         AVC_HITS=$n
     else
@@ -633,7 +648,11 @@ if have logcat; then
     n2="$(logcat -d -b all 2>/dev/null | grep -ci 'avc: *denied' || true)"
     case "${n2:-}" in ''|*[!0-9]*) n2=0 ;; esac
     if [ "$n2" -gt 0 ]; then
-        warn "logcat 里有 $n2 条 'avc: denied'"
+        if logcat -d -b all 2>/dev/null | grep -i 'avc: *denied' | grep -qE 'sunsetlinux|/data/sunsetlinux'; then
+            warn "logcat 里有 $n2 条 'avc: denied'，其中有涉及 /data/sunsetlinux 的（要看具体行）"
+        else
+            info "logcat 里有 $n2 条 'avc: denied'，但都**与本项目无关**（没有提到 /data/sunsetlinux）"
+        fi
         logcat -d -b all 2>/dev/null | grep -i 'avc: *denied' | tail -n 5 | sed 's/^/        /'
         AVC_HITS=$(( AVC_HITS + n2 ))
     else
