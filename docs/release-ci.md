@@ -375,6 +375,7 @@ CI 发布的 APK      Signer #1: CN=Android Debug  SHA-256 84be9523b5623a543f6ce
 | 夹具修好后 CI 反而红了 | 断言"合法 erofs 被接受"依赖**宿主内核支持 erofs**，而 **GitHub runner 的内核没有 erofs** → `linuxctl` **正确地**拒绝了 | 新增显式测试开关 `LINUXCTL_KERNEL_FS_OVERRIDE=<格式>`（仅影响用户态预检；真挂不上时 `start.sh` 仍会失败）；`selftest.sh` 在宿主内核缺该格式时**声明**并设上它，让"落盘命名/state.json/find_layer 版本优先/rollback"这些自己的逻辑仍被覆盖 |
 | 发布 run 的门禁被 cancelled | `ci.yml` 的 `concurrency: ci-<ref>` + `cancel-in-progress: true`：`main`/`beta` 的推送**同时**触发独立的 `ci.yml` 和 `release.yml`（后者 `workflow_call` 复用前者），两个实例落进同一组互相取消 | `ci.yml` 的 `push` 用 `branches-ignore: [main, beta]`（这两条分支交给 release 的门禁），并把 `cancel-in-progress` 改成 `false`（宁可排队，不可误杀发布门禁） |
 | 两个工作流同时写 gh-pages 会互相覆盖 | `release.yml` 与 `channel.yml` 各用各的 concurrency 组名 → 并发 force push；`keep_files: true` 只保护"运行开始时已存在的文件" | 两者**共用**并发组 `gh-pages` |
+| **Release 上缺四份 `.bin`**（0.2.5 实际发生过） | 同一个 push 同时触发 `release.yml` 与 `offline-bundle.yml`，两者**并行**：Release 由发布那边创建，而打包这边先跑完，`gh release view v0.2.5` 失败 → 打了一行 `::warning::` 就 `exit 0`（**步骤仍显示 success**，产物只留在 workflow artifact 里） | `offline-bundle.yml` 在挂资产前**最多等 6 分钟**（每 20 秒 `gh release view` 一次），等到才挂；真的等不到才 warning 退出 |
 | 单测摘要报"tests=0" | 前面某步先失败 → Android 构建被跳过 → 没有测试 XML，摘要步骤却仍在判定"必须有用例" | 摘要加 `if: always() && steps.android.conclusion == 'success'` |
 
 > ⚠️ **CI 验证不了的东西**：宿主内核能力（erofs 挂载）、真机 SELinux 域、toybox 的

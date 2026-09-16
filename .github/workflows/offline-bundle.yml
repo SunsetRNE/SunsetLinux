@@ -164,8 +164,18 @@ jobs:
           APP_VER="$(sed -n 's/^versionName=//p' app/version.properties | head -n1 | tr -d '[:space:]')"
           [ -n "$APP_VER" ] || { echo "::error::读不出 App 版本"; exit 1; }
           TAG="v$APP_VER"
-          if ! gh release view "$TAG" >/dev/null 2>&1; then
-            echo "::warning::$TAG 还不存在（还没发过正式版？）—— 制品已上传为 workflow artifact，暂不挂 Release"
+          # ★ 与 release.yml **并行**跑：同一个 push 会同时触发两个工作流，而 Release 是
+          #   发布那边建的。0.2.5 就吃过这个亏 —— 本工作流先跑，v0.2.5 还不存在，
+          #   于是四份 .bin 静默地没挂上去（步骤还是 success，只有一行 warning）。
+          #   现在最多等 6 分钟（每 20 秒看一次），等到了就挂，等不到才放弃。
+          ready=""
+          for i in $(seq 1 18); do
+            if gh release view "$TAG" >/dev/null 2>&1; then ready=1; break; fi
+            echo "等待 $TAG 出现（第 $i/18 次，最多 6 分钟）…"
+            sleep 20
+          done
+          if [ -z "$ready" ]; then
+            echo "::warning::$TAG 等了 6 分钟仍不存在（还没发过正式版？）—— 制品已上传为 workflow artifact，暂不挂 Release"
             exit 0
           fi
           # 只挂"发布名"的那两份（.bin 给用户、.json 给排障/对账）
