@@ -498,6 +498,36 @@ su -c '/data/sunsetlinux/bin/linuxctl doctor'
 | 已装状态读不到时 | —— | **不给刷入按钮**，先让用户修 root 授权（与"读不到 ≠ 没装"一致） |
 | 重启 | —— | 只报告"重启后生效"（KernelSU 落 `modules_update/`），**App 不替用户重启**，脚本里有单测断言不许出现 `reboot` |
 
+### 3.10.23 CI 合成一条流水线（环境准备 → 矩阵编译 → 门禁 → 合并发布 → 频道 → 汇总）
+
+用户拿了 KernelSU `build-manager.yml` 的截图作参照："环境准备，然后多个节点编译，
+最后合并打包、多重发布（正式发布、pages发布、频道发布），一个工作流到底"。
+
+| 节点 | 做什么 | 实现 |
+|---|---|---|
+| ① prep | 版本 + 由 `variants.json` 生成编译矩阵 + 打模块 zip | `pipeline.yml` |
+| ② bundles | 内嵌离线包（四个组合各一份 `.bin`） | `uses: offline-bundle.yml`（`attach_release=false`） |
+| ③ build | **编译矩阵：一个组合一个节点**（并行） | `uses: build-apk.yml` × 4 |
+| ④ gates | shell(bash+mksh) / node / App 单测 | `uses: ci.yml`（`build_apks=false`） |
+| ⑤ publish | 合并 → index.json → 下载页 → gh-pages → Release | `uses: publish.yml` |
+| ⑥ channel | channel 分支的签名清单：公钥独立验签 → gh-pages `/channel/` | `pipeline.yml` |
+| ⑦ report | 汇总（编译/门禁/发布任一红即红） | `pipeline.yml` |
+
+- `release.yml` 变成**手动兜底**（同构，复用同一批工作流）；`ci.yml`/`offline-bundle.yml`/`release.yml`
+  都**不再监听 push**（以前 push main/beta 会同时触发两条会写 gh-pages 的线）。
+- 证据：main/beta 各跑一遍，**12 个节点全 success**；发布物 = 4 APK + 4 `.bin` + 模块 zip
+  （同一 Release + gh-pages `/stable` `/beta`）；抽查官方 APK：`assets/module/`、`assets/offline-bundle.bin`、
+  `libsunsetlinux_pty.so` 都在。
+- 落地踩的 4 个坑（都留在文件注释里）：可复用工作流里的**工作流级 `concurrency`** 会被拒（调用方 job 0 秒失败且无日志）；
+  搬文件时残留 `needs: gate` 会让整个文件加载失败；被调用方声明 `contents: write` 时调用方必须显式允许；
+  GitHub 的宽松相等 `'' == false` 为真（push 事件下 `inputs.x != false` 会误判为假）。
+- 配套：`tools/ci-shell-gate.sh`（把红的断言带成 `::error::` 注释）、`tools/ci-step-tee.sh`（每步留日志，
+  失败诊断步骤把日志尾部带成注释）—— 步骤日志要仓库权限，注释匿名可读。
+
+> **下一步（用户已拍板）**：拆成两个可共存的 App —— root 版 `io.github.sunsetrne.sunsetlinux.root`、
+> 免 root 版 `…linux.proot`，各出"最小 + 完整"两档（共 4 个 APK）。pipeline 的矩阵是
+> **数据驱动**（读 `variants.json`），所以拆分只需改变量表与 App 侧，workflow 不用动。详见 HANDOFF 第 35 条。
+
 ### 3.10.22 免 root 引导从「指路」到「真的能铺」+ proot 支持 erofs 层（App 0.2.12 / 模块 1.0.18）
 
 用户贴的 App 诊断页输出（模式 **PROOT**）：`✗ 没有找到 linuxctl：…/files/sunsetlinux/bin/linuxctl /
