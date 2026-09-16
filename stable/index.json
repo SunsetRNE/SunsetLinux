@@ -1,12 +1,12 @@
 {
   "schema": 1,
   "channel": "stable",
-  "built_at": "2026-09-16T04:36:49Z",
-  "commit": "f076114079dd6024e83cfb3ca83b40acf28d1550",
-  "run_number": 74,
+  "built_at": "2026-09-16T04:54:28Z",
+  "commit": "5022737e11df7c98ede6590915ef39b983572051",
+  "run_number": 75,
   "app_version": "0.2.7",
   "github_release_tag": "v0.2.7",
-  "module_version": "1.0.11",
+  "module_version": "1.0.12",
   "variants": [
     {
       "id": "minimal",
@@ -17,8 +17,8 @@
       "note": "只带 proot 运行时（非 root 必需件）；Ubuntu 与 dsh 按需下载/导入，APK 最小",
       "apk": "SunsetLinux-0.2.7-minimal-debug.apk",
       "apk_url": "https://github.com/SunsetRNE/SunsetLinux/releases/download/v0.2.7/SunsetLinux-0.2.7-minimal-debug.apk",
-      "apk_size": 13828697,
-      "apk_sha256": "c66765e1ce248e48bfb596adcad3ffe6f7a94ff699b70e04e35d2aa0f6a8d070",
+      "apk_size": 13828693,
+      "apk_sha256": "27f6d52e379aeaa79f2fa8962e8dde0e07c4f7594f89d3d0c924ea620f596f15",
       "bundle": "SunsetLinux-0.2.7-minimal.bin"
     },
     {
@@ -32,7 +32,7 @@
       "apk": "SunsetLinux-0.2.7-ubuntu-debug.apk",
       "apk_url": "https://github.com/SunsetRNE/SunsetLinux/releases/download/v0.2.7/SunsetLinux-0.2.7-ubuntu-debug.apk",
       "apk_size": 81056021,
-      "apk_sha256": "861540a5def27fe547e4661080b696daafba32cd1f2049a86e4396df3d654e81",
+      "apk_sha256": "82729546f91175b22b69efac786ce366f9bd27acad8d27f88c3a22cdc7ee9ebd",
       "bundle": "SunsetLinux-0.2.7-ubuntu.bin"
     },
     {
@@ -47,7 +47,7 @@
       "apk": "SunsetLinux-0.2.7-ubuntu-proot-debug.apk",
       "apk_url": "https://github.com/SunsetRNE/SunsetLinux/releases/download/v0.2.7/SunsetLinux-0.2.7-ubuntu-proot-debug.apk",
       "apk_size": 82044921,
-      "apk_sha256": "e3bde00c01b365c68b0de79453dbc3f81f6e3f13188bce7edcfef0d6423a7a46",
+      "apk_sha256": "b181673e94c02b048dfff3d27f9123993ada0143e22fbd304ddad07ae65a212a",
       "bundle": "SunsetLinux-0.2.7-ubuntu-proot.bin"
     },
     {
@@ -63,40 +63,40 @@
       "apk": "SunsetLinux-0.2.7-ubuntu-proot-dsh-debug.apk",
       "apk_url": "https://github.com/SunsetRNE/SunsetLinux/releases/download/v0.2.7/SunsetLinux-0.2.7-ubuntu-proot-dsh-debug.apk",
       "apk_size": 114798309,
-      "apk_sha256": "1886815dc5f8686f1cca15bb9302631763a0039c8a10e3e5365620dbcddf2194",
+      "apk_sha256": "cffe7a5381abf137b7a1a089e38cfd0ea4c059b8dae13ec3f80e4ca1f6a7bab6",
       "bundle": "SunsetLinux-0.2.7-ubuntu-proot-dsh.bin"
     }
   ],
   "files": [
     {
       "name": "SunsetLinux-0.2.7-minimal-debug.apk",
-      "size": 13828697,
-      "sha256": "c66765e1ce248e48bfb596adcad3ffe6f7a94ff699b70e04e35d2aa0f6a8d070"
+      "size": 13828693,
+      "sha256": "27f6d52e379aeaa79f2fa8962e8dde0e07c4f7594f89d3d0c924ea620f596f15"
     },
     {
       "name": "SunsetLinux-0.2.7-ubuntu-debug.apk",
       "size": 81056021,
-      "sha256": "861540a5def27fe547e4661080b696daafba32cd1f2049a86e4396df3d654e81"
+      "sha256": "82729546f91175b22b69efac786ce366f9bd27acad8d27f88c3a22cdc7ee9ebd"
     },
     {
       "name": "SunsetLinux-0.2.7-ubuntu-proot-debug.apk",
       "size": 82044921,
-      "sha256": "e3bde00c01b365c68b0de79453dbc3f81f6e3f13188bce7edcfef0d6423a7a46"
+      "sha256": "b181673e94c02b048dfff3d27f9123993ada0143e22fbd304ddad07ae65a212a"
     },
     {
       "name": "SunsetLinux-0.2.7-ubuntu-proot-dsh-debug.apk",
       "size": 114798309,
-      "sha256": "1886815dc5f8686f1cca15bb9302631763a0039c8a10e3e5365620dbcddf2194"
+      "sha256": "cffe7a5381abf137b7a1a089e38cfd0ea4c059b8dae13ec3f80e4ca1f6a7bab6"
     },
     {
-      "name": "sunsetlinux-module-1.0.11.zip",
-      "size": 190161,
-      "sha256": "90e3c47fe046a4690fdf754d5e725b81a4b5c7482bfe341234b84998db65ebb5"
+      "name": "sunsetlinux-module-1.0.12.zip",
+      "size": 190730,
+      "sha256": "36ac0b5aa3a6be35b1d4e27193ac73bebd5be9f2be0c0a48e593b14a007e5d72"
     },
     {
-      "name": "sunsetlinux-module-1.0.11.zip.sha256",
+      "name": "sunsetlinux-module-1.0.12.zip.sha256",
       "size": 143,
-      "sha256": "eda705220d815903fe930bd87bb027b8f067b8c51db8a208f0879ed08878f215"
+      "sha256": "b7f435381039854eab5b38f80b0be504e0f9b5a28ea0d908c610b6216ca2eb8f"
     }
   ]
 }
