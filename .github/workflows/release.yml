@@ -82,19 +82,25 @@ jobs:
           # ★ 必须自己建 dist/：这一步跑在 mkmodule 之前，而 dist/ 是 mkmodule 建的。
           #   漏了这行会 `cp: cannot create regular file 'dist/...'`（实测踩过）。
           mkdir -p dist
+          # ⚠️ 制品解出来**不是平铺的**：upload-artifact 会保留"相对公共祖先"的目录结构，
+          #    我们上传的是 app/app/build/outputs/apk/*/debug/*.apk → 解出来是
+          #    apk-artifact/<组合>/debug/*.apk。实测就是这么踩的：通配 apk-artifact/*.apk
+          #    一个都没匹配到，直接报"没收到任何 APK 制品"（而制品其实有 46 MB）。
+          #    所以这里递归找，别写死层级。
           n=0
-          for f in apk-artifact/*.apk; do
+          while IFS= read -r f; do
             [ -f "$f" ] || continue
             cp -v "$f" dist/
             n=$((n + 1))
-          done
+          done < <(find apk-artifact -type f -name '*.apk' | sort)
           [ "$n" -ge 1 ] || {
-            echo "::error::没收到任何 APK 制品（apk-artifact/ 是空的？同步 ci.yml 的 upload-artifact 路径）"
+            echo "::error::没收到任何 APK 制品（apk-artifact/ 下没有 .apk；同步 ci.yml 的 upload-artifact 路径？）"
             exit 1
           }
           # 四个组合缺一个就明确报出来（不许静默少发一个包）
           for v in minimal ubuntu ubuntu-proot ubuntu-proot-dsh; do
-            ls dist/SunsetLinux-*-"$v"-debug.apk >/dev/null 2>&1 || echo "::warning::缺少组合 $v 的 APK（本次不发这个组合）"
+            ls dist/SunsetLinux-*-"$v"-debug.apk >/dev/null 2>&1 \
+              || echo "::warning::缺少组合 $v 的 APK（本次不发这个组合）"
           done
           ( cd dist && sha256sum SunsetLinux-*.apk > SHA256SUMS.apk.txt && cat SHA256SUMS.apk.txt )
 
