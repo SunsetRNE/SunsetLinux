@@ -45,7 +45,9 @@ concurrency:
 
 jobs:
   publish:
-    needs: gate
+    # 这里**没有** needs：可复用工作流自己不带前置节点（以前 release.yml 里
+    # `needs: gate` 指的是它自己的门禁 job，搬到独立文件后就不存在了 —— 留着会让
+    # GitHub 直接拒绝加载本文件，报错还只显示"workflow file invalid"）。
     runs-on: ubuntu-latest
     permissions:
       contents: write            # 需要推 gh-pages 分支
