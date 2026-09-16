@@ -427,9 +427,9 @@ jobs:
         run: |
           set -euo pipefail
           OUT="dist/_publish"
-          # App 版本从 build.gradle.kts 读（唯一事实源，不在这里另写一份版本号）
-          APP_VER="$(sed -n 's/^[[:space:]]*versionName[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' app/app/build.gradle.kts | head -n1)"
-          [ -n "$APP_VER" ] || { echo "::error::读不出 app/app/build.gradle.kts 的 versionName（发布中止）"; exit 1; }
+          # App 版本从 app/version.properties 读（唯一事实源；构建脚本只读它，不在这里再抄一份）
+          APP_VER="$(sed -n 's/^versionName=//p' app/version.properties | head -n1 | tr -d '[:space:]')"
+          [ -n "$APP_VER" ] || { echo "::error::读不出 app/version.properties 的 versionName（发布中止）"; exit 1; }
           TAG="v$APP_VER"
           TITLE="SunsetLinux $APP_VER（模块 $MODULE_VERSION）"
           REPO="${{ github.repository }}"

@@ -161,7 +161,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          APP_VER="$(sed -n 's/^[[:space:]]*versionName[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' app/app/build.gradle.kts | head -n1)"
+          APP_VER="$(sed -n 's/^versionName=//p' app/version.properties | head -n1 | tr -d '[:space:]')"
           [ -n "$APP_VER" ] || { echo "::error::读不出 App 版本"; exit 1; }
           TAG="v$APP_VER"
           if ! gh release view "$TAG" >/dev/null 2>&1; then
