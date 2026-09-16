@@ -1,25 +1,102 @@
 {
   "schema": 1,
   "channel": "beta",
-  "built_at": "2026-09-15T23:20:26Z",
-  "commit": "ba5d8b9763856bed2a8f274b04bd6cf9be1f07ed",
-  "run_number": 57,
-  "module_version": "1.0.9",
+  "built_at": "2026-09-16T03:41:07Z",
+  "commit": "4043fc89e7851af69fdfbbd497d9e391c6168443",
+  "run_number": 67,
+  "app_version": "0.2.5",
+  "github_release_tag": "v0.2.5",
+  "module_version": "1.0.10",
+  "variants": [
+    {
+      "id": "minimal",
+      "label": "最小版",
+      "embed": [
+        "proot"
+      ],
+      "note": "只带 proot 运行时（非 root 必需件）；Ubuntu 与 dsh 按需下载/导入，APK 最小",
+      "apk": "SunsetLinux-0.2.5-minimal-debug.apk",
+      "apk_url": "https://github.com/SunsetRNE/SunsetLinux/releases/download/v0.2.5/SunsetLinux-0.2.5-minimal-debug.apk",
+      "apk_size": 13812369,
+      "apk_sha256": "d9301172abd264dd364ecc1b75a2f715f724747ac999b23d0141efc5b96982f6",
+      "bundle": "SunsetLinux-0.2.5-minimal.bin"
+    },
+    {
+      "id": "ubuntu",
+      "label": "Ubuntu 版",
+      "embed": [
+        "base",
+        "runtime"
+      ],
+      "note": "内嵌 Ubuntu 基础环境（base + runtime）；dsh 与 proot 另取",
+      "apk": "SunsetLinux-0.2.5-ubuntu-debug.apk",
+      "apk_url": "https://github.com/SunsetRNE/SunsetLinux/releases/download/v0.2.5/SunsetLinux-0.2.5-ubuntu-debug.apk",
+      "apk_size": 81039693,
+      "apk_sha256": "628b9f3d0267c6256327ecf4c73f4ad5967adfba75f5f4633e070ef7d54c6f1a",
+      "bundle": "SunsetLinux-0.2.5-ubuntu.bin"
+    },
+    {
+      "id": "ubuntu-proot",
+      "label": "免 root 版",
+      "embed": [
+        "base",
+        "runtime",
+        "proot"
+      ],
+      "note": "内嵌 Ubuntu + proot：root / 非 root 都能离线起步（不含 dsh）",
+      "apk": "SunsetLinux-0.2.5-ubuntu-proot-debug.apk",
+      "apk_url": "https://github.com/SunsetRNE/SunsetLinux/releases/download/v0.2.5/SunsetLinux-0.2.5-ubuntu-proot-debug.apk",
+      "apk_size": 82028593,
+      "apk_sha256": "b6ecaa8f3c7f9cef9ce466edc088751b7168fc3ceed45bcba12687f422682541",
+      "bundle": "SunsetLinux-0.2.5-ubuntu-proot.bin"
+    },
+    {
+      "id": "ubuntu-proot-dsh",
+      "label": "完整离线版",
+      "embed": [
+        "base",
+        "runtime",
+        "proot",
+        "dsh"
+      ],
+      "note": "内嵌 Ubuntu + proot + dsh：装完开机即用，零下载",
+      "apk": "SunsetLinux-0.2.5-ubuntu-proot-dsh-debug.apk",
+      "apk_url": "https://github.com/SunsetRNE/SunsetLinux/releases/download/v0.2.5/SunsetLinux-0.2.5-ubuntu-proot-dsh-debug.apk",
+      "apk_size": 114781981,
+      "apk_sha256": "34ac0d608593510749ca565d0526e631b6a64b3698390c61c7a7630d7fc5c488",
+      "bundle": "SunsetLinux-0.2.5-ubuntu-proot-dsh.bin"
+    }
+  ],
   "files": [
     {
-      "name": "sunsetlinux-launcher-debug.apk",
-      "size": 12701008,
-      "sha256": "697058c759631fa74075f67a7cc5f1049ce20ef0bcbd9f8d5f6adf162c3cbfd6"
+      "name": "SunsetLinux-0.2.5-minimal-debug.apk",
+      "size": 13812369,
+      "sha256": "d9301172abd264dd364ecc1b75a2f715f724747ac999b23d0141efc5b96982f6"
     },
     {
-      "name": "sunsetlinux-module-1.0.9.zip",
-      "size": 187257,
-      "sha256": "f432a6fc847e74dc5cfd5dfdf007d0570a9cc046fa44adc0d124e80d4521bd3c"
+      "name": "SunsetLinux-0.2.5-ubuntu-debug.apk",
+      "size": 81039693,
+      "sha256": "628b9f3d0267c6256327ecf4c73f4ad5967adfba75f5f4633e070ef7d54c6f1a"
     },
     {
-      "name": "sunsetlinux-module-1.0.9.zip.sha256",
-      "size": 142,
-      "sha256": "119ba5d2dec99ba043f5df6af68aaf177e9186f8de4bc6d23300bbab0a1af0e6"
+      "name": "SunsetLinux-0.2.5-ubuntu-proot-debug.apk",
+      "size": 82028593,
+      "sha256": "b6ecaa8f3c7f9cef9ce466edc088751b7168fc3ceed45bcba12687f422682541"
+    },
+    {
+      "name": "SunsetLinux-0.2.5-ubuntu-proot-dsh-debug.apk",
+      "size": 114781981,
+      "sha256": "34ac0d608593510749ca565d0526e631b6a64b3698390c61c7a7630d7fc5c488"
+    },
+    {
+      "name": "sunsetlinux-module-1.0.10.zip",
+      "size": 187710,
+      "sha256": "6349cbd8a6f25f7cd5f91a1b723a9e9cc929656b148d9beb9524551fc183cc04"
+    },
+    {
+      "name": "sunsetlinux-module-1.0.10.zip.sha256",
+      "size": 143,
+      "sha256": "49617c571a880bcb1ed53f30f6f35cae2c58b68aa0ce3f0f687049b59e19e666"
     }
   ]
 }
