@@ -71,8 +71,23 @@ jobs:
 
       # 设备侧真正跑的是 /system/bin/sh（mksh），不是 bash。这一关用 mksh 再跑一遍
       # 同一套断言 —— 语法闸门只管"能不能解析"，这里才验证"跑起来行为一致"。
+      #
+      # ★ 失败时必须把**具体哪几条断言红了**带出来：日志默认要仓库权限才看得到，
+      #   而 `::error::` 注释任何人都能读（维护者在手机上排查时就是靠这个）。
+      #   踩过的坑：mksh 那一关红了，日志里"Process completed with exit code 1."，
+      #   完全看不出是哪一条 —— 只能靠本地复现，而本地（不同的 /proc、不同的 locale）
+      #   恰恰复现不出来。
       - name: 脚本断言 — root 运行时（mksh，模拟设备侧）
-        run: mksh runtime/root/selftest.sh
+        run: |
+          set +e
+          out="$(mksh runtime/root/selftest.sh 2>&1)"
+          rc=$?
+          printf '%s\n' "$out" | tail -60
+          if [ "$rc" -ne 0 ]; then
+            summary="$(printf '%s\n' "$out" | grep -a 'FAIL' | head -5 | tr '\n' ' ' | cut -c1-900)"
+            printf '::error title=root 运行时（mksh）断言失败::%s\n' "${summary:-（没有 FAIL 行，见步骤输出）}"
+          fi
+          exit "$rc"
 
       - name: 脚本断言 — proot 运行时
         run: bash runtime/proot/selftest.sh
