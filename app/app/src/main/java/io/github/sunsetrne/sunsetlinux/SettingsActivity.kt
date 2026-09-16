@@ -78,6 +78,7 @@ import io.github.sunsetrne.sunsetlinux.ui.theme.MonoFamily
 import io.github.sunsetrne.sunsetlinux.ui.theme.Danger
 import io.github.sunsetrne.sunsetlinux.ui.theme.StateRunning
 import io.github.sunsetrne.sunsetlinux.ui.NpmSourceCard
+import io.github.sunsetrne.sunsetlinux.ui.theme.Accent
 import io.github.sunsetrne.sunsetlinux.ui.theme.TextMuted
 import io.github.sunsetrne.sunsetlinux.ui.theme.TextSecondary
 import kotlinx.coroutines.Dispatchers
@@ -97,6 +98,9 @@ class SettingsActivity : ComponentActivity() {
     private lateinit var prefs: Prefs
 
     private val modeOverride = mutableStateOf<EnvMode?>(null)
+
+    /** 免 root 运行时偏好：null = auto（优先 proroot），也可固定 proroot / proot。 */
+    private val rootlessRuntime = mutableStateOf<String?>(null)
     private val suAvailable = mutableStateOf<Boolean?>(null)
     private val effectiveMode = mutableStateOf(EnvMode.ROOT)
     private val port = mutableStateOf("3080")
@@ -124,6 +128,7 @@ class SettingsActivity : ComponentActivity() {
         section = intent?.getStringExtra(EXTRA_SETTINGS_SECTION)
 
         modeOverride.value = prefs.modeOverride
+        rootlessRuntime.value = prefs.rootlessRuntime
         port.value = prefs.port.toString()
         bootStart.value = prefs.bootStartService
         autoStart.value = prefs.autoStartEnv
@@ -134,6 +139,16 @@ class SettingsActivity : ComponentActivity() {
                 SettingsScreen(
                     section = section,
                     modeOverride = modeOverride.value,
+                    rootlessRuntime = rootlessRuntime.value,
+                    onPickRootless = { picked ->
+                        rootlessRuntime.value = picked
+                        prefs.rootlessRuntime = picked
+                        notice.value = when (picked) {
+                            "proroot" -> "免 root 运行时已固定为 proroot（缺件会明确报错，不静默降级）"
+                            "proot" -> "免 root 运行时已固定为 proot（随包 bundle，兼容性最好）"
+                            else -> "免 root 运行时：自动（优先 proroot，缺件降级 proot）"
+                        }
+                    },
                     suAvailable = suAvailable.value,
                     effectiveMode = effectiveMode.value,
                     port = port.value,
@@ -293,6 +308,8 @@ class SettingsActivity : ComponentActivity() {
 private fun SettingsScreen(
     section: String?,
     modeOverride: EnvMode?,
+    rootlessRuntime: String?,
+    onPickRootless: (String?) -> Unit,
     suAvailable: Boolean?,
     effectiveMode: EnvMode,
     port: String,
@@ -378,6 +395,43 @@ private fun SettingsScreen(
                             style = MaterialTheme.typography.labelSmall,
                             color = TextMuted,
                         )
+                    }
+                }
+
+                Spacer(Modifier.height(12.dp))
+
+                // 免 root 运行时（proroot 首选 / proot 降级）
+                DshCard(Modifier.fillMaxWidth()) {
+                    Column(Modifier.fillMaxWidth()) {
+                        SectionLabel("免 root 运行时")
+                        Spacer(Modifier.height(10.dp))
+                        ModeRow("自动：优先 proroot，缺件降级 proot", rootlessRuntime == null) {
+                            onPickRootless(null)
+                        }
+                        ModeRow("只用 proroot（缺件会明确报错）", rootlessRuntime == "proroot") {
+                            onPickRootless("proroot")
+                        }
+                        ModeRow("只用 proot（随包 bundle）", rootlessRuntime == "proot") {
+                            onPickRootless("proot")
+                        }
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            text = "只影响非 root 模式。proroot ${BuildConfig.PROROOT_VERSION} 是 LD_PRELOAD 实现" +
+                                "（无 ptrace，系统调用密集的负载更快），随 APK 的 nativeLibraryDir 提供；" +
+                                "proot 作为降级实现随包内嵌。",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = TextMuted,
+                        )
+                        val kind = status?.rootlessKind
+                        if (kind != null) {
+                            Spacer(Modifier.height(6.dp))
+                            Text(
+                                text = "本次运行实际使用：$kind" +
+                                    (status?.rootlessVersion?.let { " $it" } ?: ""),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Accent,
+                            )
+                        }
                     }
                 }
 

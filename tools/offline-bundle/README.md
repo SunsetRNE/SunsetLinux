@@ -14,8 +14,13 @@
 | `runtime` | Node + pnpm + 工具 | 46.5 MB |
 | `dsh` | DSH 本体 + web profile | 31.2 MB |
 | `proot` | 非 root 模式的 proot 运行时（自带依赖） | 0.9 MB |
+| `proroot` | 非 root 模式的**首选**运行时（LD_PRELOAD，5 个 .so） | 随 APK 的 jniLibs，**不进 .bin** |
 
 组合（**唯一事实源**是 `variants.json`，改表即可，工具与 CI 都读它）：
+
+> **proroot 不进离线包（.bin）**：它是专有许可的 5 个 `.so`，只能随**完整 APK** 分发
+> （见 `tools/proroot/README.md`），所以直接打在 APK 的 `jniLibs/arm64-v8a/` 里；
+> 四个组合都带它，proot 仍作为降级实现内嵌在 `.bin` 里。
 
 | 变体 id | 中文名 | 内嵌 | 离线包体积 | 说明 |
 |---|---|---|---|---|

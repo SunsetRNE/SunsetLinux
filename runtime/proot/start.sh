@@ -37,6 +37,11 @@ set -euo pipefail
 
 SCHEMA_VERSION=1
 MODE="proot"
+# 非 root 模式的**实际**运行时（对外仍报 mode=proot，避免动 App 侧已冻结的契约）：
+#   proroot（首选，LD_PRELOAD，无 ptrace 开销）| proot（降级，随包 bundle）
+ROOTLESS_KIND="proot"
+ROOTLESS_VERSION=""
+ROOTLESS_REASON=""
 SELF_DIR=$(cd -- "$(dirname -- "$0")" >/dev/null 2>&1 && pwd -P)
 
 START_TIMEOUT=${SUNSETLINUX_START_TIMEOUT:-120}
@@ -102,6 +107,11 @@ json_obj() {
 }
 json_get_num() { [[ -f "${1-}" ]] || return 0; sed -n "s/.*\"$2\"[[:space:]]*:[[:space:]]*\([0-9]\{1,\}\).*/\1/p" "$1" 2>/dev/null | head -1; }
 json_get_bool() { [[ -f "${1-}" ]] || return 0; sed -n "s/.*\"$2\"[[:space:]]*:[[:space:]]*\(true\|false\).*/\1/p" "$1" 2>/dev/null | head -1; }
+json_get_str() { # json_get_str <file> <key> —— 读一个字符串值（引号内），取不到则空
+  [[ -f "${1-}" ]] || return 0
+  sed -n "s/.*\"$2\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$1" 2>/dev/null | head -1
+}
+
 
 RESULT_OK=false
 RESULT_ERR=""
@@ -167,6 +177,75 @@ find_sh() { # 给「shebang 指向 /bin/sh 但 Android 上没有 /bin/sh」的�
   c=$(command -v sh 2>/dev/null || true)
   [[ -n "$c" ]] && { printf '%s' "$c"; return 0; }
   return 1
+}
+
+# -----------------------------------------------------------------------------
+# 选非 root 模式的运行时：**proroot 首选，proot 降级**
+#
+# 为什么换：proroot 是 LD_PRELOAD 路线（无 ptrace），在 arm64 上省掉每条系统调用
+# 一次上下文切换 —— 对 npm install / Node 启动这种"系统调用密集"的负载差别很明显。
+# 但不能只带它：内核/ROM 差异、以及"用户自己把 proot 装到别处"的既有用法都要留着，
+# 所以 proot 仍然随包（降级）。
+#
+# 决策顺序（与文档一致）：
+#   SUNSETLINUX_ROOTLESS=auto|proroot|proot（App 设置透传）
+#     → etc/config.json 的 "rootless_runtime"（默认 auto）
+#   auto：proroot 可用就用，不可用**明确记原因**再降到 proot
+#   proroot（显式）：不可用就**失败**（不静默降级 —— 用户明确要它，静默换掉等于骗人）
+#   proot（显式）：跳过 proroot 探测
+# -----------------------------------------------------------------------------
+resolve_rootless() {
+  local want="${SUNSETLINUX_ROOTLESS:-}"
+  [ -n "$want" ] || want="$(json_get_str "$ETC_DIR/config.json" rootless_runtime)"
+  [ -n "$want" ] || want=auto
+
+  local lib="${SUNSETLINUX_NATIVE_LIB_DIR:-}"
+  # proroot 的 5 个库**必须同目录**：启动器按 /proc/self/exe 的目录自动发现另外四个。
+  # 列表写在函数里（不放全局）——这样单独抽取函数做回归测试时它是自洽的。
+  local sos="libproroot.so libproroot-runtime.so libproroot-linker.so libproroot-bridge.so libproroot-stub-loader.so"
+  local missing="" so
+  if [ "$want" != "proot" ]; then
+    if [ -z "$lib" ]; then
+      missing="没有 SUNSETLINUX_NATIVE_LIB_DIR（App 没把它透传进来）"
+    elif [ ! -d "$lib" ]; then
+      missing="nativeLibraryDir 不存在：$lib"
+    else
+      for so in $sos; do
+        [ -f "$lib/$so" ] || missing="${missing}${missing:+、}$so"
+      done
+    fi
+  fi
+
+  if [ "$want" != "proot" ] && [ -z "$missing" ]; then
+    PROOT_CMD=("$lib/libproroot.so")
+    ROOTLESS_KIND="proroot"
+    ROOTLESS_VERSION="${SUNSETLINUX_PROROOT_VERSION:-unknown}"
+    # proroot 需要一个可写目录放运行时配置（App 私有目录）
+    export PROROOT_TMP_DIR="${PROROOT_TMP_DIR:-$LINUX_HOME/cache/proroot}"
+    mkdir -p -- "$PROROOT_TMP_DIR" 2>/dev/null || true
+    ROOTLESS_REASON="proroot 可用（$lib，$ROOTLESS_VERSION）"
+    log "rootless：proroot（$ROOTLESS_REASON，PROROOT_TMP_DIR=$PROROOT_TMP_DIR）"
+    return 0
+  fi
+
+  if [ "$want" = "proroot" ]; then
+    fail_json 1 "显式要求 proroot，但它不可用：$missing
+  这是随 APK 一起打的运行时（jniLibs/arm64-v8a）。请确认：
+    · 装的是官方 APK（自编译时漏了 proroot 的 .so）；
+    · App 把 applicationInfo.nativeLibraryDir 透传给了脚本。
+  想用降级实现可以设 SUNSETLINUX_ROOTLESS=proot（或 auto）。"
+  fi
+
+  if [ "$want" = "auto" ] && [ -n "$missing" ]; then
+    warn "proroot 不可用（$missing）→ 降级到 proot（随包 bundle）"
+    ROOTLESS_REASON="proroot 不可用：$missing"
+  else
+    ROOTLESS_REASON="显式选择了 proot"
+  fi
+  resolve_proot
+  ROOTLESS_KIND="proot"
+  ROOTLESS_VERSION=""
+  return 0
 }
 
 resolve_proot() {
@@ -297,7 +376,7 @@ build_proot_args() {
 
   if [[ "$FAKE_ROOT" == "1" ]]; then
     PROOT_ARGS+=(-0)
-    warn "当前为伪造 root（proot -0）：id 会显示 uid=0，但**没有真实 capabilities**——"
+    warn "当前为伪造 root（$ROOTLESS_KIND -0）：id 会显示 uid=0，但**没有真实 capabilities**——"
     warn "  mount / chown / mknod / 修改系统目录 等操作依旧会失败，安全边界与真实 root 完全不同。"
     warn "  仅在你明确需要（如 apt/dpkg 装包）时使用，默认关闭。"
   fi
@@ -630,6 +709,11 @@ main() {
 
   resolve_proot
 
+  # 记下实际运行时：status/doctor 是**另一个进程**，只能靠文件知道这次用的是谁
+  mkdir -p -- "$RUN_DIR" 2>/dev/null || true
+  printf '%s %s\n' "$ROOTLESS_KIND" "${ROOTLESS_VERSION:-unknown}" > "$RUN_DIR/rootless" 2>/dev/null || true
+  log "rootless 运行时：$ROOTLESS_KIND ${ROOTLESS_VERSION:-}（${ROOTLESS_REASON}）"
+
   # 伪造 root 的决策顺序：命令行 > 环境变量 > config.json（默认 false）
   FAKE_ROOT=""
   if [[ -n "$FAKE_ROOT_FLAG" ]]; then FAKE_ROOT=$FAKE_ROOT_FLAG
@@ -694,7 +778,8 @@ main() {
     RESULT_JSON=$(json_obj schema "$(jint "$SCHEMA_VERSION")" mode "$(jstr "$MODE")" ok true \
       started false already_running true pid "$(jint "$p")" port "$(jint "$port")" \
       url "$(jstr "http://127.0.0.1:$port")" ready true fake_root "$(jbool "$FAKE_ROOT")" \
-      dns_source "$(jstr "$DNS_SOURCE")" log "$(jstr "$LOG_FILE")" last_error null)
+      dns_source "$(jstr "$DNS_SOURCE")" log "$(jstr "$LOG_FILE")" last_error null \
+      rootless "$(jstr "$ROOTLESS_KIND")" rootless_version "$(jstr "${ROOTLESS_VERSION:-unknown}")")
     emit_json
     exit 0
   fi
@@ -741,7 +826,8 @@ main() {
     port "$(jint "${RESULT_PORT:-$port}")" url "$(jstr "http://127.0.0.1:${RESULT_PORT:-$port}")" \
     ready "$(jbool "$ready")" waited_sec "$(jint "$WAIT_SECONDS")" fake_root "$(jbool "$FAKE_ROOT")" \
     dns_source "$(jstr "$DNS_SOURCE")" dns "$dns_arr" binds_skipped "$skipped_arr" \
-    proot "$(jstr "${PROOT_CMD[0]}")" log "$(jstr "$LOG_FILE")" last_error null)
+    proot "$(jstr "${PROOT_CMD[0]}")" log "$(jstr "$LOG_FILE")" last_error null \
+    rootless "$(jstr "$ROOTLESS_KIND")" rootless_version "$(jstr "${ROOTLESS_VERSION:-unknown}")")
   emit_json
   exit 0
 }

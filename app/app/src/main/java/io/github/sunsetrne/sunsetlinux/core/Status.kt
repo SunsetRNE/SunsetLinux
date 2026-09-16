@@ -69,6 +69,15 @@ data class DshStatus(
     val upperUsed: Long?,
     val upperTotal: Long?,
     val lastError: String?,
+    /**
+     * 非 root 模式**实际**用的运行时（`proroot` / `proot`），从 status JSON 的新键
+     * `rootless:{kind,version}` 读；没启动过时是 null（不编造）。
+     *
+     * 为什么单列：`mode` 对外仍是 `proot`（§3.1 冻结的契约不动），
+     * 但"到底跑的是 proroot 还是降级的 proot"对排障与性能预期都是关键信息。
+     */
+    val rootlessKind: String? = null,
+    val rootlessVersion: String? = null,
     val raw: String,
 ) {
     val isRunning: Boolean get() = state == EnvState.RUNNING
@@ -127,6 +136,7 @@ data class DshStatus(
             val dsh = o.optJSONObject("dsh")
             val layersObj = o.optJSONObject("layers")
             val storage = o.optJSONObject("storage")
+            val rootless = o.optJSONObject("rootless")
 
             val layers = buildList {
                 if (layersObj != null) {
@@ -159,6 +169,8 @@ data class DshStatus(
             }
 
             return DshStatus(
+                rootlessKind = rootless?.str("kind"),
+                rootlessVersion = rootless?.str("version"),
                 schema = o.num("schema")?.toInt(),
                 mode = o.str("mode"),
                 state = EnvState.from(o.str("state")),

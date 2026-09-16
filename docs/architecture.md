@@ -23,9 +23,9 @@
 
 产品同时交付 **root 版**与**非 root 版**，由同一 App 按 `su` 可用性自动选择，也可手动强制。
 
-| | root 模式 | proot 模式（降级） |
+| | root 模式 | 非 root 模式（proroot 首选 / proot 降级） |
 |---|---|---|
-| 底座 | 真 root（KernelSU）+ 真 chroot | PRoot（ptrace） |
+| 底座 | 真 root（KernelSU）+ 真 chroot | **proroot**（LD_PRELOAD，无 ptrace 往返）；不可用时降级 **proot**（ptrace） |
 | 隔离 | `unshare -m` + `unshare -u` | 无 |
 | 分层 | overlayfs：erofs(lower) + ext4(upper) | 无 overlay，直接目录 |
 | 环境根 | `/data/sunsetlinux` | `$APP_FILES/sunsetlinux` |
@@ -56,6 +56,18 @@
 > 为什么写成冻结约束：这不是理论问题。改名前实测 `mksh -n runtime/root/start.sh`
 > 直接报 `syntax error: unexpected '('` —— 也就是说真机上 `linuxctl start` 从来没能
 > 跑起来过。现在 `tools/shell-compat-check.mjs` 在 CI 里守着这条线。
+
+> **非 root 模式的运行时（0.2.8 起）**：首选 **proroot**，降级 **proot**。
+> 选择逻辑在 `runtime/proot/start.sh` 的 `resolve_rootless()`
+> （`SUNSETLINUX_ROOTLESS=auto|proroot|proot`，默认 auto；也读 `etc/config.json` 的
+> `rootless_runtime`）。`auto` 在 proroot 缺件时降级**并记录原因**；显式 `proroot`
+> 缺件则**明确失败**，不静默换掉。对外契约**不变**：`status` 的 `mode` 仍是 `proot`，
+> 实际运行时在新增的 `rootless:{kind,version}` 里（`start.sh` 写 `run/rootless` 供
+> `status`/`doctor` 这两个独立进程读取）。
+>
+> proroot 是**专有许可**：只能随完整 APK 分发、不得再分发修改版。因此它的 5 个 `.so`
+> 只进 APK 的 `jniLibs/arm64-v8a/`（不进仓库、不进 Release 资产、不 strip），
+> 账本与闸门在 `tools/proroot/`，细节见 `docs/proroot.md`。
 
 ---
 

@@ -312,6 +312,14 @@ jobs:
 
       # ★ 制品：发布线路（release.yml）直接下载这个，**不再重编一遍 APK**。
       #   名字/路径改动必须同步 release.yml 的 download-artifact。
+      # proroot 是**专有许可**：只能随完整 APK 再分发。这一关保证
+      # ① 仓库/工作流里没有裸 .so（公开仓库的独立分发不允许）
+      # ② APK 里 5 个 .so 齐全且 sha256 与上游一致（没被 strip）
+      # ③ APK 带许可原文、关于页有 attribution
+      - name: 断言 — proroot 许可合规（不得独立分发；APK 内必须完整）
+        run: node tools/proroot/compliance-test.mjs
+        if: always() && steps.android.conclusion == 'success'
+
       - name: 上传 APK 制品（供发布线路复用）
         if: steps.android.conclusion == 'success'
         uses: actions/upload-artifact@v4

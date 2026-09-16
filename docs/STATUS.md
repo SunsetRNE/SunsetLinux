@@ -498,6 +498,21 @@ su -c '/data/sunsetlinux/bin/linuxctl doctor'
 | 已装状态读不到时 | —— | **不给刷入按钮**，先让用户修 root 授权（与"读不到 ≠ 没装"一致） |
 | 重启 | —— | 只报告"重启后生效"（KernelSU 落 `modules_update/`），**App 不替用户重启**，脚本里有单测断言不许出现 `reboot` |
 
+### 3.10.16 免 root 运行时：proroot 首选 + proot 降级（App 0.2.8）
+
+| 事 | 之前 | 现在 |
+|---|---|---|
+| 非 root 模式的运行时 | 只有 proot（ptrace：每条系统调用一次上下文切换） | 首选 **proroot**（LD_PRELOAD，无 ptrace 往返），proot 仍随包**降级** |
+| 选择 | 无（写死 proot） | `SUNSETLINUX_ROOTLESS=auto\|proroot\|proot`（App「设置 → 免 root 运行时」），也读 `etc/config.json` 的 `rootless_runtime`；`auto` 缺件降级并**记原因**，显式 `proroot` 缺件**明确失败**（不静默降级） |
+| 实际用了谁 | 看不出来 | `linuxctl status` 新增 `rootless:{kind,version}`（`mode` 契约仍是 `proot`）；`doctor` 有 `rootless_runtime` 检查项；App 设置页与关于页都显示；`start.sh` 写 `run/rootless` 供另一个进程读 |
+| 打包 | proot bundle 解到 `$LINUX_HOME/proot/` | proroot 5 个 `.so` 随 APK 进 `jniLibs/arm64-v8a`（四个组合都带，+0.2 MB）；App 透传 `SUNSETLINUX_NATIVE_LIB_DIR` |
+| 许可 | proot 是 GPLv2（可自由分发） | proroot 是**专有**：只随完整 APK 分发、不得再分发修改版 → 二进制不进仓库/不进 Release 资产/不 strip；APK 内带许可原文 + 关于页 attribution；`tools/proroot/compliance-test.mjs` 每次构建做闸门 |
+
+测试：`runtime/proot/selftest-funcs.sh` 新增 5 条（auto 选 proroot、缺件降级并说明原因、
+显式 proot 不被抢、显式 proroot 缺件必须失败、参数前缀与 proot 同一套），bash 与 mksh 双跑；
+Kotlin 侧新增 `RootlessStatusTest`（3 条：proroot 在用时 mode 仍是 proot、降级时如实报、
+老脚本没有该键时是 null）。
+
 ### 3.10.15 模块安装文案（模块 1.0.12）
 
 用户刷完模块贴出安装日志，指出两件事：文案该更新，而且有一段**被截断**了。

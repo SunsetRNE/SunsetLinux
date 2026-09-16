@@ -187,12 +187,25 @@ class Prefs(context: Context) {
         get() = sp.getString(KEY_NPM_REGISTRY, null)
         set(value) = sp.edit { putString(KEY_NPM_REGISTRY, value) }
 
+    /**
+     * 免 root（非 root）模式用哪个运行时：null/`auto` = 优先 proroot、缺则降级 proot；
+     * `proroot` = 只用 proroot（缺件就明确失败）；`proot` = 只用 proot。
+     *
+     * 为什么不写进 `etc/config.json`：那是**环境里的**文件，而"用哪个运行时"是 App 侧的东西
+     * （proroot 的 .so 就在 APK 的 nativeLibraryDir 里）。App 用环境变量透传，
+     * 脚本也支持从 config.json 读同名键（给 WebUI/手改留口子）。
+     */
+    var rootlessRuntime: String?
+        get() = sp.getString(KEY_ROOTLESS, null)
+        set(value) = sp.edit { putString(KEY_ROOTLESS, value?.trim()?.ifEmpty { null }) }
+
     /** 最近一次使用的离线种子目录（provision 用）。 */
     var seedDir: String?
         get() = sp.getString(KEY_SEED_DIR, null)
         set(value) = sp.edit { putString(KEY_SEED_DIR, value) }
 
     private companion object {
+        const val KEY_ROOTLESS = "rootless_runtime"
         const val KEY_MODE = "mode_override"
         const val KEY_PORT = "port"
         const val KEY_BOOT_SERVICE = "boot_start_service"

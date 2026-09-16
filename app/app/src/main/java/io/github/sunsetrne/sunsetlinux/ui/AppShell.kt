@@ -720,6 +720,19 @@ private fun AboutDialog(ui: LauncherViewModel.UiState, onClose: () -> Unit, onEx
                 AboutLine("包名", "io.github.sunsetrne.sunsetlinux")
                 AboutLine("运行模式", ui.mode.modeLabel + if (ui.suAvailable) "（su 可用）" else "（无 su）")
                 AboutLine("模块", ui.moduleLabel ?: "检测中…")
+                // ★ 免 root 运行时的归属（proroot 许可第 5 条要求 attribution）与实况
+                AboutLine(
+                    "免 root 运行时",
+                    buildString {
+                        append("proroot ${BuildConfig.PROROOT_VERSION}（首选）+ proot（降级）")
+                        val kind = ui.status?.rootlessKind
+                        if (kind != null) {
+                            append("　本次：")
+                            append(kind)
+                            ui.status?.rootlessVersion?.let { append(" ").append(it) }
+                        }
+                    },
+                )
                 AboutLine("环境根", DshPaths.linuxHome(context, ui.mode))
                 AboutLine("Linux 侧接口", "linuxctl / status JSON（§3.1 冻结）")
                 AboutLine("当前阶段", ui.stage)
@@ -734,6 +747,14 @@ private fun AboutDialog(ui: LauncherViewModel.UiState, onClose: () -> Unit, onEx
                 Text(
                     text = "本应用不解析 rootfs、不自行挂载：所有环境操作都只经 linuxctl。" +
                         "Root 模式下环境由 KernelSU 模块开机启动，与 App 生命周期解耦。",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = TextMuted,
+                )
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    text = "免 root 模式的运行时是 proroot（第三方，https://github.com/coderredlab/proroot，" +
+                        "专有许可，未做修改，仅随本 APK 分发；全文见 assets/licenses/proroot-LICENSE.txt）；" +
+                        "它不可用时自动降级到随包的 proot。两者都只在非 root 模式生效。",
                     style = MaterialTheme.typography.labelSmall,
                     color = TextMuted,
                 )

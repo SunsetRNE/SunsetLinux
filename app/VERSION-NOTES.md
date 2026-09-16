@@ -18,6 +18,40 @@
 | 0.2.5 | 7 | **离线安装真正可用**：内嵌离线包一键装（读包 → 校验 → 解压 → 镜像校验 → `linuxctl update`，全程不联网）；proot 宿主脚本随 APK 走 assets（免 root 版不再要求用户手动解包）；模块检测改三态（**读不到 ≠ 没装**）；「更新」页把频道检查失败与"已是最新"分开说，并显示本机包/内嵌包对照 |
 | 0.2.6 | 8 | **App 内更新 KernelSU 模块**：关于页读官方 `index.json` 拿到最新模块版本/sha256/Release 地址，一键「下载 → 校验 → `ksud module install`」（重启由用户决定）；模块版本比较改**逐段数字**（`1.0.10 > 1.0.9`，字符串比会反） |
 | 0.2.7 | 9 | **修"层都在、却永远挂不上"**（模块 **1.0.11**）：开机自启用裸 `sh` 发起 → 撞上 busybox ash（`${BASH_SOURCE[0]}` 直接 `syntax error: bad substitution`），而且 `linuxctl` 用 `bash start.sh` 去挂载 —— 而 Android 上没有 bash。现在统一走 `$SH_BIN`（宿主/CI 用 bash，设备用 `/system/bin/sh`），并加了三条回归闸门。App 本身无代码改动，只是与模块 1.0.11 一起发 |
+| 0.2.8 | 10 | **免 root 模式换 proroot 首选 + proot 降级**：proroot（LD_PRELOAD，无 ptrace 开销）随 APK 的 jniLibs 打包，proot 仍随包内嵌；`SUNSETLINUX_ROOTLESS=auto|proroot|proot`（App 设置里可选），`status`/`doctor`/App 都如实报实际用了谁。proroot 是专有许可 —— 只随 APK 分发、不得再分发修改版，带许可原文 + 关于页 attribution，并有合规闸门 |
+
+## 0.2.8 —— 免 root 模式：proroot 首选，proot 降级
+
+**动机**：免 root（非 root）模式原先只有 proot —— 它靠 ptrace 拦截每条系统调用，
+每次调用一次上下文切换；`npm install`、Node 启动这类系统调用密集的负载会明显变慢。
+proroot 是同一套 CLI 的 **LD_PRELOAD** 实现（无 ptrace 往返），在 arm64 上省掉那一跳。
+
+**做法**：
+
+- proroot 的 5 个 `.so`（共 ~650 KB）进 APK 的 `jniLibs/arm64-v8a/`，**四个组合都带**；
+- `runtime/proot/start.sh` 新增 `resolve_rootless()`：`auto`（默认，proroot 可用就用，
+  不可用记原因降级 proot）/ `proroot`（缺件**明确失败**，不静默降级）/ `proot`（只用 proot）。
+  App「设置 → 免 root 运行时」可选，也能用 `SUNSETLINUX_ROOTLESS` 或 `etc/config.json` 覆盖；
+- **对外契约不动**：`linuxctl status` 的 `mode` 仍是 `proot`，实际运行时放在新增的
+  `rootless:{kind,version}` 里；`start.sh` 把结果写进 `run/rootless`，`status`/`doctor`
+  是另一个进程，靠它知道"这次用的是谁"；
+- App 侧：透传 `SUNSETLINUX_NATIVE_LIB_DIR`（= `applicationInfo.nativeLibraryDir`，
+  proroot 启动器就在那里；脚本猜不到这个路径）与 `SUNSETLINUX_PROROOT_VERSION`；
+  「设置」页加运行时选择卡片，「关于」页显示版本 + attribution。
+
+**许可（这条比功能更重要）**：proroot 是**专有**许可 —— 允许把未修改的二进制作为
+**完整 APK** 的一部分再分发，禁止再分发修改版、禁止独立于应用包的分发。所以：
+
+- 二进制**不进仓库**（公开仓库的文件就是独立分发），构建期从上游 Release 取、校验 sha256
+  （账本 `tools/proroot/VENDOR.json`）；
+- **不 strip**（strip 就是修改）：`packaging.jniLibs.keepDebugSymbols`；同时
+  `useLegacyPackaging = true`，让 `.so` 真的落到 `nativeLibraryDir`（要按路径 exec 启动器）；
+- APK 内带许可原文 `assets/licenses/proroot-LICENSE.txt`，「关于」页给 attribution；
+- 新增 `tools/proroot/compliance-test.mjs` 并接入 CI：仓库/工作流里不得出现裸 `.so`、
+  APK 内 5 个 `.so` 必须与上游 sha256 一致、许可与 attribution 必须在。
+
+APK 体积代价：每个组合 +0.2 MB 左右（13.2→13.4 / 77.3→77.5 / 78.2→78.5 / 109.5→109.7 MB）。
+
 
 ## 0.2.7 —— 挂载修好了：**层都在，却永远"未挂载"**
 

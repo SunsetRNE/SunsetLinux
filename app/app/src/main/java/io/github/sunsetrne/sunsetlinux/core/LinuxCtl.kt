@@ -1,6 +1,7 @@
 package io.github.sunsetrne.sunsetlinux.core
 
 import android.content.Context
+import io.github.sunsetrne.sunsetlinux.BuildConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
@@ -313,14 +314,24 @@ class LinuxCtl(private val context: Context, val mode: EnvMode) {
         if (File(activeCtlPath).canExecute()) listOf(activeCtlPath) + args
         else listOf("/system/bin/sh", activeCtlPath) + args
 
-    private fun baseEnv(): Map<String, String> = mapOf(
-        "PATH" to "/system/bin:/system/xbin:/data/sunsetlinux/bin",
+    private fun baseEnv(): Map<String, String> = buildMap {
+        put("PATH", "/system/bin:/system/xbin:/data/sunsetlinux/bin")
+        // 免 root 运行时的选择与位置：
+        //   · proroot 的 5 个 .so 只在 **nativeLibraryDir**（随 APK 打的 jniLibs），
+        //     脚本自己是找不到这个路径的 —— 必须由 App 透传，否则只能降级到 proot。
+        //   · 版本号来自 BuildConfig（构建时读 tools/proroot/VENDOR.json），
+        //     status 与日志里要能报出"用的是哪个版本"。
+        runCatching { context.applicationInfo.nativeLibraryDir }
+            .getOrNull()?.takeIf { it.isNotBlank() }
+            ?.let { put("SUNSETLINUX_NATIVE_LIB_DIR", it) }
+        put("SUNSETLINUX_PROROOT_VERSION", BuildConfig.PROROOT_VERSION)
+        Prefs(context).rootlessRuntime?.let { put("SUNSETLINUX_ROOTLESS", it) }
         // linuxctl 自己会解析环境根：优先 LINUX_HOME，其次 SUNSETLINUX_APP_FILES。
         // 两个都给上，避免部署侧调整解析顺序时 App 侧失效。
-        "LINUX_HOME" to home,
-        "SUNSETLINUX_APP_FILES" to context.filesDir.absolutePath,
-        "HOME" to home,
-    )
+        put("LINUX_HOME", home)
+        put("SUNSETLINUX_APP_FILES", context.filesDir.absolutePath)
+        put("HOME", home)
+    }
 
     private fun workDir(): File? = if (mode == EnvMode.PROOT) context.filesDir else null
 

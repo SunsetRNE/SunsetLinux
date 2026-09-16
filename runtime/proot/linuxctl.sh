@@ -549,6 +549,19 @@ build_status() {
   # ---- storage ----
   ST_UPPER_USED=$(jint "$(size_cached rootfs_bytes)")
   ST_UPPER_TOTAL=$(jint "$(fs_total_bytes "$LINUX_HOME")")
+  # ---- rootless：实际用的是 proroot 还是降级的 proot ----
+  # start.sh 启动时把它写进 run/rootless（"kind version"），status 是**另一个进程**，
+  # 只能靠这个文件知道；没有文件（从没启动过）就报 null，不编造。
+  ST_ROOTLESS_KIND=null
+  ST_ROOTLESS_VER=null
+  if [ -f "$RUN_DIR/rootless" ]; then
+    local _rl_kind _rl_ver
+    read -r _rl_kind _rl_ver < "$RUN_DIR/rootless" 2>/dev/null || true
+    if [ -n "${_rl_kind:-}" ]; then
+      ST_ROOTLESS_KIND=$(jstr "$_rl_kind")
+      [ -n "${_rl_ver:-}" ] && ST_ROOTLESS_VER=$(jstr "$_rl_ver")
+    fi
+  fi
   return 0
 }
 
@@ -572,6 +585,8 @@ emit_status() { # 参数：成对的 <已编码key> <已编码val>，附加在 �
     out+=",$(jstr "${extra[i]}"):${extra[i + 1]}"
     i=$((i + 2))
   done
+  # 非 root 模式**实际**用的运行时（对外 mode 仍是 proot，§3.1 的既有键一个不动）
+  out+=",\"rootless\":{\"kind\":${ST_ROOTLESS_KIND:-null},\"version\":${ST_ROOTLESS_VER:-null}}"
   out+='}'
   printf '%s\n' "$out"
 }
@@ -1697,6 +1712,29 @@ cmd_doctor() {
     add_check "context" false warn "当前 linuxctl 跑在 proot（ptrace）里：文件系统容量/占用不可信，已自动改用 etc/state.json 缓存值。推荐由 App 原生侧调用。"
   else
     add_check "context" true info "原生上下文（未被 ptrace 跟踪），容量测量可信。"
+  fi
+
+  # 1.5 非 root 运行时：**实际**用的是 proroot 还是降级的 proot（免 root 方案的核心信息）
+  #     proroot 随 APK 的 nativeLibraryDir 提供，靠 SUNSETLINUX_NATIVE_LIB_DIR 找到。
+  local rl_kind="" rl_ver="" rl_src=""
+  if [ -f "$RUN_DIR/rootless" ]; then
+    read -r rl_kind rl_ver < "$RUN_DIR/rootless" 2>/dev/null || true
+    rl_src="本次运行记录（run/rootless）"
+  fi
+  local rl_lib="${SUNSETLINUX_NATIVE_LIB_DIR:-}" rl_ok=false rl_missing=""
+  if [ -n "$rl_lib" ] && [ -d "$rl_lib" ]; then
+    local _so
+    for _so in libproroot.so libproroot-runtime.so libproroot-linker.so libproroot-bridge.so libproroot-stub-loader.so; do
+      [ -f "$rl_lib/$_so" ] || rl_missing="${rl_missing}${rl_missing:+, }$_so"
+    done
+    [ -z "$rl_missing" ] && rl_ok=true
+  else
+    rl_missing="SUNSETLINUX_NATIVE_LIB_DIR 未设置或不存在（App 未透传？）"
+  fi
+  if [ "$rl_ok" = true ]; then
+    add_check "rootless_runtime" true info "proroot 可用（${rl_lib}，版本 ${SUNSETLINUX_PROROOT_VERSION:-unknown}）${rl_kind:+；本次运行用的是 $rl_kind ${rl_ver:-}}。proroot 走 LD_PRELOAD，无 ptrace 往返。"
+  else
+    add_check "rootless_runtime" true warn "proroot 不可用（$rl_missing）→ 免 root 模式会降级到 proot。想用 proroot 请装官方 APK（.so 随 jniLibs 打包）。${rl_kind:+本次运行用 $rl_kind ${rl_ver:-}}"
   fi
 
   # 2. proot 二进制

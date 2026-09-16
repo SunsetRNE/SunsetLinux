@@ -1,3 +1,5 @@
+import javax.inject.Inject
+import org.gradle.process.ExecOperations
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -28,6 +30,16 @@ val versionProps = Properties().apply {
 }
 val engineeringVersion = versionProps.getProperty("versionName").trim()
 val engineeringVersionCode = versionProps.getProperty("versionCode").trim().toInt()
+
+// ── proroot（免 root 首选运行时）──────────────────────────────────────────────
+// 版本与 sha256 的唯一事实源是 tools/proroot/VENDOR.json；**二进制不进仓库**
+// （专有许可：只能在完整 APK 里再分发，禁止作为独立资产/仓库文件分发）。
+// 这里只读它的版本号进 BuildConfig，界面「关于」页要显示并给出 attribution。
+val prorootVendor = groovy.json.JsonSlurper().parse(
+    File(rootDir.parentFile, "tools/proroot/VENDOR.json"),
+) as Map<*, *>
+val prorootVersion = prorootVendor["version"].toString()
+val prorootLicenseName = "proroot ${prorootVersion}"
 
 /** 构建时间（固定 Asia/Shanghai，避免本地与 CI 差 8 小时导致文件名对不上）。 */
 val buildTime: String = SimpleDateFormat("yyyyMMdd-HHmm", Locale.US)
@@ -79,6 +91,8 @@ android {
         buildConfigField("String", "STANDARD_VERSION", "\"$standardVersion\"")
         buildConfigField("String", "BUILD_TIME", "\"$buildTime\"")
         buildConfigField("String", "GIT_HASH", "\"$gitHash\"")
+        // 免 root 运行时：proroot 是首选的 LD_PRELOAD 实现，proot 是降级实现（两者都随 APK）
+        buildConfigField("String", "PROROOT_VERSION", "\"$prorootVersion\"")
     }
 
     // ────────────────────────────────────────────────────────────────────────
@@ -161,6 +175,17 @@ android {
     packaging {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
+        }
+        jniLibs {
+            // ★ 两个都不能少：
+            //   · keepDebugSymbols：**不要 strip** 供应商的 proroot 二进制 ——
+            //     许可第 2 条禁止再分发"修改过的版本"，strip 就是修改。
+            //   · useLegacyPackaging：把 .so **解包**到 nativeLibraryDir。默认的
+            //     "不落盘、直接从 APK 页对齐加载"对 dlopen 足够，但 proroot 的启动器
+            //     （libproroot.so 本身是个 PIE 可执行文件）需要我们**按路径 exec** 它，
+            //     所以必须在磁盘上有真文件。
+            keepDebugSymbols += "**/libproroot*.so"
+            useLegacyPackaging = true
         }
     }
 
@@ -313,6 +338,108 @@ abstract class SyncProotRuntimeAssets : DefaultTask() {
     }
 }
 
+
+/**
+ * 把 proroot 的 5 个 `.so` 铺成 AGP 认的 **jniLibs** 目录（`arm64-v8a/`）。
+ *
+ * ## 为什么"现取现用"而不是提交进仓库
+ *
+ * proroot 是**专有许可**（`tools/proroot/LICENSE.proroot`）：允许把未修改的二进制
+ * 作为**完整应用包（APK）**的一部分再分发，但禁止再分发修改版、也禁止独立于应用包的
+ * 分发（公开仓库里的文件、Release 资产、CI artifact 都算）。所以：
+ *   · 仓库里只有版本账本 `tools/proroot/VENDOR.json`（含 5 个 sha256）与许可原文；
+ *   · 二进制在构建时从上游 Release 取到 `dist/proroot/`（gitignore），校验 sha256 后
+ *     直接进 jniLibs —— 最终只以 APK 形式对外。
+ *
+ * 因此 **每一个** Android 构建都需要网络（CI 有）。取不到就**失败**，绝不静默产出
+ * 一个"免 root 模式其实用不了 proroot"的 APK（那种"看起来成功"最坑人）。
+ */
+abstract class SyncProrootLibs : DefaultTask() {
+    @get:Inject
+    abstract val execOps: ExecOperations
+
+    /** 仓库根（`app/` 的上一级）。 */
+    @get:Input
+    abstract val repoRoot: Property<String>
+
+    /** 版本账本：内容变了就该重跑取用与校验。 */
+    @get:InputFile
+    @get:PathSensitive(PathSensitivity.RELATIVE)
+    abstract val vendorJson: RegularFileProperty
+
+    /** 取到哪儿（默认 `dist/proroot`）；内容不进 Gradle 输入快照（由 vendorJson 的 sha256 覆盖）。 */
+    @get:Internal
+    abstract val sourceDir: DirectoryProperty
+
+    @get:OutputDirectory
+    abstract val outputDir: DirectoryProperty
+
+    @TaskAction
+    fun sync() {
+        val repo = File(repoRoot.get())
+        val src = sourceDir.get().asFile
+        logger.lifecycle("proroot：取用/校验 → ${src.path}（专有许可：只随 APK 分发）")
+        val result = execOps.exec {
+            workingDir = repo
+            commandLine("node", "tools/proroot/fetch.mjs", "--out", src.absolutePath)
+        }
+        if (result.exitValue != 0) {
+            throw GradleException(
+                "proroot 取用失败（exit ${result.exitValue}）。\n" +
+                    "  免 root 模式的 proroot 需要构建期从上游 Release 下载（专有许可不允许我们" +
+                    "把二进制提交进仓库或单独分发）。\n" +
+                    "  手动排查：node tools/proroot/fetch.mjs",
+            )
+        }
+
+        val out = File(outputDir.get().asFile, "arm64-v8a")
+        out.deleteRecursively()
+        out.mkdirs()
+        val files = src.listFiles { f -> f.isFile && f.name.startsWith("libproroot") && f.name.endsWith(".so") }
+            ?.sortedBy { it.name }
+            ?: emptyList()
+        if (files.size != 5) {
+            throw GradleException("proroot 需要 5 个 .so，实际拿到 ${files.size} 个（${src.path}）")
+        }
+        files.forEach { it.copyTo(File(out, it.name), overwrite = true) }
+        logger.lifecycle("proroot：${files.size} 个 .so → jniLibs/arm64-v8a（${files.sumOf { it.length() } / 1024} KB）")
+    }
+}
+
+/**
+ * 把 proroot 的许可原文 + attribution 放进 `assets/licenses/`。
+ *
+ * 许可第 4/5 条要求：APK 内必须带许可原文，且应用内要有 attribution。
+ * 这里生成的文件随 APK 走，用户/审计在设备上就能查。
+ */
+abstract class SyncProrootLicense : DefaultTask() {
+    @get:InputFile
+    @get:PathSensitive(PathSensitivity.RELATIVE)
+    abstract val licenseFile: RegularFileProperty
+
+    @get:Input
+    abstract val version: Property<String>
+
+    @get:OutputDirectory
+    abstract val outputDir: DirectoryProperty
+
+    @TaskAction
+    fun sync() {
+        val out = File(outputDir.get().asFile, "licenses").apply { mkdirs() }
+        val text = buildString {
+            append(licenseFile.get().asFile.readText().trimEnd())
+            append("\n\n")
+            append("------------------------------------------------------------------------\n")
+            append("打包信息（由 SunsetLinux 构建生成）\n")
+            append("  组件：proroot ${version.get()}（https://github.com/coderredlab/proroot）\n")
+            append("  用途：SunsetLinux 免 root（非 root）模式的**首选**运行时；proot 作为降级实现。\n")
+            append("  声明：二进制取自上游 Release，**未做任何修改**（也未 strip），仅作为本 APK 的一部分分发。\n")
+            append("------------------------------------------------------------------------\n")
+        }
+        File(out, "proroot-LICENSE.txt").writeText(text)
+    }
+}
+
 androidComponents {
     onVariants { variant ->
         val flavor = embedFlavors.firstOrNull { it.gradleName == variant.flavorName }
@@ -351,5 +478,27 @@ androidComponents {
             )
         }
         variant.sources.assets?.addGeneratedSourceDirectory(prootAssets, SyncProotRuntimeAssets::outputDir)
+
+        // ④ proroot（免 root 首选运行时）：二进制进 jniLibs，许可进 assets。
+        //    四个组合都带 —— proroot 只在"非 root 模式"生效，而任何组合都可能被
+        //    用户选成非 root 模式（没 su / 用户强制 proot）。
+        val prorootTaskName = "syncProrootLibs" + variant.name.replaceFirstChar { it.uppercase() }
+        val prorootLibs = tasks.register<SyncProrootLibs>(prorootTaskName) {
+            group = "build"
+            description = "取用 proroot（专有许可，只随 APK 分发）并铺成 jniLibs/arm64-v8a"
+            repoRoot.set(rootDir.parentFile.absolutePath)
+            vendorJson.set(File(rootDir.parentFile, "tools/proroot/VENDOR.json"))
+            sourceDir.set(File(rootDir.parentFile, "dist/proroot"))
+        }
+        variant.sources.jniLibs?.addGeneratedSourceDirectory(prorootLibs, SyncProrootLibs::outputDir)
+
+        val prorootLicenseTaskName = "syncProrootLicense" + variant.name.replaceFirstChar { it.uppercase() }
+        val prorootLicense = tasks.register<SyncProrootLicense>(prorootLicenseTaskName) {
+            group = "build"
+            description = "把 proroot 许可原文放进 assets/licenses/（许可第 4 条）"
+            licenseFile.set(File(rootDir.parentFile, "tools/proroot/LICENSE.proroot"))
+            version.set(prorootVersion)
+        }
+        variant.sources.assets?.addGeneratedSourceDirectory(prorootLicense, SyncProrootLicense::outputDir)
     }
 }

@@ -288,13 +288,123 @@ ST_UPPER_USED='null'; ST_UPPER_TOTAL='null'; ST_LAST_ERROR='null'
 
 out="$(emit_status action '"start"' ok true 2>/dev/null)"
 case $out in
-  *',"action":"start","ok":true}'*) ok "两个附加键按顺序、成对追加" ;;
+  *',"action":"start","ok":true,'*) ok "两个附加键按顺序、成对追加" ;;
   *) bad "附加键没按预期追加：$out" ;;
+esac
+# rootless 是"实际用了哪个免 root 运行时"：没启动过时报 null，不能编造
+case $out in
+  *'"rootless":{"kind":null,"version":null}}') ok "未启动时 rootless 如实报 null" ;;
+  *) bad "rootless 字段不对：$out" ;;
 esac
 out="$(emit_status 2>/dev/null)"
 case $out in
   *'}'*) ok "没有附加键时仍以 } 收尾（空数组不炸）" ;;
   *) bad "空附加键输出异常：$out" ;;
+esac
+
+# -----------------------------------------------------------------------------
+# 5) 非 root 运行时选择：proroot 首选、proot 降级（2026-09-16）
+#
+# 为什么测它：免 root 方案以前只有 proot；引入 proroot 之后"到底用了谁"必须可解释 ——
+# 选错了用户只会看到"环境起不来/很慢"，完全无从下手。
+# 这几条断言钉住决策表：auto 优先 proroot、缺件降级并**说明原因**、
+# 显式 proot 不被抢走、显式 proroot 缺件**必须失败**（静默降级等于骗人）。
+# -----------------------------------------------------------------------------
+head_ "rootless 运行时选择（proroot 首选 / proot 降级）"
+extract "$TMP/rootless.sh" "$START" json_get_str json_get_bool resolve_rootless resolve_proot build_proot_args
+
+NL_DIR="$TMP/nativelib"; mkdir -p "$NL_DIR"
+for so in libproroot.so libproroot-runtime.so libproroot-linker.so libproroot-bridge.so libproroot-stub-loader.so; do
+    # 桩启动器：--help 时打印 --link2symlink（模拟 proroot 的能力探测），其余静默成功
+    cat > "$NL_DIR/$so" <<'STUB'
+#!/bin/sh
+[ "$1" = "--help" ] && echo "  --link2symlink  emulate hardlinks"
+exit 0
+STUB
+    chmod +x "$NL_DIR/$so"
+done
+NL_EMPTY="$TMP/nativelib-empty"; mkdir -p "$NL_EMPTY"
+FAKE_PROOT="$TMP/fake-proot"; printf '#!/bin/sh\nexit 0\n' > "$FAKE_PROOT"; chmod +x "$FAKE_PROOT"
+
+# run_rootless <nativelib> <want> → "kind|cmd0|reason"（失败时打印 FAIL:<消息>）
+run_rootless() {
+    (
+        LINUX_HOME="$TMP/lh-rootless"
+        ROOTFS="$LINUX_HOME/rootfs"; ETC_DIR="$LINUX_HOME/etc"; RUN_DIR="$LINUX_HOME/run"
+        mkdir -p "$ETC_DIR" "$RUN_DIR" "$ROOTFS" 2>/dev/null
+        printf '{}\n' > "$ETC_DIR/config.json"
+        SUNSETLINUX_ROOTLESS="$2"; SUNSETLINUX_NATIVE_LIB_DIR="$1"
+        SUNSETLINUX_PROROOT_VERSION="1.2.8"; SUNSETLINUX_PROOT_BIN="$FAKE_PROOT"
+        PROOT_CMD=""; ROOTLESS_KIND=""; ROOTLESS_VERSION=""; ROOTLESS_REASON=""
+        log() { :; }; warn() { :; }; err() { :; }
+        fail_json() { printf 'FAIL:%s\n' "$2"; exit 9; }
+        find_sh() { printf '/bin/sh'; }
+        script_interp() { printf ''; }
+        # shellcheck disable=SC1090
+        . "$TMP/rootless.sh" || exit 8
+        resolve_rootless || exit 7
+        printf '%s|%s|%s\n' "$ROOTLESS_KIND" "${PROOT_CMD[0]:-}" "$ROOTLESS_REASON"
+    )
+}
+
+got="$(run_rootless "$NL_DIR" auto)"
+case "$got" in
+    "proroot|$NL_DIR/libproroot.so|"*) ok "auto：nativeLibraryDir 里 .so 齐全 → 选 proroot" ;;
+    *) bad "auto 没选 proroot：$got" ;;
+esac
+
+got="$(run_rootless "$NL_EMPTY" auto)"
+case "$got" in
+    proot\|*) case "$got" in *"proroot 不可用"*) ok "auto：缺 proroot → 降级 proot，且写明原因" ;; *) bad "降级了但没说原因：$got" ;; esac ;;
+    *) bad "auto 缺件时没降级到 proot：$got" ;;
+esac
+
+got="$(run_rootless "$NL_DIR" proot)"
+case "$got" in
+    proot\|*) ok "显式 proot：即使 proroot 齐全也不用它" ;;
+    *) bad "显式 proot 被 proroot 抢走了：$got" ;;
+esac
+
+got="$(run_rootless "$NL_EMPTY" proroot)"
+case "$got" in
+    FAIL:*proroot*) ok "显式 proroot 但缺件 → 明确失败（不静默降级）" ;;
+    *) bad "显式 proroot 缺件时没有失败：$got" ;;
+esac
+
+# 启动参数：proroot 与 proot 的 CLI 兼容（-r/-w/-b/-0/--link2symlink），前缀必须一致
+args_of() { # args_of <nativelib>
+    (
+        LINUX_HOME="$TMP/lh-rootless"; ROOTFS="$LINUX_HOME/rootfs"
+        ETC_DIR="$LINUX_HOME/etc"; RUN_DIR="$LINUX_HOME/run"
+        SDCARD_HOST=/sdcard; GUEST_RUNDIR=/run/sunsetlinux
+        mkdir -p "$ETC_DIR" "$RUN_DIR" 2>/dev/null
+        printf '{"link2symlink":true}\n' > "$ETC_DIR/config.json"
+        SUNSETLINUX_ROOTLESS=auto; SUNSETLINUX_NATIVE_LIB_DIR="$1"
+        SUNSETLINUX_PROROOT_VERSION="1.2.8"; SUNSETLINUX_PROOT_BIN="$FAKE_PROOT"
+        PROOT_CMD=""; ROOTLESS_KIND=""
+        log() { :; }; warn() { :; }; err() { :; }; fail_json() { exit 9; }
+        find_sh() { printf '/bin/sh'; }; script_interp() { printf ''; }
+        add_bind() { PROOT_ARGS+=("B:$1"); }
+        # shellcheck disable=SC1090
+        . "$TMP/rootless.sh" || exit 8
+        resolve_rootless || exit 7
+        FAKE_ROOT=1
+        build_proot_args || exit 6
+        printf '%s\n' "${PROOT_ARGS[*]}"
+    )
+}
+
+args="$(args_of "$NL_DIR")"
+case "$args" in
+    "$NL_DIR/libproroot.so -r $TMP/lh-rootless/rootfs -w /root"*)
+        case "$args" in
+            *--link2symlink*) case "$args" in
+                *" -0") ok "proroot 启动参数：-r/-w/-b/--link2symlink/-0 与 proot 同一套" ;;
+                *) bad "proroot 参数缺伪造 root（-0）：$args" ;;
+            esac ;;
+            *) bad "proroot 参数缺 --link2symlink（探测失败？）：$args" ;;
+        esac ;;
+    *) bad "proroot 启动参数前缀不对：$args" ;;
 esac
 
 # -----------------------------------------------------------------------------
