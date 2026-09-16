@@ -787,8 +787,24 @@ find_seed() { # find_seed [显式路径]；打印选中的 tarball 路径，找�
   return 0
 }
 
-zstd_bin() { # 找出可用的 zstd：显式指定 > 随包携带 > PATH
-  # Android 系统没有 zstd，而 root 版产出的种子/层常常是 .tar.zst，
+# find_base_layer —— 已就位的 base 层（erofs / tar 都认），没有则打印空。
+#
+# 为什么要它：非 root 模式的 rootfs 原先**只能**来自"用户自己准备一个 ubuntu-base tarball"
+# 这条手工路。而 App 的频道/离线包分发的是 base **erofs 层** —— 现在 extract_archive 能解
+# erofs 了，于是"已经装好的 base 层"可以直接当根文件系统用。provision 因此多一条零手工的来路：
+#   App 先把 base 层装到 $LINUX_HOME/layers/（频道或离线包），再 provision 就自动用它。
+find_base_layer() {
+  local f="" cands=""
+  cands=$(ls -1 "$LINUX_HOME"/layers/base-*.erofs "$LINUX_HOME"/layers/base.erofs \
+                "$LINUX_HOME"/layers/base-*.tar.gz "$LINUX_HOME"/layers/base.tar.gz \
+                "$LINUX_HOME"/layers/base-*.tgz "$LINUX_HOME"/layers/base-*.tar.zst 2>/dev/null || true)
+  for f in $cands; do
+    [[ -f "$f" ]] && { printf '%s' "$f"; return 0; }
+  done
+  return 0
+}
+
+zstd_bin() { # 找出可用的 zstd：显式指定 > 随包携带 > PATH  # Android 系统没有 zstd，而 root 版产出的种子/层常常是 .tar.zst，
   # 所以允许把静态 zstd 放进 $LINUX_HOME/bin/zstd 一起分发。
   local c=""
   for c in "${SUNSETLINUX_ZSTD:-}" "$BIN_DIR/zstd" "$LINUX_HOME/bin/zstd" "$LINUX_HOME/proot/bin/zstd"; do
@@ -803,9 +819,52 @@ zstd_hint() {
   printf '把静态 zstd 二进制放到 %s（或设 SUNSETLINUX_ZSTD=/path/to/zstd），或改用 .tar.gz 的种子/层包' "$BIN_DIR/zstd"
 }
 
-archive_test() { # 压缩包完整性校验
+# ---- erofs 层（本轮新增：非 root 模式必须能吃掉和 root 模式同一份层）--------
+#
+# 为什么必须支持：App 的「频道 / 离线包」分发的 base/runtime/dsh 都是 **erofs**
+# （Android 原生只读镜像格式，见 docs/architecture.md §4）。而 proot 这套脚本原先只认
+# tar —— 于是"从频道安装三层"在非 root 模式下**根本装不进去**（archive_test 判成损坏、
+# extract_archive 拿 tar 去解 erofs）。用户看到的是一串互相矛盾的现象：
+#   App 的更新页显示"已安装"，但 proot 的 rootfs 仍然是空的；
+#   首启引导第 2 步写着"去更新页装三层"，而那条路走不通（真机 2026-09-16 反馈）。
+# 现在用设备自带的 `fsck.erofs --extract=DIR`（erofs-utils ≥1.6，Android 内置）把层
+# 解成目录 —— 与 root 模式的 dir 模式同一个工具、同一个 `SUNSETLINUX_EROFS_EXTRACT` 覆盖点。
+erofs_extract_bin() { # 打印可用的 erofs 解包器；找不到返回 1
+  local c=""
+  if [[ -n "${SUNSETLINUX_EROFS_EXTRACT:-}" && -x "${SUNSETLINUX_EROFS_EXTRACT}" ]]; then
+    printf '%s' "$SUNSETLINUX_EROFS_EXTRACT"; return 0
+  fi
+  for c in /system/bin/fsck.erofs /system/bin/fsck.erofs.static /sbin/fsck.erofs /usr/sbin/fsck.erofs /usr/bin/fsck.erofs; do
+    [[ -x "$c" ]] && { printf '%s' "$c"; return 0; }
+  done
+  c=$(command -v fsck.erofs 2>/dev/null || true)
+  [[ -n "$c" && -x "$c" ]] && { printf '%s' "$c"; return 0; }
+  return 1
+}
+
+erofs_hint() {
+  printf '需要 fsck.erofs（Android 自带 /system/bin/fsck.erofs；erofs-utils ≥1.6 支持 --extract），可用 SUNSETLINUX_EROFS_EXTRACT=<路径> 指定；没有它就只能装 .tar.gz 形态的层/种子，而频道与离线包给的是 erofs。'
+}
+
+is_erofs() { # erofs 超级块 magic（0xE0F5E1E2）在**偏移 1024**，不是偏移 0
+  local f="${1-}" hex=""
+  [[ -f "$f" ]] || return 1
+  command -v od >/dev/null 2>&1 || return 1
+  hex=$(dd if="$f" bs=1 skip=1024 count=4 2>/dev/null | od -An -tx1 2>/dev/null | tr -d ' \n' || true)
+  [[ "$(printf '%s' "$hex" | tr 'A-F' 'a-f')" == "e2e1f5e0" ]]
+}
+
+archive_test() { # 压缩包 / 镜像完整性校验
   local f="${1-}" rc=0
   [[ -f "$f" ]] || { warn "快照/层文件不存在：$f"; return 1; }
+  # erofs 走 magic 校验：以前这种文件落到下面的 case 会**什么都不查就返回 0**，
+  # 于是"没下完的层"要到解包时才炸，错误信息还指向 tar。
+  case "$f" in
+    *.erofs)
+      is_erofs "$f" && return 0
+      err "erofs 层文件超级块不可读：$f（magic 0xE0F5E1E2 应在偏移 1024 —— 文件没下完或被截断？）"
+      return 1 ;;
+  esac
   case "$f" in
     *.zst)
       command -v "$(zstd_bin)" >/dev/null 2>&1 || { err "校验 $f 需要 zstd，但系统里没有。$(zstd_hint)"; return 1; }
@@ -821,8 +880,18 @@ archive_test() { # 压缩包完整性校验
 
 extract_archive() { # extract_archive <file> <destdir>
   local f=$1 dest=$2
-  command -v tar >/dev/null 2>&1 || fail 1 "缺少 tar，无法解包（proot 模式的快照/层操作需要 tar）"
   mkdir -p -- "$dest" || fail 1 "无法创建解包目录：$dest"
+  # erofs：fsck.erofs --extract（与 root 模式 dir 模式同一个工具）
+  if is_erofs "$f"; then
+    local ex=""
+    ex=$(erofs_extract_bin) || { err "无法解开 $f：缺少 erofs 解包器。$(erofs_hint)"; return 1; }
+    if "$ex" --extract="$dest" "$f" >/dev/null 2>&1; then
+      return 0
+    fi
+    err "解包 erofs 失败：$f → $dest（工具：$ex；磁盘空间够吗？）"
+    return 1
+  fi
+  command -v tar >/dev/null 2>&1 || fail 1 "缺少 tar，无法解包（proot 模式的快照/层操作需要 tar）"
   local rc=0
   case "$f" in
     *.zst)
@@ -1147,10 +1216,28 @@ cmd_provision() {
   seed=$(find_seed "$seed_arg")
   if (( ! rootfs_ready )); then
     if [[ -z "$seed" ]]; then
-      fail 1 "rootfs 还没有内容，且找不到出厂种子。
-  请准备一个 Ubuntu base tarball（ubuntu-base-*.tar.gz 或自己打的 rootfs.tar.gz），然后：
-    linuxctl provision --seed <包含该 tarball 的目录或文件>
-  也可以用 SUNSETLINUX_SEED_DIR=<目录> 指定搜索位置；默认还会找 \$LINUX_HOME/seeds 与 \$LINUX_HOME/cache。"
+      # ★ 第二条零手工来路：App 的频道 / 离线包把 **base 层**装进了 $LINUX_HOME/layers/。
+      #   root 模式一直把"层"当层用，而 proot 模式需要的是"一棵解开的 rootfs"——
+      #   两者其实是同一份内容（base 层就是完整 rootfs 的只读镜像）。
+      #   没有这一步，非 root 用户就必须自己去搞一个 ubuntu-base tarball，而 App 里的
+      #   "去更新页装三层"对 proot 是死路（用户 2026-09-16 卡在这里）。
+      local layer_seed=""
+      layer_seed=$(find_base_layer)
+      if [[ -n "$layer_seed" ]]; then
+        log "找不到 tar 种子，改用已就位的 base 层作为根文件系统：$layer_seed"
+        seed="$layer_seed"
+      fi
+    fi
+    if [[ -z "$seed" ]]; then
+      fail 1 "rootfs 还没有内容，也找不到可用的 base。
+  三条来路（任选其一）：
+    1) App：首启引导 → 第 2 步「铺 proot 运行时」+ 第 3 步「铺环境（内置离线包 / 频道层）」；
+       装好 base 层后回到这里重跑 provision 即可（会自动用它当 rootfs）。
+    2) 频道：在 App 的「更新」页安装 base 层（erofs），命令行的等价物是
+         linuxctl update base <base-*.erofs>   # 需要 fsck.erofs
+    3) 手工种子：准备一个 Ubuntu base tarball（ubuntu-base-*.tar.gz），然后
+         linuxctl provision --seed <包含该 tarball 的目录或文件>
+  另外可用 SUNSETLINUX_SEED_DIR=<目录> 指定种子搜索位置；默认还会找 \$LINUX_HOME/seeds 与 \$LINUX_HOME/cache。"
     fi
     extract_seed_into_rootfs "$seed"
   else
@@ -1712,6 +1799,36 @@ cmd_doctor() {
     add_check "context" false warn "当前 linuxctl 跑在 proot（ptrace）里：文件系统容量/占用不可信，已自动改用 etc/state.json 缓存值。推荐由 App 原生侧调用。"
   else
     add_check "context" true info "原生上下文（未被 ptrace 跟踪），容量测量可信。"
+  fi
+
+  # 1.2 部署就绪度：非 root 模式的三件必需件 —— 宿主脚本 / proot 运行时 / 一棵 rootfs。
+  #     为什么单独列出来：真机上"没有找到 linuxctl"这句话把用户直接带到死胡同
+  #     （App 的诊断页只能说"请先完成部署"，而当时的引导里**根本没有**能铺脚本的动作）。
+  #     这里把"缺哪一件、点哪里补"逐条写清楚。
+  if [[ -x "$BIN_DIR/linuxctl" ]]; then
+    add_check "bin_linuxctl" true info "宿主脚本已就位：$BIN_DIR/linuxctl"
+  else
+    add_check "bin_linuxctl" false error "缺少 $BIN_DIR/linuxctl。修：App →「首启引导 / 重新部署」→ 第 2 步「铺 proot 运行时」（内置 50 KB，一键，不需要 root）；命令行等价物：解包 dist/sunsetlinux-proot-runtime.tar.gz 到 $LINUX_HOME/bin/。"
+  fi
+  if seed_extract_ok; then
+    add_check "rootfs" true info "rootfs 已就位：$ROOTFS（能找到 /bin/sh）"
+  else
+    local _bl=""
+    _bl=$(find_base_layer)
+    if [[ -n "$_bl" ]]; then
+      add_check "rootfs" false warn "rootfs 还是空的，但已经有一份 base 层可用：$_bl。修：linuxctl provision（会自动拿它当根文件系统）。"
+    else
+      add_check "rootfs" false error "rootfs 还是空的，也没有 base 层/种子。修：App → 首启引导 → 第 3 步「铺环境」（内置离线包或频道 base 层），或 linuxctl provision --seed <目录>。"
+    fi
+  fi
+  if [[ -d "$LINUX_HOME/layers" ]] && ls -1 "$LINUX_HOME"/layers/*.erofs >/dev/null 2>&1; then
+    if [[ -n "$(erofs_extract_bin)" ]]; then
+      add_check "layers" true info "层目录里有 erofs 层，且 fsck.erofs 可用（proot 模式可以解包它们：$(erofs_extract_bin)）"
+    else
+      add_check "layers" false warn "层目录里有 erofs 层，但本机没有 fsck.erofs → proot 模式解不开它们（装不了频道/离线包给的层）。$(erofs_hint)"
+    fi
+  else
+    add_check "layers" true info "层目录里没有层（只走 tar 种子也可以）"
   fi
 
   # 1.5 非 root 运行时：**实际**用的是 proroot 还是降级的 proot（免 root 方案的核心信息）

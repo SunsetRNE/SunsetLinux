@@ -21,7 +21,50 @@
 | 0.2.8 | 10 | **免 root 模式换 proroot 首选 + proot 降级**：proroot（LD_PRELOAD，无 ptrace 开销）随 APK 的 jniLibs 打包，proot 仍随包内嵌；`SUNSETLINUX_ROOTLESS=auto|proroot|proot`（App 设置里可选），`status`/`doctor`/App 都如实报实际用了谁。proroot 是专有许可 —— 只随 APK 分发、不得再分发修改版，带许可原文 + 关于页 attribution，并有合规闸门 |
 | 0.2.9 | 11 | **终端接上原生 PTY**：`/dev/ptmx` + forkpty 路线（NDK 编译的小 `.so` 随 APK），Ctrl-C/Ctrl-D/Tab/方向键真的生效，`vim`/`htop` 这类全屏程序能跑，窗口大小按控件尺寸发 `TIOCSWINSZ`；输出用最小 VT 模拟器渲染（`\r` 覆盖、`ESC[K`、定位、SGR 剥离）；原生库不可用时**优雅降级**回行缓冲并明说 |
 | 0.2.10 | 12 | **加"无 loop 层模式"开关（dir）**：把三层解包成目录 + 目录 overlayfs，**完全不碰 loop / erofs / upper.img**；「设置 → 层模式」可切、也读 `SUNSETLINUX_LAYER_MODE` 与 `etc/config.json` 的 `layer_mode`（默认 loop 省磁盘）。模块 **1.0.15**：dir 模式实现 + doctor §1e 层模式检查 |
-| 0.2.11 | 13 | **首启引导第 2 步改成真正的刷模块引导（模块包内嵌）**：APK 里带 `assets/module/sunsetlinux-module.zip`（构建期从 `dist/` 取，连版本 + sha256 写进 `module.json`），卡片上「一键刷入内置模块」直接 `ksud module install`，「导出模块包到 Download」「打开 KernelSU / Magisk 管理器」作为手动路径；模块被设备侧确认已启用时勾选框自动打上。诊断页「✗ 自检未通过」不再打印第一个小节标题，改为 fail 计数 + 带 `[fail]` 的原文。模块 **1.0.17**：doctor 修 4 处误报 + 可写层 ext4 挂载自愈（见下） |
+| 0.2.12 | 14 | **免 root 模式的引导从"指路"改成"真的能铺"（两个模式的引导彻底分开）**：新增 `core/ProotSetup.kt`（就绪度 + 有序步骤 + 每步"点哪里"），首启引导按模式给**不同的步骤名与动作**（root：选模式/装模块/部署/完成；免 root：选模式/铺运行时/铺环境/完成），免 root 分支的「铺 proot 运行时（内置脚本）」「铺环境（离线包 + provision）」都是真按钮；诊断页缺 linuxctl 时按模式给**不同**的下一步；部署向导在 proot 模式下先自动铺脚本再往下走。模块 **1.0.18**：proot 的 `linuxctl` 学会吃 **erofs 层**（`fsck.erofs --extract`，以前只认 tar → 频道/离线包给的层在免 root 模式装不进去）、`provision` 在没种子时**自动用已就位的 base 层当 rootfs**、`doctor` 新增"部署就绪度"三件套检查 |
+
+## 0.2.12 —— 免 root 模式的引导：从"指路"到"真的能铺"
+
+**用户的原话**（贴的是 App 诊断页的输出）：
+
+```
+# linuxctl doctor  ·  模式 PROOT  ·  /data/user/0/…/files/sunsetlinux
+✗ 没有找到 linuxctl：…/files/sunsetlinux/bin/linuxctl
+  请先在侧边栏「重新部署 / 首启引导」里完成部署。
+```
+
+**两个根因**（都在"引导把用户指向了一条不存在或走不通的路"）：
+
+1. **`bin/linuxctl` 在界面上根本没有能铺它的动作。** 免 root 的宿主脚本（`linuxctl.sh` /
+   `start.sh` / `entry.sh`）是**随 APK 内置**的（`assets/proot-runtime/`，50 KB）——`ProotRuntime`
+   早就会铺，但引导分支只写"到「更新 → 本机包 → 离线安装」点一下"，而那个页面装的是层和运行时，
+   **不铺 `bin/`**。于是用户照做之后 doctor 依然报"没有找到 linuxctl"。
+2. **频道/离线包给的层在免 root 模式装不进去。** 那些层是 **erofs**，而 proot 的 `linuxctl`
+   只认 tar：`archive_test` 判成损坏、`extract_archive` 拿 tar 去解。也就是说引导里
+   "去更新页装三层"这句话在免 root 模式下**永远不可能成功**（模块 1.0.18 修好了这件事）。
+
+**这一版做了什么**：
+
+| 层 | 改动 |
+|---|---|
+| 引导 UI | 步骤名与动作**按模式分开**；免 root 分支给出三张卡片（宿主脚本 / proot 运行时 / rootfs），每张都有按钮与"缺什么"的说明 |
+| 就绪度 | `ProotSetup`（纯文件检查，不需要 root）一次查清三件东西 + 层/种子/内嵌包，`plan()` 给出有序步骤（**纯函数，有单测**） |
+| 一键动作 | 「铺 proot 运行时」= 内置资产落盘；「铺环境」= 内嵌离线包（若有）+ `linuxctl provision`，并把结果写成一句人话 |
+| 诊断页 | 缺 linuxctl 时按模式给不同的下一步（proot：去引导第 2 步铺脚本；root：去第 2 步刷模块） |
+| 部署向导 | proot 模式下**先自动铺脚本**再往下走；`NEED_CHANNEL` 的提示改成现在真的可执行的路径 |
+
+**模块 1.0.18（一起发的运行时修复）**：
+
+- `is_erofs` / `archive_test` / `extract_archive`：proot 模式**认得并解得开 erofs 层**
+  （`fsck.erofs --extract=<dir>`，可用 `SUNSETLINUX_EROFS_EXTRACT` 指定；与 root 模式 dir 模式同一工具）。
+  以前 erofs 文件会落到 `archive_test` 的默认分支 —— 什么都不查就放行，然后被 tar 解包炸掉。
+- `find_base_layer` + `provision` 回退：没有 tar 种子时，**已就位的 base 层直接当 rootfs 解出来**。
+  于是免 root 用户有了一条零手工的来路：频道/离线包装 base 层 → `linuxctl provision` → 启动。
+- `doctor` 新增 **部署就绪度**：`bin/linuxctl` / proot 运行时 / rootfs（+ 有层但没 `fsck.erofs` 的告警），
+  每条都写"点哪里补"。
+- 自测新增 10 条（erofs magic / 校验 / 解包 / 解包器失败要显式失败 / tar 回归 / find_base_layer 正反例），
+  bash+mksh 各 78 通过。
+
 
 ## 0.2.11 —— 让"装模块"这一步在 App 里真的能做（+ doctor 不再误报）
 

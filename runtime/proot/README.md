@@ -38,15 +38,19 @@ BIN=$SUNSETLINUX_APP_FILES/sunsetlinux/bin
 mkdir -p "$SUNSETLINUX_APP_FILES/sunsetlinux/proot"
 tar -xzf dist/proot-bundle-arm64.tar.gz -C "$SUNSETLINUX_APP_FILES/sunsetlinux/proot"
 
-# 1) 部署（需要一个 Ubuntu base tarball 作为出厂种子）
+# 1) 部署（rootfs 有两种来路，任选）
+#    ① 出厂种子 tarball：
 linuxctl provision --seed /sdcard/sunsetlinux-seed
+#    ② 已经装好的 base 层（频道 / App 内嵌离线包给的就是它）——**无参**即可，
+#       provision 会发现 $LINUX_HOME/layers/base-*.erofs 并直接解成 rootfs：
+linuxctl provision
 
 # 2) 启动 / 状态 / 日志
 linuxctl start
 linuxctl status
 linuxctl logs -n 200
 
-# 3) 自检（内核/文件/端口/密钥权限/DNS/proot 二进制）
+# 3) 自检（内核/文件/端口/密钥权限/DNS/proot 二进制 + **部署就绪度**）
 linuxctl doctor
 
 # 4) 进环境 / 执行命令
@@ -55,7 +59,18 @@ linuxctl exec -- id             # 非交互
 ```
 
 `provision` 的种子默认按 `--seed` → `$SUNSETLINUX_SEED_DIR` → `$LINUX_HOME/seeds` →
-`$LINUX_HOME/cache` 的顺序查找 `*ubuntu*.*` / `*base*.*` / 任意 `*.tar.{zst,gz,xz,bz2}`。
+`$LINUX_HOME/cache` 的顺序查找 `*ubuntu*.*` / `*base*.*` / 任意 `*.tar.{zst,gz,xz,bz2}`；
+**都找不到时**会退到 `$LINUX_HOME/layers/base-*.erofs`（用设备自带的 `fsck.erofs --extract` 解包）——
+这条是为了让 App 的「频道 / 离线包」在免 root 模式下也能用同一份层（见下）。
+
+### 1.0 层的格式：erofs 与 tar 都吃（免 root 与 root 用同一份层）
+
+- `erofs`：用 `/system/bin/fsck.erofs --extract=<dir>`（erofs-utils ≥1.6，Android 内置；
+  可用 `SUNSETLINUX_EROFS_EXTRACT=<路径>` 覆盖）。**App 的频道与内嵌离线包给的就是这种**。
+- `tar.gz` / `tar.zst` / `tar.xz` / `tar.bz2`：直接用 `tar` 解（老格式仍然支持）。
+- erofs 会按**超级块 magic**（`0xE0F5E1E2`，在**偏移 1024**，不是偏移 0）校验，损坏的镜像当场报错，
+  不会再像以前那样"落到默认分支、什么都不查就放行"。
+- 注意代价：解包 base 层（≈240 MB erofs → 约 1 GB 目录）是**分钟级 IO**，与 root 模式的 dir 层模式同一量级。
 
 ### 1.1 部署后校验（照这个清单确认，别只看 provision 的退出码）
 

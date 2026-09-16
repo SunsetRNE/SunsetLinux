@@ -408,5 +408,120 @@ case "$args" in
 esac
 
 # -----------------------------------------------------------------------------
+# 13) erofs 层：非 root 模式必须能吃掉与 root 模式**同一份** base/runtime/dsh 层
+#
+# 真机 2026-09-16：App 的「频道 / 离线包」分发的层全是 erofs，而 proot 这套脚本只认 tar
+# （archive_test 判 erofs 为"损坏"、extract_archive 拿 tar 去解）→ 免 root 模式下
+# "去更新页装三层"是死路，而用户看到的却是"已安装"。修法：
+#   · is_erofs：magic 在偏移 1024（不是 0）
+#   · archive_test：erofs 按 magic 校验（以前落到 case 默认分支 = 什么都不查就放行）
+#   · extract_archive：走 fsck.erofs --extract（可用 SUNSETLINUX_EROFS_EXTRACT 指定）
+#   · find_base_layer + provision 回退：已装好的 base 层直接当 rootfs 用
+# -----------------------------------------------------------------------------
+head_ "erofs 层支持（is_erofs / archive_test / extract_archive / find_base_layer）"
+EF="$TMP/erofs-funcs.sh"
+extract "$EF" "$LINUXCTL" is_erofs erofs_extract_bin erofs_hint archive_test extract_archive find_base_layer zstd_bin zstd_hint
+cat >> "$EF" <<'EOS'
+err()  { printf 'ERR: %s\n' "$*" >&2; }
+warn() { printf 'WARN: %s\n' "$*" >&2; }
+log()  { :; }
+fail() { printf 'FAIL(%s): %s\n' "$1" "$2" >&2; exit "${1:-1}"; }
+EOS
+
+IMG_OK="$TMP/base-24.04.3-l1.erofs"
+IMG_BAD="$TMP/base-broken.erofs"
+dd if=/dev/zero of="$IMG_OK" bs=512 count=4 2>/dev/null
+awk 'BEGIN{printf "%c%c%c%c", 226, 225, 245, 224}' | dd of="$IMG_OK" bs=1 seek=1024 conv=notrunc 2>/dev/null
+dd if=/dev/zero of="$IMG_BAD" bs=512 count=4 2>/dev/null
+
+CALLS="$TMP/erofs-calls"; : > "$CALLS"
+FX="$TMP/fake-erofs-extract"
+cat > "$FX" <<'EOS'
+#!/bin/sh
+printf '%s\n' "$*" >> "$SUNSETLINUX_TEST_CALLS"
+dest=""
+for a in "$@"; do case "$a" in --extract=*) dest="${a#--extract=}" ;; esac; done
+[ -n "$dest" ] || exit 1
+mkdir -p "$dest/bin" || exit 1
+: > "$dest/bin/sh"
+exit 0
+EOS
+chmod +x "$FX"
+
+# 跑被测函数的子壳（函数从真实脚本抽取，环境变量显式给全）
+ef_run() { # ef_run <函数> [参数...]
+    local fn="$1"; shift
+    (
+        LINUX_HOME="$TMP/lh-erofs"; LH="$LINUX_HOME"
+        BIN_DIR="$LINUX_HOME/bin"; ROOTFS="$LINUX_HOME/rootfs"
+        SUNSETLINUX_TEST_CALLS="$CALLS"
+        export SUNSETLINUX_TEST_CALLS
+        # shellcheck disable=SC1090
+        . "$EF" || exit 8
+        "$fn" "$@"
+    )
+}
+
+ef_run is_erofs "$IMG_OK" && ok "is_erofs：合法 erofs（magic 在偏移 1024）认得出来" \
+                          || bad "is_erofs 没认出合法 erofs"
+ef_run is_erofs "$IMG_BAD" && bad "is_erofs 把零字节文件当成 erofs 了" \
+                           || ok "is_erofs：magic 不对就拒绝"
+
+ef_run archive_test "$IMG_OK" && ok "archive_test：erofs 通过 magic 校验" \
+                              || bad "archive_test 拒绝了合法 erofs"
+if out=$(ef_run archive_test "$IMG_BAD" 2>&1); then
+    bad "archive_test 放过了损坏的 erofs（以前就是这样：默认分支什么都不查）"
+else
+    case "$out" in
+        *"超级块不可读"*) ok "archive_test：损坏的 erofs 明确报错（不再静默放行）" ;;
+        *) bad "archive_test 的 erofs 报错信息不可读：$out" ;;
+    esac
+fi
+
+OUT="$TMP/erofs-out"; rm -rf "$OUT"
+if SUNSETLINUX_EROFS_EXTRACT="$FX" ef_run extract_archive "$IMG_OK" "$OUT" && [ -f "$OUT/bin/sh" ]; then
+    ok "extract_archive：走 fsck.erofs --extract 把层解成目录"
+else
+    bad "extract_archive 没能解开 erofs（假解包器：$FX）"
+fi
+case "$(cat "$CALLS" 2>/dev/null || true)" in
+    *"--extract=$OUT"*) ok "解包器收到 --extract=<目标目录>（契约与 root 模式 dir 模式一致）" ;;
+    *) bad "解包器没有收到 --extract=<目录>：$(head -2 "$CALLS" 2>/dev/null)" ;;
+esac
+
+# 解包器失败必须**显式失败**，绝不能悄悄"成功"
+FX_FAIL="$TMP/fake-erofs-fail"; printf '#!/bin/sh\nexit 1\n' > "$FX_FAIL"; chmod +x "$FX_FAIL"
+if out=$(SUNSETLINUX_EROFS_EXTRACT="$FX_FAIL" ef_run extract_archive "$IMG_OK" "$TMP/erofs-fail-out" 2>&1); then
+    bad "解包器返回 1 时 extract_archive 仍报成功"
+else
+    case "$out" in
+        *"解包 erofs 失败"*) ok "解包器失败 → extract_archive 明确失败（带上工具与路径）" ;;
+        *) bad "解包失败的信息不对：$out" ;;
+    esac
+fi
+
+# tar 路径不能被 erofs 分支带坏（回归）
+TG="$TMP/seed.tar.gz"
+printf 'seed\n' > "$TMP/seed.txt"
+( cd "$TMP" && tar -czf "$TG" seed.txt ) 2>/dev/null
+TOUT="$TMP/tar-out"; rm -rf "$TOUT"
+if ef_run extract_archive "$TG" "$TOUT" && [ -f "$TOUT/seed.txt" ]; then
+    ok "extract_archive：tar.gz 路径没被 erofs 分支带坏"
+else
+    bad "extract_archive 解不开 tar.gz 了（回归）"
+fi
+
+# find_base_layer：有层就给出路径，没有就返回空
+mkdir -p "$TMP/lh-erofs/layers"
+cp "$IMG_OK" "$TMP/lh-erofs/layers/base-24.04.3-l1.erofs"
+got=$(ef_run find_base_layer)
+[ "$got" = "$TMP/lh-erofs/layers/base-24.04.3-l1.erofs" ] \
+    && ok "find_base_layer：找到已就位的 base 层（provision 因此能零手工拿它当 rootfs）" \
+    || bad "find_base_layer 没找到 base 层：$got"
+rm -f "$TMP/lh-erofs/layers/base-24.04.3-l1.erofs"
+got=$(ef_run find_base_layer)
+[ -z "$got" ] && ok "find_base_layer：没有层时返回空（不编造路径）" || bad "没层时返回了东西：$got"
+
+# -----------------------------------------------------------------------------
 printf '\n== 结果：%d 通过 / %d 失败 ==\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

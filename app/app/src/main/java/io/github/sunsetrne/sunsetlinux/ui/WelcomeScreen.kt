@@ -84,11 +84,19 @@ fun WelcomeScreen(
                 color = TextMuted,
             )
             Spacer(Modifier.height(12.dp))
+            // ★ 步骤名**按模式分开**：两条路要准备的东西完全不同
+            //   （root：装 KernelSU 模块 → 建层；免 root：铺内置脚本 → 铺 rootfs + 层）。
+            //   以前四个 chip 对两种模式用同一套词（"准备"），用户根本不知道免 root 该准备什么。
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                StepChip(1, "选模式", state.step.ordinal >= WelcomeStep.MODE.ordinal)
-                StepChip(2, "准备", state.step.ordinal >= WelcomeStep.BRANCH.ordinal)
-                StepChip(3, "部署", state.step.ordinal >= WelcomeStep.DEPLOY.ordinal)
-                StepChip(4, "完成", state.step.ordinal >= WelcomeStep.DONE.ordinal)
+                val labels = if (state.mode == EnvMode.PROOT) {
+                    listOf("选模式", "铺运行时", "铺环境", "完成")
+                } else {
+                    listOf("选模式", "装模块", "部署", "完成")
+                }
+                StepChip(1, labels[0], state.step.ordinal >= WelcomeStep.MODE.ordinal)
+                StepChip(2, labels[1], state.step.ordinal >= WelcomeStep.BRANCH.ordinal)
+                StepChip(3, labels[2], state.step.ordinal >= WelcomeStep.DEPLOY.ordinal)
+                StepChip(4, labels[3], state.step.ordinal >= WelcomeStep.DONE.ordinal)
             }
         }
 
@@ -136,18 +144,50 @@ fun WelcomeScreen(
                             },
                             filled = true,
                         )
-                        Pill(
-                            text = state.module?.label ?: "模块检测中…",
-                            color = when {
-                                state.module == null -> TextMuted
-                                // 读不到（su 没拿到）用中性色：把"不知道"画成"危险"会误导用户
-                                !state.module!!.readable -> TextMuted
-                                !state.module!!.installed -> Danger
-                                state.module!!.disabled || state.module!!.pendingReboot -> WarnTone
-                                else -> StateRunning
-                            },
-                            filled = true,
-                        )
+                        if (state.mode == EnvMode.PROOT) {
+                            // 免 root 模式：模块与它无关（装不装都一样），要看的就三件东西
+                            Pill(
+                                text = when {
+                                    state.proot == null -> "脚本检测中…"
+                                    state.proot!!.scriptsReady -> "bin/linuxctl 已就位"
+                                    else -> "缺宿主脚本"
+                                },
+                                color = when {
+                                    state.proot == null -> TextMuted
+                                    state.proot!!.scriptsReady -> StateRunning
+                                    else -> Danger
+                                },
+                                filled = true,
+                            )
+                            Pill(
+                                text = when {
+                                    state.proot == null -> "rootfs 检测中…"
+                                    state.proot!!.rootfsReady -> "rootfs 已就位"
+                                    state.proot!!.hasRootSource -> "可解包出 rootfs"
+                                    else -> "缺 rootfs"
+                                },
+                                color = when {
+                                    state.proot == null -> TextMuted
+                                    state.proot!!.rootfsReady -> StateRunning
+                                    state.proot!!.hasRootSource -> WarnTone
+                                    else -> Danger
+                                },
+                                filled = true,
+                            )
+                        } else {
+                            Pill(
+                                text = state.module?.label ?: "模块检测中…",
+                                color = when {
+                                    state.module == null -> TextMuted
+                                    // 读不到（su 没拿到）用中性色：把"不知道"画成"危险"会误导用户
+                                    !state.module!!.readable -> TextMuted
+                                    !state.module!!.installed -> Danger
+                                    state.module!!.disabled || state.module!!.pendingReboot -> WarnTone
+                                    else -> StateRunning
+                                },
+                                filled = true,
+                            )
+                        }
                         Pill(
                             text = when (provisioned) {
                                 true -> "linuxctl 已就位"
@@ -162,8 +202,15 @@ fun WelcomeScreen(
                             filled = true,
                         )
                     }
-                    // ★ 状态后面跟"下一步做什么"：root 与模块各自的建议
-                    listOfNotNull(state.rootProbe?.hint, state.module?.hint).forEach { hint ->
+                    // ★ 状态后面跟"下一步做什么"：两种模式各自的建议
+                    listOfNotNull(
+                        state.rootProbe?.hint,
+                        if (state.mode == EnvMode.PROOT) {
+                            state.prootSteps.firstOrNull { !it.done }?.let { "下一步：${it.title}" }
+                        } else {
+                            state.module?.hint
+                        },
+                    ).forEach { hint ->
                         Spacer(Modifier.height(8.dp))
                         Text(
                             text = "→ $hint",
@@ -200,22 +247,21 @@ fun WelcomeScreen(
                     WelcomeStep.MODE -> Button(onClick = { state.next() }) { Text("下一步") }
 
                     WelcomeStep.BRANCH -> {
-                        val ready = state.moduleReady
-                        Button(
-                            onClick = { state.next() },
-                            enabled = if (state.mode == EnvMode.ROOT) {
-                                state.moduleAcknowledged || ready
-                            } else {
-                                true
-                            },
-                        ) {
-                            Text(
-                                when {
-                                    state.mode != EnvMode.ROOT -> "继续"
-                                    ready -> "模块已就绪，继续"
-                                    else -> "已装好模块，继续"
-                                },
-                            )
+                        if (state.mode == EnvMode.PROOT) {
+                            // 免 root 的下一步页**同样**有铺环境按钮，所以这里不设硬门槛：
+                            // 铺好了随时能继续，没铺好也不会走进死胡同（这正是上一版的问题）。
+                            val scripts = state.proot?.scriptsReady == true
+                            Button(onClick = { state.next() }) {
+                                Text(if (scripts) "运行时已就绪，继续" else "继续（下一步也能铺）")
+                            }
+                        } else {
+                            val ready = state.moduleReady
+                            Button(
+                                onClick = { state.next() },
+                                enabled = state.moduleAcknowledged || ready,
+                            ) {
+                                Text(if (ready) "模块已就绪，继续" else "已装好模块，继续")
+                            }
                         }
                     }
 
@@ -544,47 +590,82 @@ private fun StepBranch(state: WelcomeState, onOpenProvision: () -> Unit) {
             }
         }
     } else {
-        Text("非 root 模式：准备虚拟环境", style = MaterialTheme.typography.titleMedium)
+        // ── 免 root（proot）分支：**每一步都有按钮**，不再是"去别的页面点一下" ──
+        Text("免 root 模式：铺好运行时与 rootfs", style = MaterialTheme.typography.titleMedium)
         Spacer(Modifier.height(6.dp))
         Text(
-            text = "免 root 的 PRoot 环境不需要刷模块，但**能力受限**（无真 capabilities、绕不开 FUSE、" +
-                "环境随 App 进程）。下面两步铺好运行时即可。",
+            text = "免 root 环境不需要刷机、不需要 su，但要把三件东西铺到 App 私有目录：**宿主脚本**" +
+                "（bin/linuxctl，APK 内置）、**proot 可执行体**、**一棵 rootfs**（从 base 层解开）。" +
+                "下面按顺序点按钮即可；每步做完状态会自动刷新。",
             style = MaterialTheme.typography.bodySmall,
             color = TextSecondary,
         )
         Spacer(Modifier.height(14.dp))
 
-        DshCard(Modifier.fillMaxWidth()) {
-            Column(Modifier.fillMaxWidth()) {
-                SectionLabel("第 1 步：铺 proot 运行时")
-                Spacer(Modifier.height(8.dp))
-                NumberedLine(1, "**这个 APK 自带**宿主脚本与 proot 二进制（assets/proot-runtime + 内嵌包）")
-                NumberedLine(2, "到「更新 → 本机包 → 离线安装」点一下，它会铺到 files/sunsetlinux/（即 \$APP_FILES/sunsetlinux）")
-                NumberedLine(3, "铺完 files/sunsetlinux/bin/linuxctl 必须存在且可执行（页面上会写『契约路径已就位』）")
+        val steps = state.prootSteps
+        if (steps.isEmpty()) {
+            DshCard(Modifier.fillMaxWidth()) {
+                Column(Modifier.fillMaxWidth()) {
+                    SectionLabel("免 root 就绪度")
+                    Spacer(Modifier.height(6.dp))
+                    Text("正在检测…", style = MaterialTheme.typography.bodySmall, color = TextMuted)
+                }
+            }
+        } else {
+            steps.forEachIndexed { index, s ->
+                DshCard(Modifier.fillMaxWidth()) {
+                    Column(Modifier.fillMaxWidth()) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                imageVector = if (s.done) Icons.Filled.CheckCircle else Icons.Filled.Warning,
+                                contentDescription = null,
+                                tint = if (s.done) StateRunning else WarnTone,
+                                modifier = Modifier.size(15.dp),
+                            )
+                            Spacer(Modifier.width(6.dp))
+                            SectionLabel("第 ${index + 1} 步：${s.title}")
+                        }
+                        Spacer(Modifier.height(6.dp))
+                        Text(s.detail, style = MaterialTheme.typography.bodySmall, color = TextSecondary)
+                        if (!s.done && s.actionLabel != null) {
+                            Spacer(Modifier.height(10.dp))
+                            Button(
+                                onClick = {
+                                    when (s.step) {
+                                        io.github.sunsetrne.sunsetlinux.core.ProotSetup.Step.SCRIPTS ->
+                                            state.layProotScripts()
+                                        else -> state.provisionProot()
+                                    }
+                                },
+                                enabled = !state.prootBusy,
+                                modifier = Modifier.fillMaxWidth(),
+                            ) {
+                                Text(if (state.prootBusy) "正在执行…" else s.actionLabel)
+                            }
+                        }
+                    }
+                }
                 Spacer(Modifier.height(10.dp))
-                Text(
-                    text = "proot 模式的 linuxctl 是**宿主侧脚本**：它自己会判断是否被 ptrace 包裹，" +
-                        "被包裹（即在 proot 内）会直接拒绝运行 —— 所以必须由 App 从外面调用。",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = TextMuted,
-                )
             }
         }
 
-        Spacer(Modifier.height(12.dp))
-
         DshCard(Modifier.fillMaxWidth()) {
             Column(Modifier.fillMaxWidth()) {
-                SectionLabel("第 2 步：铺 rootfs 与层")
-                Spacer(Modifier.height(8.dp))
+                SectionLabel("免 root 的能力边界（如实说明）")
+                Spacer(Modifier.height(6.dp))
+                NumberedLine(1, "没有真 capabilities：`id` 显示 0 是 proot 伪造的，环境内不能 mount")
+                NumberedLine(2, "sdcard 走 FUSE，性能与兼容性都受限")
+                NumberedLine(3, "**环境随 App 进程存活**：App 被杀/被冻结，环境就停")
+                Spacer(Modifier.height(10.dp))
                 Text(
-                    text = "进入下一步的「部署向导」：可以用频道下载层，也可以用离线种子（--seed）在设备侧完成。",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = TextSecondary,
+                    text = "如果设备能 root，Root 模式的体验要好得多（真 chroot、开机自启、与 App 解耦）。" +
+                        "随时可以回上一步改选。",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = TextMuted,
                 )
                 Spacer(Modifier.height(10.dp))
                 OutlinedButton(onClick = onOpenProvision, modifier = Modifier.fillMaxWidth()) {
-                    Text("直接打开部署向导")
+                    Text("打开部署向导（频道 / 本机种子）")
                 }
             }
         }
@@ -595,6 +676,51 @@ private fun StepBranch(state: WelcomeState, onOpenProvision: () -> Unit) {
 
 @Composable
 private fun StepDeploy(state: WelcomeState, provisioned: Boolean?, onOpenProvision: () -> Unit) {
+    if (state.mode == EnvMode.PROOT) {
+        // 免 root 的"部署"= 把 rootfs 与层铺好（与上一步同一套动作，这里再给一次入口）
+        Text("铺环境（免 root）", style = MaterialTheme.typography.titleMedium)
+        Spacer(Modifier.height(6.dp))
+        Text(
+            text = "免 root 环境铺在 App 私有目录里，卸载 App 会一起丢掉。下面这一步会装内嵌离线包" +
+                "（若有）并执行 `linuxctl provision` 把 base 层/种子解成 rootfs。",
+            style = MaterialTheme.typography.bodySmall,
+            color = TextSecondary,
+        )
+        Spacer(Modifier.height(14.dp))
+
+        val r = state.proot
+        DshCard(Modifier.fillMaxWidth()) {
+            Column(Modifier.fillMaxWidth()) {
+                SectionLabel("当前状态")
+                Spacer(Modifier.height(8.dp))
+                when {
+                    r == null -> Text("检测中…", style = MaterialTheme.typography.bodySmall, color = TextMuted)
+                    r.complete -> OkLine("三件都齐了（宿主脚本 / proot 运行时 / rootfs），可以启动。")
+                    else -> WarnBox(
+                        "还缺：${r.missingLabel.ifEmpty { "（请重新检测）" }}。" +
+                            if (!r.hasRootSource) {
+                                " 而且没有可用的 rootfs 来源 —— 先去「更新」页从频道安装 base 层（erofs），" +
+                                    "或用本机种子 tar（部署向导里可指定目录）。"
+                            } else {
+                                " 点下面的按钮即可继续铺。"
+                            },
+                    )
+                }
+                Spacer(Modifier.height(12.dp))
+                Button(
+                    onClick = { state.provisionProot() },
+                    enabled = !state.prootBusy,
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text(if (state.prootBusy) "正在铺…" else "铺环境（离线包 + provision）") }
+                Spacer(Modifier.height(6.dp))
+                OutlinedButton(onClick = onOpenProvision, modifier = Modifier.fillMaxWidth()) {
+                    Text("打开部署向导（指定种子目录 / 看完整日志）")
+                }
+            }
+        }
+        return
+    }
+
     Text("部署环境", style = MaterialTheme.typography.titleMedium)
     Spacer(Modifier.height(6.dp))
     Text(

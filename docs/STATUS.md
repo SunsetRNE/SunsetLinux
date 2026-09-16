@@ -498,6 +498,47 @@ su -c '/data/sunsetlinux/bin/linuxctl doctor'
 | 已装状态读不到时 | —— | **不给刷入按钮**，先让用户修 root 授权（与"读不到 ≠ 没装"一致） |
 | 重启 | —— | 只报告"重启后生效"（KernelSU 落 `modules_update/`），**App 不替用户重启**，脚本里有单测断言不许出现 `reboot` |
 
+### 3.10.22 免 root 引导从「指路」到「真的能铺」+ proot 支持 erofs 层（App 0.2.12 / 模块 1.0.18）
+
+用户贴的 App 诊断页输出（模式 **PROOT**）：`✗ 没有找到 linuxctl：…/files/sunsetlinux/bin/linuxctl /
+请先在侧边栏「重新部署 / 首启引导」里完成部署。` 用户的判断是对的："部署引导不完整，
+Root 和非 Root 流程需要不一致，进一步从 UI 上切割区分开来"。
+
+**两条根因**（都属于"引导把用户指向一条不存在或走不通的路"）：
+
+| # | 引导里写的 | 真相 |
+|---|---|---|
+| 1 | "到「更新 → 本机包 → 离线安装」点一下" | 免 root 的宿主脚本（`linuxctl.sh`/`start.sh`/`entry.sh`）是 **APK 内置资产**（`assets/proot-runtime/`，50 KB），`ProotRuntime` 会铺，但**界面上没有这个动作**；离线安装页装的是层与 proot 二进制，不铺 `bin/` |
+| 2 | "从频道安装三层，再回来启动" | 频道/离线包给的是 **erofs** 层，而 proot 的 `linuxctl` 只认 tar（`archive_test` 判损坏、`extract_archive` 用 tar 解）→ 免 root 模式下**不可能成功** |
+
+**App 0.2.12**：
+
+- 新增 `core/ProotSetup.kt`：`inspect()`（纯文件检查，不需要 root）查"宿主脚本 / proot 运行时 /
+  rootfs / 层 / 种子 / 内嵌包"，`plan()` 给出有序步骤与每步的动作文案（**纯函数 + 5 条单测**）；
+- 首启引导**按模式给不同的步骤名与动作**：root `选模式/装模块/部署/完成`，
+  免 root `选模式/铺运行时/铺环境/完成`；
+- 免 root 分支三张卡片三个真按钮：「铺 proot 运行时（内置脚本）」= `ProotRuntime.ensure`；
+  「铺环境」= 内嵌离线包（若有）+ `linuxctl provision`；「打开部署向导」兜底；
+- 「环境检测」在免 root 下显示 **脚本 / rootfs** 两枚 Pill（模块那枚与该模式无关）；
+- 诊断页缺 linuxctl 时按模式给不同的下一步；部署向导在 proot 下**先自动铺脚本**再往下走，
+  `NEED_CHANNEL` 的提示改成现在真的可执行的路径。
+
+**模块 1.0.18（运行时）**：
+
+- `is_erofs`（magic 0xE0F5E1E2 在**偏移 1024**）、`archive_test` 按 magic 校验 erofs
+  （以前落到默认分支 = 什么都不查就放行）、`extract_archive` 走 `fsck.erofs --extract=<dir>`
+  （与 root 模式 dir 模式同一工具，`SUNSETLINUX_EROFS_EXTRACT` 可覆盖）→ **proot 与 root 用同一份层**；
+- `find_base_layer` + `provision` 回退：没有 tar 种子时，**已就位的 base 层直接当 rootfs 解出来**
+  → 免 root 用户有了零手工来路（频道/离线包装 base 层 → `provision` → 启动）；
+- `doctor` 新增**部署就绪度**：`bin/linuxctl` / proot 运行时 / rootfs（+ 有层但无 `fsck.erofs` 的告警），
+  每条都写"点哪里补"。
+
+**证据**：`runtime/proot/selftest-funcs.sh` 新增 10 条（erofs magic 正反例 / `archive_test` 不再放行损坏镜像 /
+解包器收到 `--extract=<dir>` / 解包器失败必须显式失败 / tar 路径回归 / `find_base_layer` 正反例），
+bash+mksh **78 通过**（各有 3 条**既有**失败：本容器 `/proc/net/tcp` 受限导致 `port_open_local` 那组跑不过，
+已在 HEAD 上复现同样 3 条）；App 单测 **139/0**（含新增 `ProotSetupTest` 5 条）；
+真实 `fsck.erofs --extract=/tmp/out dsh-rc2.erofs` 在容器里跑通（211 MB 层约 73 秒，符合"解包是分钟级 IO"的预期）。
+
 ### 3.10.21 引导第 2 步的模块包内嵌 + doctor 三处假警报 + upper 读写挂载自愈（App 0.2.11 / 模块 1.0.17）
 
 用户给了首启引导第 2 步的截图（"在勾选的地方做 Root 模块刷写引导，内置模块包"）与整段真机

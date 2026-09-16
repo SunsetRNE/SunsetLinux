@@ -102,7 +102,20 @@ class DiagnosticsActivity : ComponentActivity() {
             choice.note?.let { emit("# 注意：$it") }
             if (!ctl.exists()) {
                 emit("✗ 没有找到 linuxctl：${ctl.ctlPath}")
-                emit("  请先在侧边栏「重新部署 / 首启引导」里完成部署。")
+                // ★ 两种模式缺的是**不同的东西**，以前都只说"请先完成部署"——
+                //   proot 模式下 `bin/linuxctl` 是 App 自带资产，引导页里现在有按钮能铺；
+                //   用户照旧提示去找"部署"只会原地打转（真机反馈）。
+                when (choice.mode) {
+                    io.github.sunsetrne.sunsetlinux.core.EnvMode.PROOT -> {
+                        emit("  免 root 模式的 bin/ 脚本是 App 内置资产（约 50 KB）：")
+                        emit("  去「重新部署 / 首启引导」→ 第 2 步「铺 proot 运行时」点一下即可（不需要 root）。")
+                        emit("  或者用「部署向导」——它会先自动铺脚本再往下走。")
+                    }
+                    io.github.sunsetrne.sunsetlinux.core.EnvMode.ROOT -> {
+                        emit("  root 模式的 linuxctl 由 KernelSU 模块铺到 /data/sunsetlinux/bin/：")
+                        emit("  先在「首启引导」第 2 步一键刷入内置模块（或手动装模块 zip）并重启。")
+                    }
+                }
                 withMain { running.value = false }
                 return@launch
             }

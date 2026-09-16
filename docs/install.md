@@ -45,11 +45,16 @@ adb install -r dist/sunsetlinux-launcher-debug.apk
 
 | 选择 | 后续流程 | 能力 |
 |---|---|---|
-| **Root 模式**（推荐） | 检测 `su` → 引导**安装 KernelSU 模块** → 重启 → 回到 App 部署层 → 启动 | 真 root + 真 chroot + overlay 分层。**真 capabilities、能挂载、环境不被 App 杀死** |
-| **非 root 模式** | 解压/下载 proot 虚拟环境 → 启动 | 免 root，但**无真 capabilities、绕不开 FUSE、环境随 App 进程** |
+| **Root 模式**（推荐） | 检测 `su` → 引导**安装 KernelSU 模块**（App 0.2.11 起一键刷内置包）→ 重启 → 回到 App 部署层 → 启动 | 真 root + 真 chroot + overlay 分层。**真 capabilities、能挂载、环境不被 App 杀死** |
+| **非 root 模式** | **铺宿主脚本**（APK 内置，一键）→ **铺 rootfs**（内嵌离线包 / 频道 base 层 / 本机种子，一键）→ 启动 | 免 root，但**无真 capabilities、绕不开 FUSE、环境随 App 进程** |
 
 > 引导页会**诚实写出两者的差距**——这两个模式**不等价**，别被"表面上都能跑起来"迷惑。
 > 两条路径最终都收敛到同一套 `linuxctl`，之后 App 的行为完全一致（模式只体现在 `status.mode`）。
+>
+> **两个模式的向导步骤是分开的**（App 0.2.12 起步骤名都不同：`选模式/装模块/部署/完成` vs
+> `选模式/铺运行时/铺环境/完成`）：非 root 要先铺 `bin/` 宿主脚本（App 内置资产，50 KB，不需要
+> root/联网）与一棵 rootfs，root 模式则是先装模块。真机上"免 root 走到 doctor 只会说
+> 没有找到 linuxctl"就是因为之前这一步在界面上没有对应动作。
 
 ---
 

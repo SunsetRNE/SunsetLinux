@@ -11,6 +11,12 @@ import io.github.sunsetrne.sunsetlinux.core.DshRuntime
 import io.github.sunsetrne.sunsetlinux.core.DshStatus
 import io.github.sunsetrne.sunsetlinux.core.ModuleInstaller
 import io.github.sunsetrne.sunsetlinux.core.ModuleStatus
+import io.github.sunsetrne.sunsetlinux.BuildConfig
+import io.github.sunsetrne.sunsetlinux.core.DshPaths
+import io.github.sunsetrne.sunsetlinux.core.OfflineApplier
+import io.github.sunsetrne.sunsetlinux.core.OfflineBundle
+import io.github.sunsetrne.sunsetlinux.core.ProotRuntime
+import io.github.sunsetrne.sunsetlinux.core.ProotSetup
 import io.github.sunsetrne.sunsetlinux.core.RootProbe
 import io.github.sunsetrne.sunsetlinux.core.EnvMode
 import io.github.sunsetrne.sunsetlinux.core.LinuxCtl
@@ -87,6 +93,18 @@ class WelcomeState internal constructor(
     /** 「一键刷入内置模块」是否在跑。 */
     var flashing by mutableStateOf(false)
         private set
+
+    /** 免 root 模式的就绪度（宿主脚本 / proot 运行时 / rootfs）。 */
+    var proot by mutableStateOf<ProotSetup.Readiness?>(null)
+        private set
+
+    /** 免 root 分支里"铺环境"这类长任务是否在跑。 */
+    var prootBusy by mutableStateOf(false)
+        private set
+
+    /** 免 root 引导步骤（有序 + 每步"点哪里"）。 */
+    val prootSteps: List<ProotSetup.StepState>
+        get() = proot?.let { ProotSetup.plan(it) }.orEmpty()
 
     /**
      * 模块**真的可用**了（已装 + 已启用 + 已重启生效）。
@@ -205,6 +223,116 @@ class WelcomeState internal constructor(
         }
     }
 
+    // ───────────────────────────────── 非 root（proot）分支：真的能一键铺好 ─────
+
+    /**
+     * 铺免 root 的**宿主脚本**（`bin/linuxctl` 等，来自 APK 内置资产）。
+     *
+     * 这一步以前在界面上**根本不存在** —— 引导只写"到「更新 → 本机包 → 离线安装」点一下"，
+     * 而那个页面要装的是层/运行时，不铺 `bin/`。用户照做之后 doctor 依然报
+     * 「没有找到 linuxctl」，于是以为"部署坏了"。
+     */
+    fun layProotScripts() {
+        if (prootBusy) return
+        prootBusy = true
+        scope.launch {
+            append("$ 铺 proot 宿主脚本（内置 assets，约 50 KB）")
+            val r = withContext(Dispatchers.IO) {
+                runCatching { ProotRuntime.ensure(context, DshPaths.prootLinuxHome(context)) }
+                    .getOrElse { ProotRuntime.Result(false, emptyList(), it.message ?: "未知错误", false) }
+            }
+            append(if (r.ok) "✓ 写入 ${r.written.size} 个文件" else "✗ ${r.error ?: "写入失败"}")
+            append("  契约路径 bin/linuxctl：${if (r.contractReady) "已就位" else "未就位"}")
+            r.error?.let { append("  注意：$it") }
+            proot = withContext(Dispatchers.IO) { ProotSetup.inspect(context) }
+            prootBusy = false
+            if (r.contractReady) {
+                append("下一步：${proot?.let { ProotSetup.plan(it) }?.firstOrNull { !it.done }?.actionLabel ?: "启动环境"}")
+            } else {
+                message = "脚本没铺成功：${r.error ?: "未知原因"}。这个 APK 可能没内嵌 proot 脚本文档（干净检出/CI 未附产物）。"
+            }
+        }
+    }
+
+    /**
+     * 免 root 的「铺环境」：先装内嵌离线包（若有 proot/base 部件），再跑 `linuxctl provision`。
+     *
+     * 为什么两件事绑在一起：proot 模式的 rootfs 需要**解包**出来（`provision`），
+     * 而"料"要么来自内嵌离线包，要么来自已经装好的 base 层（频道）或本机种子 tar。
+     * 用户只需要说"铺好它"，顺序由这里保证。
+     */
+    fun provisionProot() {
+        if (prootBusy) return
+        prootBusy = true
+        scope.launch {
+            val home = DshPaths.prootLinuxHome(context)
+            val ctl = LinuxCtl(context, EnvMode.PROOT)
+
+            // ① 宿主脚本：provision 本身要靠它，缺了先补（幂等）
+            if (ProotRuntime.isReady(context, home).not()) {
+                append("$ 先铺宿主脚本（provision 需要 bin/linuxctl）")
+                val r = withContext(Dispatchers.IO) {
+                    runCatching { ProotRuntime.ensure(context, home) }
+                        .getOrElse { ProotRuntime.Result(false, emptyList(), it.message, false) }
+                }
+                append(if (r.contractReady) "✓ bin/linuxctl 已就位" else "✗ 宿主脚本未就位：${r.error}")
+                if (!r.contractReady) {
+                    prootBusy = false
+                    proot = withContext(Dispatchers.IO) { ProotSetup.inspect(context) }
+                    return@launch
+                }
+            }
+
+            // ② 内嵌离线包（有就装：它可能带 proot 运行时与 base/runtime/dsh 层）
+            val bundle = proot?.embeddedBundle
+                ?: withContext(Dispatchers.IO) { runCatching { OfflineBundle.readHeaderOnly(context) }.getOrNull() }
+            if (bundle != null) {
+                append("$ 安装内嵌离线包（变体 ${bundle.variant}，${bundle.parts.size} 个部件）")
+                val outcome = withContext(Dispatchers.IO) {
+                    OfflineApplier.apply(context, EnvMode.PROOT, bundle) { stage, done, total ->
+                        if (total > 0) append("  $stage  ${done}/${total}") else append("  $stage")
+                    }
+                }
+                append(outcome.log.trimEnd())
+                if (!outcome.ok) {
+                    message = "离线包装到一半失败：${outcome.failedStage?.label ?: "未知阶段"}。" +
+                        "可以先去「更新」页用频道安装，再回来执行 provision。"
+                    prootBusy = false
+                    proot = withContext(Dispatchers.IO) { ProotSetup.inspect(context) }
+                    return@launch
+                }
+            } else {
+                append("· 本包没有内嵌离线包（组合 ${BuildConfig.EMBED_VARIANT}）：" +
+                    "proot 运行时与 base 层需要从频道安装。")
+            }
+
+            // ③ provision：把 base 层/种子解成 rootfs（linuxctl 1.0.17 起支持从 base 层解）
+            if (ctl.exists().not()) {
+                append("✗ 仍然没有 bin/linuxctl，无法执行 provision。")
+                message = "宿主脚本没铺上：这个 APK 可能没内嵌 proot 脚本。"
+                prootBusy = false
+                proot = withContext(Dispatchers.IO) { ProotSetup.inspect(context) }
+                return@launch
+            }
+            append("$ linuxctl provision")
+            val provision = withContext(Dispatchers.IO) {
+                ctl.stream(listOf("provision")) { line -> append(line) }
+            }
+            append(if (provision.ok) "✓ provision 完成" else "✗ provision：${provision.message}")
+
+            proot = withContext(Dispatchers.IO) { ProotSetup.inspect(context) }
+            provisioned = withContext(Dispatchers.IO) { ctl.exists() }
+            prootBusy = false
+            message = when {
+                proot?.rootfsReady == true ->
+                    "免 root 环境已铺好（rootfs 就位）。回首页点「启动环境」即可。"
+                proot?.hasRootSource == false ->
+                    "还没有可用的 rootfs 来源：去「更新」页从频道安装 base 层（erofs）后再点一次这个按钮。"
+                else -> "provision 没有成功：${provision.message}"
+            }
+        }
+    }
+
     fun go(step: WelcomeStep) {
         this.step = step
     }
@@ -233,8 +361,11 @@ class WelcomeState internal constructor(
             // ① root：拿到状态（不是布尔） ② 模块：装没装/版本/待重启
             val probe = withContext(Dispatchers.IO) { DeviceStatus.root(force = true) }
             val mod = withContext(Dispatchers.IO) { DeviceStatus.module(force = true) }
+            // ③ 免 root：宿主脚本 / proot 运行时 / rootfs（纯文件检查，不需要 su）
+            val pr = withContext(Dispatchers.IO) { ProotSetup.inspect(context) }
             rootProbe = probe
             module = mod
+            proot = pr
             val su = probe.granted
             suAvailable = su
             val effective = effectiveMode()
@@ -248,6 +379,7 @@ class WelcomeState internal constructor(
             append("· 模式选择：${mode.modeLabel}；实际生效：${effective.modeLabel}")
             append("· root：${probe.label}（${probe.detail}）")
             append("· 模块：${mod.label}")
+            append("· 免 root 就绪度：${ProotSetup.summary(pr)}（缺：${pr.missingLabel.ifEmpty { "无" }}）")
             append("· linuxctl：${if (exists) "已就位" else "缺失（需要部署）"}")
             // 状态后面必须跟"下一步做什么"，否则用户只能猜（这次就是要解决这个）
             probe.hint?.let { append("  → $it") }

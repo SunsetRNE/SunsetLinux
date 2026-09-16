@@ -55,6 +55,7 @@ import io.github.sunsetrne.sunsetlinux.core.ModuleStatus
 import io.github.sunsetrne.sunsetlinux.core.Prefs
 import io.github.sunsetrne.sunsetlinux.core.RootProbe
 import io.github.sunsetrne.sunsetlinux.core.ProvisionPlan
+import io.github.sunsetrne.sunsetlinux.core.ProotRuntime
 import io.github.sunsetrne.sunsetlinux.ui.components.DshCard
 import io.github.sunsetrne.sunsetlinux.ui.components.Pill
 import io.github.sunsetrne.sunsetlinux.ui.components.SectionLabel
@@ -196,14 +197,37 @@ class ProvisionActivity : ComponentActivity() {
             appendLog("# 部署向导开始")
             appendLog("# 模式：${picked.modeLabel}   环境根：${ctl.home}")
 
+            if (!ctl.exists() && picked == EnvMode.PROOT) {
+                // ★ 免 root 模式：`bin/linuxctl` 这套宿主脚本**随 APK 内置**，不是从别处来的。
+                //   这里直接补上（幂等，50 KB），而不是把用户打发去找文件 —— 真机上用户照旧引导
+                //   走到这里只看到"没有找到 linuxctl"，而当时的界面里根本没有能铺它的动作。
+                appendLog("· bin/linuxctl 不在：先从 APK 内置资产铺宿主脚本（不需要 root）")
+                val laid = runCatching {
+                    ProotRuntime.ensure(this@ProvisionActivity, ctl.home)
+                }.getOrElse {
+                    ProotRuntime.Result(false, emptyList(), it.message ?: "未知错误", false)
+                }
+                if (laid.ok) {
+                    appendLog(
+                        "  写入 ${laid.written.size} 个文件；契约路径 bin/linuxctl " +
+                            (if (laid.contractReady) "已就位" else "仍未就位"),
+                    )
+                } else {
+                    appendLog("  铺脚本失败：${laid.error}")
+                }
+                laid.error?.let { appendLog("  注意：$it") }
+            }
+
             if (!ctl.exists()) {
                 appendLog("✗ 未找到 linuxctl：${ctl.ctlPath}")
                 appendLog(if (picked == EnvMode.ROOT) {
                     "root 模式的 linuxctl 由 KernelSU 模块铺到 /data/sunsetlinux/bin/。" +
-                        "请先在 KernelSU 管理器里安装 module/ 下的模块并重启，然后回到这里重试。"
+                        "请先在 KernelSU 管理器里安装模块并重启，然后回到这里重试" +
+                        "（首启引导第 2 步可以一键刷入内置模块）。"
                 } else {
-                    "proot 模式需要先把 runtime/proot/linuxctl.sh 放到 ${ctl.ctlPath}（并 chmod +x）。" +
-                        "也可以用频道分发的方式安装后再回来。"
+                    "免 root 模式的 bin/linuxctl 由 App 内置资产铺（约 50 KB，不需要 root、不联网），" +
+                        "但这次没铺成：多半是这个 APK 没内嵌 proot 脚本（干净检出 / CI 未附产物）。" +
+                        "请换官方发布的 APK；也可以在「关于」页确认组合信息。"
                 })
                 withMain { running.value = false; result.value = false }
                 return@launch
@@ -257,7 +281,18 @@ class ProvisionActivity : ComponentActivity() {
                 }
 
                 ProvisionPlan.Step.NEED_CHANNEL -> {
-                    appendLog("✗ 这一步在 proot 模式下做不了：先在「更新」页从频道安装三层，再回来启动。")
+                    // ★ proot 模式的这句话以前是"先在更新页装三层，再回来启动" —— 而当时
+                    //   proot 的 linuxctl 只认 tar，装进来的 erofs 层根本解不开（用户 2026-09-16
+                    //   正是卡在这条建议上）。模块 1.0.17 起 proot 也能解 erofs 层，所以现在
+                    //   这句话是**真的可执行**的，并把"装完还要再点一次 provision"说清楚。
+                    appendLog(
+                        if (picked == EnvMode.PROOT) {
+                            "· 免 root 模式的根文件系统来自 base 层：请到「更新」页从频道安装 base（erofs），" +
+                                "然后回到这里再点一次「开始部署」——proot 会用 fsck.erofs 把它解成 rootfs。"
+                        } else {
+                            "· 缺少层：请到「更新」页从频道安装三层（base/runtime/dsh），或在「关于」页一键更新模块后用设备侧构建。"
+                        },
+                    )
                     withMain { running.value = false; result.value = false }
                     return@launch
                 }

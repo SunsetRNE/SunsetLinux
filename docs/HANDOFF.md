@@ -2,7 +2,7 @@
 
 > 用途：**对话记录可能被删/会被换掉**，所以把"现在到哪了、还剩什么、怎么接着做"落进仓库。
 > 和 `docs/STATUS.md`（项目总账）配合看：STATUS 讲**项目本身**做到什么程度，本文讲**这次协作的落点**。
-> 最后更新：**2026-09-16**（第 33 条：引导第 2 步的模块包内嵌 + doctor 3 处假警报 + upper 读写挂载自愈 → App 0.2.11 / 模块 1.0.17）
+> 最后更新：**2026-09-16**（第 34 条：免 root 引导从「指路」改成「真的能铺」+ proot 支持 erofs 层 → App 0.2.12 / 模块 1.0.18）
 
 ---
 
@@ -83,6 +83,26 @@ CI 四条线路：① `ci.yml` 回归门禁（shell / node / android 三并行�
 | 31 | *(本次)* | **挂载冲突检查（§1d）+ 机制澄清**（用户："我主要是怕挂载冲突的问题，模块本身就有自动挂载机制，项目的模块再写个挂载，怕不是会冲突哟"）| 查清 KernelSU 侧：挂载已交给 **metamodule**（单实例、`metamount.sh` 把常规模块的 `system/` overlay 到 Android 系统路径、必须 `source=KSU`；`magic_mount_rs` 是内核级路径重定向、不产生 mount 条目）。我们的挂载目标全在 `$LINUX_HOME/**`、在 `unshare -m` 的私有 namespace 里、模块本身**没有 `system/`** → 三条硬理由说明**不冲突**；且"交给 metamodule 挂"不可行（钩子契约 + 单实例会顶掉用户的 magic_mount_rs）。新增 `docs/mount-conflict.md` 与 doctor **§1d**（五条判据：模块自身、私有 ns 隔离、全局泄漏、loop 占用、运行期存续），selftest 加一条断言。模块 **1.0.14** |
 | 32 | *(本次)* | **无 loop 层模式（dir）+ doctor §1e**（用户选了"加无 loop 目录模式作兼容开关"）| `start.sh --layer-mode loop|dir`：dir = `fsck.erofs --extract` 把三层解成目录 + `dirs-upper/` 真目录 + 目录 overlayfs，**不碰 loop/erofs/upper.img**；优先级 命令行>env>config.json>loop，非法值立刻报错；App「设置 → 层模式」可切、「关于」/`status.layer_mode` 显示实际用的；doctor §1e 报模式+解包器+三层戳+占用。selftest 新增 14 条（解析优先级/幂等/换层只重解/解包器缺失明确失败），bash+mksh 34/0。App **0.2.10** / 模块 **1.0.15** |
 | 33 | *(本次)* | **首启引导第 2 步改成真正的刷模块引导（模块包内嵌进 APK）+ 修掉 doctor 的 3 处假警报与"只读能挂、读写挂不上"**（用户给了引导页截图："在勾选的地方做 Root 模块刷写引导，内置模块包"；并把真机 doctor 输出整段贴过来："顺便解决一下日志问题"）| ① 引导第 2 步原来写"选择模块包：`dist/sunsetlinux-module-0.1.0.zip`" —— 那个路径**在用户手机上不存在**，勾选框因此卡死。现在构建期把 `dist/sunsetlinux-module-*.zip` 内嵌成 `assets/module/sunsetlinux-module.zip` + `module.json`（版本/sha256/大小，`SyncBundledModule`），卡片上「一键刷入内置模块」= assets 落盘（校验 sha256）→ `ksud module install`，「导出模块包到 Download」「打开 KernelSU/Magisk 管理器」为手动路径，勾选框 = 用户断言 **或** 设备侧事实（已装+已启用+已重启）。② 诊断页 `✗ 自检未通过：== 0. 运行环境 ==` —— `CtlResult.message` 取的是 stdout 第一行，而 doctor 第一行非空内容就是第一个小节标题；改成解析 JSON 尾行的 fails/warns + 带 `[fail]` 的原文。③ doctor 的假警报：`CONFIG_SQUASHFS 未启用`/`内核不支持 squashfs` 判成 fail（本项目只用 erofs）、`dsh 层内没有 /root/.dsh/profiles/**` 与 `runtime 层里没有 pnpm`（检查拿 `dump.erofs --ls --path=/` 的**不递归**输出 grep 深层路径，永远匹配不上）、loop 计数（`grep -c ":'"` 恒为 0，输出"在用 1 个"却列 4 个）、与本项目无关的 avc denial 在 JSON 里被打成 warn。④ 唯一真 fail（`挂载 upper 失败…I/O error`）：`start.sh` 改逐级自愈（清残留 loop → `e2fsck -p` → 显式 `losetup`+`mount` → 抓 dmesg 原文进 last-error），四次都失败自动降级 dir 层模式。证据：selftest bash+mksh **42/0**（新增 6 条：squashfs 不得 fail、层内路径正/反例、`mount_upper_rw` 在 toybox `-o loop` 失败后靠显式 losetup 挂上、失败后确实先清 loop 并跑过 e2fsck -p）；App 单测 **134/0**（注意：本机 locale 是 POSIX，Kotlin 增量编译会因中文测试名写出不可映射的文件名而 ICE——`gradlew --stop` 后用 `LANG=C.UTF-8` 重跑即过，与本次改动无关）；模块 zip `dist/sunsetlinux-module-v1.0.17.zip`（209116 B，sha256 `88c00d8e…7dd9`）；APK `SunsetLinux-0.2.11-minimal-debug.apk` 内含 `assets/module/sunsetlinux-module.zip`（sha256 与 `module.json` 一致），签名 `5d5fa724…69f7`（仓库内固定密钥 ⇒ 可覆盖安装、KSU 授权不失效）。App **0.2.11** / 模块 **1.0.17** |
+
+| 34 | *(本次)* | **免 root 模式的引导从"指路"改成"真的能铺"，两个模式的流程从 UI 上彻底分开**（用户："疑似部署引导不完整，Root 和非 Root 模式流程需要不一致，进一步从 UI 上切割区分开来，从根源上完善引导流程"）| 用户贴的是 App 诊断页输出（模式 **PROOT**）：`✗ 没有找到 linuxctl：…/files/sunsetlinux/bin/linuxctl / 请先在侧边栏「重新部署 / 首启引导」里完成部署`。两条根因：**①** 免 root 的 `bin/linuxctl` 是随 APK 内置的（`assets/proot-runtime/`，50 KB，`ProotRuntime` 早就会铺），而引导只写"到「更新 → 本机包 → 离线安装」点一下"——那个页面装层/运行时、**不铺 `bin/`**，于是用户照做后 doctor 永远报"没有找到 linuxctl"；**②** 频道/离线包给的层是 **erofs**，而 proot 的 `linuxctl` 只认 tar（`archive_test` 判损坏、`extract_archive` 用 tar 解）→ 引导里"从频道装三层再回来启动"在免 root 下**不可能成功**。改法：App 新增 `core/ProotSetup.kt`（就绪度 + 有序步骤 + 每步"点哪里"，`plan()` 纯函数 + 5 条单测），引导**按模式给不同步骤名与动作**（root `选模式/装模块/部署/完成`；免 root `选模式/铺运行时/铺环境/完成`），免 root 分支三张卡片三个真按钮（铺内置脚本 / 铺环境=内嵌离线包+provision / 打开部署向导），诊断页缺 linuxctl 按模式给不同下一步，部署向导在 proot 下**先自动铺脚本**；模块 **1.0.18**：proot 认得并解得开 **erofs 层**（`is_erofs` magic 在偏移 1024 / `archive_test` 按 magic 校验 / `extract_archive` 走 `fsck.erofs --extract=`，同 `SUNSETLINUX_EROFS_EXTRACT` 覆盖点）、`find_base_layer` + `provision` **没种子时自动拿已就位的 base 层当 rootfs**、`doctor` 新增"部署就绪度"三件套（bin/linuxctl / proot 运行时 / rootfs，+ 有层但无 fsck.erofs 的告警）。证据：`runtime/proot/selftest-funcs.sh` 新增 10 条、bash+mksh **78 通过**（各含 3 条**既有**失败：本容器 `/proc/net/tcp` 受限，`port_open_local` 那组跑不过，已在 HEAD 上复现同样 3 条）；App 单测 +5（`ProotSetupTest`）。App **0.2.12** / 模块 **1.0.18** |
+
+### 第 34 条：免 root 引导的两个根因与改法
+
+用户的原话："疑似部署引导不完整，Root 和非 Root 模式流程需要不一致，进一步从 UI 上切割区分开来，
+从根源上完善引导流程。"
+
+| # | 引导里写的 | 真相 |
+|---|---|---|
+| 1 | "到「更新 → 本机包 → 离线安装」点一下"（铺 proot 运行时） | 那个页面装的是**层与 proot 二进制**，而 `bin/linuxctl / start.sh / entry.sh` 这套**宿主脚本**是 APK 内置资产（`ProotRuntime` 会铺）——**界面上没有这个动作**，所以用户照做后 doctor 依旧报"没有找到 linuxctl" |
+| 2 | "从频道安装三层，再回来启动" | 频道/离线包给的是 **erofs** 层，而 proot 的 `linuxctl` 只认 tar：`archive_test` 把 erofs 判成损坏、`extract_archive` 拿 tar 去解 → 免 root 模式下**永远装不进去** |
+
+改法分两层（App 管"能不能点到"，运行时管"点了真能成"）：
+
+- **App 0.2.12**：`core/ProotSetup.kt` 把"缺什么"与"下一步点哪里"变成可测的纯函数；
+  步骤名与动作按模式分开（免 root：`选模式/铺运行时/铺环境/完成`）；免 root 分支三个真按钮；
+  诊断页与部署向导按模式给不同的下一步（部署向导在 proot 下先自动铺脚本）。
+- **模块 1.0.18**：proot 的 `linuxctl` 支持 erofs 层（`fsck.erofs --extract`）、`provision` 自动用
+  base 层当 rootfs、`doctor` 报"部署就绪度"。
 
 ### 第 33 条的两个现场（截图与 doctor 输出）
 
