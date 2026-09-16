@@ -1,9 +1,9 @@
 {
   "schema": 1,
   "channel": "stable",
-  "built_at": "2026-09-16T04:07:14Z",
-  "commit": "410d84a3288d1f5e7a428cf1fdbd155df463b9ad",
-  "run_number": 72,
+  "built_at": "2026-09-16T04:10:12Z",
+  "commit": "7a5c8228b7c055a1224ce54e209d9d30d447c42f",
+  "run_number": 73,
   "app_version": "0.2.6",
   "github_release_tag": "v0.2.6",
   "module_version": "1.0.10",
@@ -18,7 +18,7 @@
       "apk": "SunsetLinux-0.2.6-minimal-debug.apk",
       "apk_url": "https://github.com/SunsetRNE/SunsetLinux/releases/download/v0.2.6/SunsetLinux-0.2.6-minimal-debug.apk",
       "apk_size": 13828749,
-      "apk_sha256": "58b68f4a34b8e6183e7c683523966c7ed53a63384e34525fa95a5a4652d5fec3",
+      "apk_sha256": "a5fca7563dabeaf4884df4381f89f6c1d6c827851ef056f710318d2f1637dd2d",
       "bundle": "SunsetLinux-0.2.6-minimal.bin"
     },
     {
@@ -31,8 +31,8 @@
       "note": "内嵌 Ubuntu 基础环境（base + runtime）；dsh 与 proot 另取",
       "apk": "SunsetLinux-0.2.6-ubuntu-debug.apk",
       "apk_url": "https://github.com/SunsetRNE/SunsetLinux/releases/download/v0.2.6/SunsetLinux-0.2.6-ubuntu-debug.apk",
-      "apk_size": 81056073,
-      "apk_sha256": "5349dc557d4283b6b6f1e7df15cd5acbac77732b41f3c135c0a4ec13794ab4bc",
+      "apk_size": 81056077,
+      "apk_sha256": "2499f2cf682086caad59be7a1f2268de2c05a2c400c2f7cf2edd575234e36b01",
       "bundle": "SunsetLinux-0.2.6-ubuntu.bin"
     },
     {
@@ -46,8 +46,8 @@
       "note": "内嵌 Ubuntu + proot：root / 非 root 都能离线起步（不含 dsh）",
       "apk": "SunsetLinux-0.2.6-ubuntu-proot-debug.apk",
       "apk_url": "https://github.com/SunsetRNE/SunsetLinux/releases/download/v0.2.6/SunsetLinux-0.2.6-ubuntu-proot-debug.apk",
-      "apk_size": 82044973,
-      "apk_sha256": "09e925c46574194935d4907c15e3f35400119eb1dc7f994c6b3a096fb83e065f",
+      "apk_size": 82044977,
+      "apk_sha256": "e04b126c3f0d13f210f3defcea11e5181708533d49663c4096040e32e6ed4e48",
       "bundle": "SunsetLinux-0.2.6-ubuntu-proot.bin"
     },
     {
@@ -63,7 +63,7 @@
       "apk": "SunsetLinux-0.2.6-ubuntu-proot-dsh-debug.apk",
       "apk_url": "https://github.com/SunsetRNE/SunsetLinux/releases/download/v0.2.6/SunsetLinux-0.2.6-ubuntu-proot-dsh-debug.apk",
       "apk_size": 114798361,
-      "apk_sha256": "f17f1f5e69637977f4f5fc460ec300af3024db5a5b8f1a8aefd21e4689d273ca",
+      "apk_sha256": "98095ccc0c90bb786f4e138e31aaf4b6f9d4addfad5458538c15b96b9ef914f2",
       "bundle": "SunsetLinux-0.2.6-ubuntu-proot-dsh.bin"
     }
   ],
@@ -71,32 +71,32 @@
     {
       "name": "SunsetLinux-0.2.6-minimal-debug.apk",
       "size": 13828749,
-      "sha256": "58b68f4a34b8e6183e7c683523966c7ed53a63384e34525fa95a5a4652d5fec3"
+      "sha256": "a5fca7563dabeaf4884df4381f89f6c1d6c827851ef056f710318d2f1637dd2d"
     },
     {
       "name": "SunsetLinux-0.2.6-ubuntu-debug.apk",
-      "size": 81056073,
-      "sha256": "5349dc557d4283b6b6f1e7df15cd5acbac77732b41f3c135c0a4ec13794ab4bc"
+      "size": 81056077,
+      "sha256": "2499f2cf682086caad59be7a1f2268de2c05a2c400c2f7cf2edd575234e36b01"
     },
     {
       "name": "SunsetLinux-0.2.6-ubuntu-proot-debug.apk",
-      "size": 82044973,
-      "sha256": "09e925c46574194935d4907c15e3f35400119eb1dc7f994c6b3a096fb83e065f"
+      "size": 82044977,
+      "sha256": "e04b126c3f0d13f210f3defcea11e5181708533d49663c4096040e32e6ed4e48"
     },
     {
       "name": "SunsetLinux-0.2.6-ubuntu-proot-dsh-debug.apk",
       "size": 114798361,
-      "sha256": "f17f1f5e69637977f4f5fc460ec300af3024db5a5b8f1a8aefd21e4689d273ca"
+      "sha256": "98095ccc0c90bb786f4e138e31aaf4b6f9d4addfad5458538c15b96b9ef914f2"
     },
     {
       "name": "sunsetlinux-module-1.0.10.zip",
       "size": 187710,
-      "sha256": "1d3328fb01682ed424263091106c9f40011a9f0acc1cb4d5b5d9d8a85866395b"
+      "sha256": "5dc3d26e7494f22a2883bdb07f1c885d7e977f1defbeb130804dd8a39354e9df"
     },
     {
       "name": "sunsetlinux-module-1.0.10.zip.sha256",
       "size": 143,
-      "sha256": "80b59ae2e56c78bec8237d9336cf1e2b2fa232cf1ba6b4b7257c7a2c90b65f70"
+      "sha256": "86759fba7936549bb67c12e7bfa932a992f48e2285797e98d299a6cd559f5e17"
     }
   ]
 }
