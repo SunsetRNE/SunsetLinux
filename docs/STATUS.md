@@ -476,6 +476,19 @@ su -c '/data/sunsetlinux/bin/linuxctl doctor'
 > ✔ 已完成（原第 2 项）：**proot 模式的宿主侧脚本 mksh 化**，见 §4.4。
 
 
+### 3.10.11 离线安装与模块检测（App 0.2.5 / 模块 1.0.10）
+
+| 事 | 之前 | 现在 |
+|---|---|---|
+| 内嵌离线包 | 只读了头：页面能说"内嵌了 base/runtime/dsh"，**没有任何代码把部件铺下去**，断网就是死路 | `OfflineApplier` 从 assets 流式取部件（dsh 变体 102 MB 不进内存）→ 包头 sha256 → 解压（与频道同一个 `LayerTransport`）→ `sha256_raw` → `linuxctl update <id> <raw> --version <ver>`；**与在线更新写同一份 `layers/` 与 `state.json`** |
+| 安装顺序 | 无 | `proot → base → runtime → dsh`（非 root 的 `linuxctl` 是 proot 脚本，必须先有 proot 二进制）；root 模式明确跳过 proot 部件 |
+| proot 宿主脚本 | 只在模块里，或要用户手动 `tar -xzf dist/sunsetlinux-proot-runtime.tar.gz` → **免 root 版装完起不来** | 构建期随 APK 进 `assets/proot-runtime/`（源就是仓库 `runtime/proot/`，缺必需脚本直接构建失败），`ProotRuntime.ensure` 铺到 `$LINUX_HOME/bin/` 并补执行位与契约路径 |
+| 模块"没刷入" | `su` 没拿到/超时/输出为空都落成"未装"——把**不知道**说成**没装**（用户重启了仍显示没刷入） | `ModuleStatus.readable` 三态：读不到 ⇒ 「模块状态未知」+ 中性色 + 「去授权 root」；只有探针标记齐且 `module.prop` 为空才是真"未装" |
+| 频道全挂 | 「可用更新」照样显示"已是最新" | 先显示 **频道检查失败：<原因>** + 重试/频道管理；另有「频道检查」卡片逐频道列状态 |
+| `run/last-error` | 历史错误一直挂着（层与 upper.img 都在也照挂），看着像环境坏了 | `gather_status` 丢掉过期错误（缺层/缺可写层，实测都齐时） |
+| 体积显示 | 状态页截图里出现过"dsh 1894 MB"（`etc/state.json` 里是 `198651904` 字节 = **189.4 MB**），当时无法复现 | 用真机三个层的真实字节数把 `formatBytes` 钉进单测（229.2 / 596.3 / 189.4 MB）——再有人把 1024 进制改动、多乘少除一个 1024，测试立刻红 |
+
+
 ### 3.11 ★ proot「能力缺失」审计：哪些是固有限制、哪些能补（2026-09-16 第五批）
 
 用户："解决后续的 proot 能力部分支持缺失问题（感觉这个坎绕不过去了）"。

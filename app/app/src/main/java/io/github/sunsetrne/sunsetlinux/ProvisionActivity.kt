@@ -458,6 +458,8 @@ private fun ProvisionScreen(
                         text = moduleStatus?.label ?: "模块检测中…",
                         color = when {
                             moduleStatus == null -> TextMuted
+                            // 读不到 ≠ 没装：中性色 + 提示去授权（真机踩过"重启了还说没刷入"）
+                            !moduleStatus.readable -> TextMuted
                             !moduleStatus.installed || moduleStatus.disabled -> WarnTone
                             moduleStatus.pendingReboot -> WarnTone
                             else -> StateRunning

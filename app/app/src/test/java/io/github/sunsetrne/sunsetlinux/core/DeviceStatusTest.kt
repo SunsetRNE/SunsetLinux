@@ -145,4 +145,36 @@ class DeviceStatusTest {
         assertTrue("必须读 modules/sunsetlinux", script.contains("/data/adb/modules/sunsetlinux"))
         assertTrue("必须读 modules_update（装了没重启）", script.contains("/data/adb/modules_update/sunsetlinux"))
     }
+
+    @Test
+    fun `读不到模块状态时不许说成"没装"（真机踩过）`() {
+        // 空输出 = su 没拿到/超时 → 状态未知，而不是"模块未装"
+        val unknown = ModuleStatus.parse("")
+        assertEquals("读不到就是读不到", false, unknown.readable)
+        assertEquals(false, unknown.installed)
+        assertTrue("标签要说『未知』：${unknown.label}", unknown.label.contains("未知"))
+        assertTrue("并给出『先去授权 root』的动作：${unknown.hint}", unknown.hint!!.contains("授权"))
+
+        // 探针真跑完了（标记齐）但 module.prop 是空的 → 才是真的"没装"
+        val empty = ModuleStatus.parse(
+            "###PROP\n###DISABLE\n0\n###PENDING\n0\n###PROV\n0\n###END\n",
+        )
+        assertEquals(true, empty.readable)
+        assertEquals(false, empty.installed)
+        assertTrue("这种情况才说『未装』：${empty.label}", empty.label.contains("未装"))
+        assertTrue("并指引去装模块：${empty.hint}", empty.hint!!.contains("模块 zip"))
+    }
+
+    @Test
+    fun `已安装且启用的模块标签要说清楚版本与已启用`() {
+        val m = ModuleStatus.parse(
+            "###PROP\nid=sunsetlinux\nversion=v1.0.9\n###DISABLE\n0\n###PENDING\n0\n###PROV\n1\n###END\n",
+        )
+        assertEquals(true, m.readable)
+        assertEquals(true, m.installed)
+        assertEquals("1.0.9", m.version)
+        assertTrue("标签里要有版本：${m.label}", m.label.contains("1.0.9"))
+        assertTrue("并说明已启用：${m.label}", m.label.contains("已启用"))
+        org.junit.Assert.assertNull("一切正常时不该再唠叨", m.hint)
+    }
 }

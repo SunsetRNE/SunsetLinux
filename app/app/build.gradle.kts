@@ -270,6 +270,49 @@ abstract class EmbedOfflineBundle : DefaultTask() {
     }
 }
 
+
+/**
+ * 把 `runtime/proot/` 里的脚本铺成 `assets/proot-runtime/`。
+ *
+ * 为什么非做不可：非 root（proot）模式的 `linuxctl` 是**宿主侧脚本**
+ * （`linuxctl.sh` / `start.sh` / `entry.sh`），必须躺在 `$LINUX_HOME/bin/` 里。
+ * 以前它只有两条来路 —— 模块铺（root 用户）或用户手动 `tar -xzf` 那个 50 KB 的
+ * `dist/sunsetlinux-proot-runtime.tar.gz`。于是「免 root 版」「完整离线版」装完其实
+ * 起不来：内嵌包里有 proot 二进制，却没有这套脚本。现在脚本随 APK 走 assets，
+ * App 里点一下「铺 proot 运行时」即可（见 core/ProotRuntime.kt）。
+ *
+ * 单一事实源：源就是仓库里的 `runtime/proot/`，构建时拷贝，**不做任何改写**，
+ * 与模块里那份必然一致（改脚本只需改一处）。
+ */
+abstract class SyncProotRuntimeAssets : DefaultTask() {
+    @get:InputFiles
+    @get:PathSensitive(PathSensitivity.NAME_ONLY)
+    abstract val sources: ConfigurableFileCollection
+
+    @get:OutputDirectory
+    abstract val outputDir: DirectoryProperty
+
+    @TaskAction
+    fun sync() {
+        val out = File(outputDir.get().asFile, "proot-runtime")
+        out.deleteRecursively()
+        out.mkdirs()
+        val files = sources.files.filter { it.isFile }.sortedBy { it.name }
+        if (files.isEmpty()) {
+            throw GradleException(
+                "runtime/proot 里没有可内嵌的脚本 —— 非 root 模式会起不来。" +
+                    "确认在仓库根下的 app/ 目录里构建（源目录：${sources.files.joinToString()}）",
+            )
+        }
+        files.forEach { it.copyTo(File(out, it.name), overwrite = true) }
+        val missing = listOf("linuxctl.sh", "start.sh", "entry.sh").filterNot { File(out, it).isFile }
+        if (missing.isNotEmpty()) {
+            throw GradleException("runtime/proot 缺必需脚本：${missing.joinToString(", ")}（proot 模式起不来）")
+        }
+        logger.lifecycle("proot 宿主脚本 ${files.size} 个 → assets/proot-runtime/（${files.sumOf { it.length() } / 1024} KB）")
+    }
+}
+
 androidComponents {
     onVariants { variant ->
         val flavor = embedFlavors.firstOrNull { it.gradleName == variant.flavorName }
@@ -295,5 +338,18 @@ androidComponents {
             )
         }
         variant.sources.assets?.addGeneratedSourceDirectory(embed, EmbedOfflineBundle::outputDir)
+
+        // ③ proot 宿主脚本（四个组合都带；root 模式下用不到，但"免 root 版"必须靠它才能起）
+        val prootTaskName = "syncProotRuntime" + variant.name.replaceFirstChar { it.uppercase() }
+        val prootAssets = tasks.register<SyncProotRuntimeAssets>(prootTaskName) {
+            group = "build"
+            description = "把 runtime/proot 的宿主脚本放进 assets/proot-runtime/"
+            sources.from(
+                fileTree(File(rootDir.parentFile, "runtime/proot")) {
+                    include("*.sh", "*.md")
+                },
+            )
+        }
+        variant.sources.assets?.addGeneratedSourceDirectory(prootAssets, SyncProotRuntimeAssets::outputDir)
     }
 }

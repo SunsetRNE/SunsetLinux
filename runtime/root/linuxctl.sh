@@ -237,10 +237,39 @@ last_error_read() {
     [ -s "$ERROR_FILE" ] && cat "$ERROR_FILE" 2>/dev/null | head -n1
 }
 
+# 陈旧的 last-error 会让 status **永远**显示 error（明明问题已经解决）。
+# 真机就踩过：设备侧建层失败留下 "缺少层文件 …"，后来层齐了、环境还没启动，
+# App 的「更新」页顶部一直挂着"失败（文件/层缺失）"，用户以为装坏了。
+# 这里只自愈**能当场证伪**的那几类：说缺层/缺可写层，而层与 upper.img 现在都在。
+last_error_stale() {
+    local e="" l=""
+    e="$(last_error_read || true)"
+    [ -n "$e" ] || return 1
+    case "$e" in
+        *缺少层文件*|*缺少可写层*|*缺少层*)
+            for l in $LAYER_NAMES; do
+                [ -n "$(find_layer "$l" 2>/dev/null || true)" ] || return 1
+            done
+            [ -f "$UPPER_IMG" ] || return 1
+            return 0
+            ;;
+    esac
+    return 1
+}
+
+# 自愈：清掉证伪得了的陈旧错误，并**留下痕迹**（不静默）
+drop_stale_last_error() {
+    last_error_stale || return 0
+    log "清掉陈旧的 last-error（层与 upper.img 现在都在，那条已经不成立）"
+    rm -f "$ERROR_FILE" 2>/dev/null || true
+    return 0
+}
+
 # ---------------------------------------------------------------------------
 # 收集 status 的全部字段到 DSH_ST_* 变量
 # ---------------------------------------------------------------------------
 gather_status() {
+    drop_stale_last_error   # ★ 先在"状态汇报"这一层自愈陈旧错误，别让它一直挂着
     local pid="" state="stopped" port="" base_url="" url="" version="" healthy=""
     local ns_pid="" started_at="" pid_for_uptime=""
     local lv="" ls="" lm=""

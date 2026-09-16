@@ -179,6 +179,47 @@ object OfflineBundle {
             buf
         }
 
+    /**
+     * 把某个部件**流式**写到文件，返回写入内容的 sha256 十六进制。
+     *
+     * 为什么不是 [readPart] + [writePart]：层部件 200 MB+（dsh 层 189 MB、runtime 层 596 MB），
+     * 整块进 `ByteArray` 在低端机上直接 OOM。这里 64 KiB 一块边读边写边算摘要，
+     * 峰值内存与部件大小无关。
+     *
+     * @param onProgress 每块回调一次（done/total 都是字节），供界面显示"读内嵌包"进度。
+     */
+    fun copyPart(
+        context: Context,
+        bundle: Bundle,
+        part: Part,
+        dst: File,
+        onProgress: ((done: Long, total: Long) -> Unit)? = null,
+    ): String {
+        dst.parentFile?.mkdirs()
+        val digest = MessageDigest.getInstance("SHA-256")
+        val buf = ByteArray(64 * 1024)
+        context.assets.open(ASSET_NAME).use { input ->
+            skipFully(input, bundle.payloadStart + part.off)
+            var left = part.len
+            dst.outputStream().use { out ->
+                while (left > 0) {
+                    val want = minOf(left, buf.size.toLong()).toInt()
+                    val n = input.read(buf, 0, want)
+                    if (n < 0) {
+                        throw BundleFormatException(
+                            "离线包在读 ${part.file} 时提前结束（还差 $left 字节）",
+                        )
+                    }
+                    out.write(buf, 0, n)
+                    digest.update(buf, 0, n)
+                    left -= n
+                    onProgress?.invoke(part.len - left, part.len)
+                }
+            }
+        }
+        return digest.digest().joinToString("") { "%02x".format(it) }
+    }
+
     /** 校验部件内容的 sha256（**装之前必须过这一关**）。 */
     fun verifyPart(part: Part, bytes: ByteArray): Boolean =
         part.sha256.lowercase() == sha256Hex(bytes)

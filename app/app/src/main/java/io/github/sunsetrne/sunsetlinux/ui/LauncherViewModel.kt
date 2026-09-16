@@ -42,6 +42,12 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
         val mode: EnvMode = EnvMode.ROOT,
         val modeNote: String? = null,
         val suAvailable: Boolean = false,
+        /** root 的**可解释**状态（没有 su / 被拒 / 超时 / 已授权）：只留布尔说不出"该去哪一步"。 */
+        val rootLabel: String? = null,
+        val rootHint: String? = null,
+        /** 模块状态：`模块 1.0.9（已启用）` / `模块未装` / `模块状态未知`… */
+        val moduleLabel: String? = null,
+        val moduleHint: String? = null,
         /** null = 还没探测出来 */
         val provisioned: Boolean? = null,
         val status: DshStatus? = null,
@@ -96,6 +102,20 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
                 TransportSupport.zstdUnavailableReason()
             }
             _ui.update { it.copy(zstdReason = reason) }
+        }
+        // root / 模块状态：一次探测、结果进 UiState（"关于"页与首页都用它）
+        viewModelScope.launch {
+            val io2 = kotlinx.coroutines.Dispatchers.IO
+            val root = kotlinx.coroutines.withContext(io2) {
+                io.github.sunsetrne.sunsetlinux.core.DeviceStatus.root(force = true)
+            }
+            val module = kotlinx.coroutines.withContext(io2) {
+                io.github.sunsetrne.sunsetlinux.core.DeviceStatus.module(force = true)
+            }
+            _ui.update {
+                it.copy(rootLabel = root.label, rootHint = root.hint,
+                        moduleLabel = module.label, moduleHint = module.hint)
+            }
         }
         startPolling()
     }

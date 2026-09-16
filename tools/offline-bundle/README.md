@@ -30,7 +30,7 @@
 |---|---|---|
 | APK（四个组合各一份） | `SunsetLinux-<App 版本>-<变体>.apk` | `SunsetLinux-0.2.4-ubuntu-proot-dsh.apk` |
 | 离线包 | `SunsetLinux-<App 版本>-<变体>.bin` | `SunsetLinux-0.2.4-minimal.bin` |
-| KernelSU 模块 | `sunsetlinux-module-<模块版本>.zip` | `sunsetlinux-module-1.0.9.zip` |
+| KernelSU 模块 | `sunsetlinux-module-<模块版本>.zip` | `sunsetlinux-module-1.0.10.zip` |
 
 > APK 是**同一个 App**（同包名、同签名、同 versionCode），换组合 = 覆盖安装，数据不丢。
 > 本工具本地产出的中间名是 `<变体>.bin`；CI 发布前会重命名成上表的发布名

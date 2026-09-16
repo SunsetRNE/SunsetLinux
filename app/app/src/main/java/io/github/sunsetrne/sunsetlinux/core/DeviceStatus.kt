@@ -77,7 +77,16 @@ data class RootProbe(
  * 解析部分 [ModuleStatus.parse] 是纯函数，可以直接单测。
  */
 data class ModuleStatus(
-    /** `module.prop` 存在 = 模块已安装。 */
+    /**
+     * **这次到底读到了没有**。
+     *
+     * 真机踩过：用户明明已经装好模块并重启，App 却显示"模块未装" —— 因为探针要经 `su`，
+     * 而那次 `su` 没拿到（授权被收回/超时），旧代码把"读不到"直接当成"没装"报了出去。
+     * 从此：读不到就是 [readable] = false（界面说"状态未知 + 先去授权"），
+     * **绝不把"不知道"说成"没装"** —— 那会把用户带去卸载重装。
+     */
+    val readable: Boolean,
+    /** `module.prop` 有内容 = 模块已安装。 */
     val installed: Boolean,
     /** `module.prop` 里的 version（去掉开头的 v，例：`1.0.9`）。 */
     val version: String?,
@@ -90,14 +99,16 @@ data class ModuleStatus(
 ) {
     val label: String
         get() = when {
+            !readable -> "模块状态未知"
             !installed -> "模块未装"
             disabled -> "模块已停用"
             pendingReboot -> "模块 ${version ?: "?"}（装了，待重启生效）"
-            else -> "模块 ${version ?: "?"}"
+            else -> "模块 ${version ?: "?"}（已启用）"
         }
 
     val hint: String?
         get() = when {
+            !readable -> "读不到模块状态（经 su 读取失败）：先确认 KernelSU 已给本应用授权 root，再点「重新检测」"
             !installed -> "在 KernelSU 管理器里安装模块 zip，装完**重启一次**（下载页：/stable/）"
             disabled -> "KernelSU 里模块被停用了：启用它，然后重启"
             pendingReboot -> "模块已经装好，**重启一次**才会生效（开机还会自动建层/自启）"
@@ -142,7 +153,9 @@ data class ModuleStatus(
          */
         fun parse(raw: String): ModuleStatus {
             if (raw.isBlank()) {
-                return ModuleStatus(false, null, false, false, false)
+                // 探针没吐东西 = 没读到（不是"没装"）
+                return ModuleStatus(readable = false, installed = false, version = null,
+                    disabled = false, pendingReboot = false, hasProvisionScript = false)
             }
             val sections = mutableMapOf<String, StringBuilder>()
             var current: String? = null
@@ -156,6 +169,8 @@ data class ModuleStatus(
             }
             val prop = sections[MARK_PROP]?.toString()?.trim().orEmpty()
             return ModuleStatus(
+                // 标记齐了（脚本真跑完了）才算"读到了"
+                readable = MARK_END in sections || MARK_PROP in sections,
                 // 标记**总是**会被脚本打印出来，所以判"装没装"要看 module.prop 有没有内容
                 installed = prop.isNotEmpty(),
                 version = versionOf(prop),
@@ -191,15 +206,26 @@ object DeviceStatus {
         probe
     }
 
-    /** 读模块状态；只有拿到 root 才有意义（没 root 直接返回"未装 + 未知"）。 */
+    /**
+     * 读模块状态。**读不到就说读不到**（[ModuleStatus.readable] = false），
+     * 绝不把"没拿到 root / su 超时"说成"模块未装"—— 真机上就是这么误报的。
+     */
     suspend fun module(force: Boolean = false): ModuleStatus = withContext(Dispatchers.IO) {
-        if (!root(force).granted) return@withContext ModuleStatus(false, null, false, false, false)
-        val r = SuShell.exec(ModuleStatus.PROBE_SCRIPT, 8000L)
-        if (!r.ok && r.stdout.isBlank()) {
-            // su 拿不到输出（拒绝/超时）→ 不要断言"模块没装"，交给调用方按 root 状态解释
-            return@withContext ModuleStatus(false, null, false, false, false)
+        val r = root(force)
+        if (!r.granted) {
+            return@withContext ModuleStatus(
+                readable = false, installed = false, version = null,
+                disabled = false, pendingReboot = false, hasProvisionScript = false,
+            )
         }
-        ModuleStatus.parse(r.stdout)
+        val res = SuShell.exec(ModuleStatus.PROBE_SCRIPT, 8000L)
+        if (res.stdout.isBlank()) {
+            return@withContext ModuleStatus(
+                readable = false, installed = false, version = null,
+                disabled = false, pendingReboot = false, hasProvisionScript = false,
+            )
+        }
+        ModuleStatus.parse(res.stdout)
     }
 
     fun invalidate() {

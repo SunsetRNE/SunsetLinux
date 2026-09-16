@@ -709,9 +709,17 @@ private fun AboutDialog(ui: LauncherViewModel.UiState, onClose: () -> Unit, onEx
         title = { Text("关于 SunsetLinux") },
         text = {
             Column {
-                AboutLine("应用版本", "${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})")
+                // ★ "关于"要能真的回答"我装的是哪个包、什么版本、环境缺不缺东西" ——
+                //   以前只有 VERSION_NAME，四个内置组合的名字都看不出来（真机反馈）。
+                AboutLine("应用版本", BuildConfig.STANDARD_VERSION)
+                AboutLine("工程版本", "${BuildConfig.ENGINEERING_VERSION} (${BuildConfig.VERSION_CODE})")
+                AboutLine("构建时间", BuildConfig.BUILD_TIME)
+                AboutLine("git", BuildConfig.GIT_HASH)
+                AboutLine("本机包", "${BuildConfig.EMBED_LABEL} · ${BuildConfig.EMBED_VARIANT}")
+                AboutLine("内嵌内容", BuildConfig.EMBED_PARTS.ifBlank { "无（装环境要联网）" })
                 AboutLine("包名", "io.github.sunsetrne.sunsetlinux")
                 AboutLine("运行模式", ui.mode.modeLabel + if (ui.suAvailable) "（su 可用）" else "（无 su）")
+                AboutLine("模块", ui.moduleLabel ?: "检测中…")
                 AboutLine("环境根", DshPaths.linuxHome(context, ui.mode))
                 AboutLine("Linux 侧接口", "linuxctl / status JSON（§3.1 冻结）")
                 AboutLine("当前阶段", ui.stage)
@@ -719,6 +727,13 @@ private fun AboutDialog(ui: LauncherViewModel.UiState, onClose: () -> Unit, onEx
                 Text(
                     text = "本应用不解析 rootfs、不自行挂载：所有环境操作都只经 linuxctl。" +
                         "Root 模式下环境由 KernelSU 模块开机启动，与 App 生命周期解耦。",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = TextMuted,
+                )
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    text = "四个内置组合（最小版 / Ubuntu 版 / 免 root 版 / 完整离线版）是同一个 App：" +
+                        "换组合就覆盖安装另一个 APK，数据不丢，KernelSU 的 root 授权也不受影响。",
                     style = MaterialTheme.typography.labelSmall,
                     color = TextMuted,
                 )

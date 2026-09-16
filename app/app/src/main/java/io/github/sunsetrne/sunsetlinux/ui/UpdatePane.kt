@@ -45,6 +45,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import io.github.sunsetrne.sunsetlinux.ui.components.CapsuleReserve
 import io.github.sunsetrne.sunsetlinux.core.Channel
+import io.github.sunsetrne.sunsetlinux.BuildConfig
 import io.github.sunsetrne.sunsetlinux.core.ChannelReport
 import io.github.sunsetrne.sunsetlinux.core.DshRuntime
 import io.github.sunsetrne.sunsetlinux.core.DshStatus
@@ -55,6 +56,10 @@ import io.github.sunsetrne.sunsetlinux.core.DshDistTagStore
 import io.github.sunsetrne.sunsetlinux.core.LinuxCtl
 import io.github.sunsetrne.sunsetlinux.core.NpmDistTags
 import io.github.sunsetrne.sunsetlinux.core.Prefs
+import io.github.sunsetrne.sunsetlinux.core.DshPaths
+import io.github.sunsetrne.sunsetlinux.core.OfflineApplier
+import io.github.sunsetrne.sunsetlinux.core.OfflineBundle
+import io.github.sunsetrne.sunsetlinux.core.ProotRuntime
 import io.github.sunsetrne.sunsetlinux.core.ReportState
 import io.github.sunsetrne.sunsetlinux.core.TransportSupport
 import io.github.sunsetrne.sunsetlinux.core.UpdateApplier
@@ -109,6 +114,43 @@ class UpdatePaneState internal constructor(
         private set
     var enabledChannels by mutableStateOf(0)
         private set
+
+    /** 本机这个 APK 属于哪个内置组合（BuildConfig，构建时定死）。 */
+    val variantId: String = BuildConfig.EMBED_VARIANT
+    val variantLabel: String = BuildConfig.EMBED_LABEL
+    val variantParts: String = BuildConfig.EMBED_PARTS
+
+    /**
+     * 内嵌离线包的头（null = 本包没内嵌，或读不出来）。
+     *
+     * 只读头（不把几十 MB 读进内存）：界面只需要"内嵌了哪几层、多大"。
+     */
+    var embedded: OfflineBundle.Bundle? by mutableStateOf(null)
+        private set
+
+    /**
+     * 非 root 模式的**宿主脚本**是否已就位（`$LINUX_HOME/bin/linuxctl.sh` 等）。
+     *
+     * 这是"免 root 版能不能离线起步"的关键一环：内嵌包里只有 proot 二进制，
+     * 那四个脚本以前得用户手动铺（真机上没人会去铺）。现在 APK 自带 + 一键铺。
+     */
+    var prootReady by mutableStateOf(false)
+        private set
+
+    /**
+     * 频道检查的**结论**。
+     *
+     * 真机踩过：所有频道都检查失败（拿不到清单/验签不过）时，界面照样显示
+     * "无需更新的层" —— 用户以为"已是最新"，其实**根本没查成**。这里把"没查成"单列出来。
+     */
+    val channelFailure: String?
+        get() = when {
+            enabledChannels == 0 -> null
+            reports.isEmpty() -> null
+            reports.any { it.state == ReportState.OK } -> null
+            else -> reports.firstOrNull { it.state != ReportState.OK }?.reason
+                ?: "频道检查失败（原因未提供）"
+        }
 
     /**
      * 本机 zstd 可用性（null = 可用）；选择产物与界面提示都用它。
@@ -198,6 +240,14 @@ class UpdatePaneState internal constructor(
         scope.launch {
             val prefs = Prefs(context)
             enabledChannels = prefs.channels.count { it.enabled }
+            // 本机包内嵌了什么（只读资产头，几十毫秒；失败就当没内嵌）
+            if (embedded == null) {
+                embedded = withContext(Dispatchers.IO) { OfflineBundle.readHeaderOnly(context) }
+                val resolved = withContext(Dispatchers.IO) { DshRuntime.resolveMode(context, prefs).mode }
+                prootReady = withContext(Dispatchers.IO) {
+                    ProotRuntime.isReady(context, DshPaths.linuxHome(context, resolved))
+                }
+            }
             val channels: List<Channel> = prefs.channels.filter { it.enabled }
             // zstd 能力探测：磁盘 IO，放 IO 线程（结果有缓存，通常已被 ViewModel 预热）
             if (zstdReason == null) {
@@ -268,6 +318,58 @@ class UpdatePaneState internal constructor(
             }
             applying = false
             if (ok) notice = "更新完成，环境已由 linuxctl update 重启。"
+            check()
+        }
+    }
+
+    /**
+     * **从内嵌离线包安装**（零网络）。
+     *
+     * 与 [apply] 是同一套进度/日志/播报写法，唯一区别是产物来自 APK 里的
+     * `assets/offline-bundle.bin`，而不是频道 HTTP —— 所以断网、墙外、频道挂了都能装。
+     *
+     * @param only 只装这些部件（[OfflineApplier.keyOf] 的值）；空集 = 全装。
+     */
+    fun installOffline(only: Set<String> = emptySet()) {
+        val bundle = embedded ?: run {
+            notice = "本包没有内嵌离线包（这个组合不带环境），只能用频道安装。"
+            return
+        }
+        if (applying) return
+        applying = true
+        synchronized(logLock) { _logs.value = emptyList() }
+        scope.launch {
+            append(
+                if (only.isEmpty()) "=== 从内嵌离线包安装（全部部件）==="
+                else "=== 从内嵌离线包安装：${only.joinToString(", ")} ===",
+            )
+            append("变体 ${bundle.variant}，模式 ${mode.label}，全程不联网。")
+            var lastStage = ""
+            var lastPercent = -1
+            val outcome = withContext(Dispatchers.IO) {
+                OfflineApplier.apply(context, mode, bundle, only) { stage, done, total ->
+                    val percent = if (total > 0) ((done * 100) / total).toInt() else -1
+                    if (stage != lastStage || percent != lastPercent) {
+                        lastStage = stage
+                        lastPercent = percent
+                        append(
+                            if (total > 0) "$stage  ${formatBytes(done)} / ${formatBytes(total)}"
+                            else stage
+                        )
+                    }
+                }
+            }
+            append(outcome.log)
+            applying = false
+            notice = if (outcome.ok) {
+                if (outcome.installed.isEmpty()) {
+                    "内嵌离线包没有需要装的部件（本机版本已一致）。"
+                } else {
+                    "离线安装完成：${outcome.installed.joinToString(", ")}（由 linuxctl 落盘并重启环境）。"
+                }
+            } else {
+                "离线安装失败（卡在：${outcome.failedStage?.label ?: "未知阶段"}），环境未被改动到最后一步。"
+            }
             check()
         }
     }
@@ -445,6 +547,136 @@ fun UpdatePane(
 
             Spacer(Modifier.height(12.dp))
 
+            // ── 本机包（四个内置组合里的哪一个、内嵌了什么）────────────────────
+            DshCard(Modifier.fillMaxWidth()) {
+                Column(Modifier.fillMaxWidth()) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        SectionLabel("本机包")
+                        Spacer(Modifier.width(8.dp))
+                        Pill(state.variantLabel, color = Accent, filled = true)
+                    }
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        text = "内置组合 ${state.variantId}（内嵌：${state.variantParts.ifBlank { "无" }}）" +
+                            "。四个组合是**同一个 App**（同包名/同签名），换组合=覆盖安装，数据不丢。",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = TextMuted,
+                    )
+                    Spacer(Modifier.height(6.dp))
+                    val emb = state.embedded
+                    Text(
+                        text = if (emb == null) {
+                            "本包没有内嵌离线包：装环境需要联网（「更新」页从频道装层）。"
+                        } else {
+                            "内嵌离线包：变体 ${emb.variant}，" +
+                                emb.parts.joinToString("、") { it.human } +
+                                "（${formatBytes(emb.size)}）"
+                        },
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (emb == null) WarnTone else StateRunning,
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        text = "构建：${BuildConfig.STANDARD_VERSION}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = TextMuted,
+                    )
+
+                    // ── 内嵌包对本机意味着什么 + 一键离线安装 ──────────────────
+                    // 用户视角最重要的一句是"这个包里的东西，我本机还差哪些"；
+                    // 只说"内嵌了 base/runtime/dsh"没用 —— 那三层可能早就装好了。
+                    if (emb != null) {
+                        val localVersions = state.status?.layers
+                            ?.associate { it.id to it.version }
+                            .orEmpty()
+                        val plan = remember(emb, state.status, state.prootReady) {
+                            OfflineApplier.plan(localVersions, emb, state.prootReady)
+                        }
+                        val missing = plan.filter { it.needed }.map { it.key }
+                        Spacer(Modifier.height(10.dp))
+                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            plan.forEach { item ->
+                                InfoRow(
+                                    label = item.key,
+                                    value = when {
+                                        !item.part.isLayer && !item.needed ->
+                                            "已就位（proot 宿主脚本 + 二进制）"
+                                        !item.part.isLayer ->
+                                            "未铺 → 装 ${item.part.version ?: item.part.file}"
+                                        item.localVersion == null ->
+                                            "本机未装 → 装 ${item.part.version ?: "?"}"
+                                        item.needed ->
+                                            "本机 ${item.localVersion} → 装 ${item.part.version ?: "?"}"
+                                        else ->
+                                            "已是最新（${item.localVersion}）"
+                                    },
+                                )
+                            }
+                        }
+                        Spacer(Modifier.height(10.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Button(
+                                onClick = { state.installOffline() },
+                                enabled = !state.applying && missing.isNotEmpty(),
+                                modifier = Modifier.weight(1f),
+                            ) {
+                                Text(
+                                    when {
+                                        state.applying -> "安装中…"
+                                        missing.isEmpty() -> "内嵌包已全部就位"
+                                        else -> "离线安装（${missing.size} 项）"
+                                    },
+                                )
+                            }
+                            if (missing.isNotEmpty()) {
+                                OutlinedButton(
+                                    onClick = { state.installOffline(missing.toSet()) },
+                                    enabled = !state.applying,
+                                ) { Text("只装缺的") }
+                            }
+                        }
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            text = "离线安装走的是**和频道更新完全相同的落盘路径**" +
+                                "（校验 → 解压 → 镜像校验 → `linuxctl update --version`），" +
+                                "只是产物来自 APK 里的 assets，全程不联网。" +
+                                if (state.mode == EnvMode.ROOT) {
+                                    "root 模式会跳过 proot 部件（那个模式用 chroot，不需要它）。"
+                                } else {
+                                    "非 root 模式会**先铺 proot 运行时与宿主脚本**，再装层。"
+                                },
+                            style = MaterialTheme.typography.labelSmall,
+                            color = TextMuted,
+                        )
+                        if (missing.isNotEmpty() && state.notice == null) {
+                            Spacer(Modifier.height(6.dp))
+                            NoticeLine("本机还缺 ${missing.size} 个部件，断网也能装。", Accent)
+                        }
+                    }
+                }
+            }
+
+            // ── 频道状态（每一条都要说清成功还是为什么失败）────────────────────
+            if (state.reports.isNotEmpty()) {
+                Spacer(Modifier.height(12.dp))
+                DshCard(Modifier.fillMaxWidth()) {
+                    Column(Modifier.fillMaxWidth()) {
+                        SectionLabel("频道检查")
+                        Spacer(Modifier.height(8.dp))
+                        state.reports.forEach { r ->
+                            val ok = r.state == ReportState.OK
+                            InfoRow(
+                                label = r.channel.name.ifBlank { r.channel.url },
+                                value = if (ok) "正常" else "${r.state}：${r.reason ?: "原因未提供"}",
+                                mono = !ok,
+                            )
+                        }
+                    }
+                }
+            }
+
+            Spacer(Modifier.height(12.dp))
+
             DshCard(Modifier.fillMaxWidth(), highlighted = state.updates.isNotEmpty()) {
                 Column(Modifier.fillMaxWidth()) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -469,8 +701,25 @@ fun UpdatePane(
                             }
                         }
 
+                        // ★ 先判"检查本身失败了没有"：失败时说"无需更新"是撒谎（真机踩过）
+                        state.channelFailure != null -> {
+                            NoticeLine("频道检查失败：${state.channelFailure}", Danger)
+                            Spacer(Modifier.height(8.dp))
+                            Text(
+                                text = "这**不代表已是最新**：清单没拿到/验签没过时无法判断版本。" +
+                                    "先看下面的每频道状态，再点右上角重试或去频道管理。",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = TextSecondary,
+                            )
+                            Spacer(Modifier.height(8.dp))
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                OutlinedButton(onClick = { state.check() }, enabled = !state.checking) { Text("重试") }
+                                OutlinedButton(onClick = onOpenSettings) { Text("频道管理") }
+                            }
+                        }
+
                         state.updates.isEmpty() -> Text(
-                            text = if (state.checked) "无需更新的层。" else "点右上角刷新开始检查。",
+                            text = if (state.checked) "已是最新：所有层与频道清单一致。" else "点右上角刷新开始检查。",
                             style = MaterialTheme.typography.bodySmall,
                             color = TextSecondary,
                         )

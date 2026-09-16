@@ -139,6 +139,8 @@ fun WelcomeScreen(
                             text = state.module?.label ?: "模块检测中…",
                             color = when {
                                 state.module == null -> TextMuted
+                                // 读不到（su 没拿到）用中性色：把"不知道"画成"危险"会误导用户
+                                !state.module!!.readable -> TextMuted
                                 !state.module!!.installed -> Danger
                                 state.module!!.disabled || state.module!!.pendingReboot -> WarnTone
                                 else -> StateRunning
@@ -467,9 +469,9 @@ private fun StepBranch(state: WelcomeState, onOpenProvision: () -> Unit) {
             Column(Modifier.fillMaxWidth()) {
                 SectionLabel("第 1 步：铺 proot 运行时")
                 Spacer(Modifier.height(8.dp))
-                NumberedLine(1, "拿到运行时包：dist/sunsetlinux-proot-runtime.tar.gz（或 proot-bundle-arm64.tar.gz）")
-                NumberedLine(2, "解到 App 私有目录：files/sunsetlinux/（即 \$APP_FILES/sunsetlinux）")
-                NumberedLine(3, "确保 files/sunsetlinux/bin/linuxctl 存在且可执行")
+                NumberedLine(1, "**这个 APK 自带**宿主脚本与 proot 二进制（assets/proot-runtime + 内嵌包）")
+                NumberedLine(2, "到「更新 → 本机包 → 离线安装」点一下，它会铺到 files/sunsetlinux/（即 \$APP_FILES/sunsetlinux）")
+                NumberedLine(3, "铺完 files/sunsetlinux/bin/linuxctl 必须存在且可执行（页面上会写『契约路径已就位』）")
                 Spacer(Modifier.height(10.dp))
                 Text(
                     text = "proot 模式的 linuxctl 是**宿主侧脚本**：它自己会判断是否被 ptrace 包裹，" +
