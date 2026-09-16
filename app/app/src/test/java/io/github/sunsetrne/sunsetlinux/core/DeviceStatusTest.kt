@@ -177,4 +177,26 @@ class DeviceStatusTest {
         assertTrue("并说明已启用：${m.label}", m.label.contains("已启用"))
         org.junit.Assert.assertNull("一切正常时不该再唠叨", m.hint)
     }
+
+    @Test
+    fun `真机 module_prop 原文（无 v 前缀）要解析成 1_0_9`() {
+        // 这段是从真机 /data/adb/modules/sunsetlinux/module.prop 原样抄来的：
+        // 注意它是 `version=1.0.9`（**没有** v 前缀），而镜像里的其它地方可能是 v1.0.9。
+        val prop = """
+            id=sunsetlinux
+            name=SunsetLinux — 原生 DSH 运行环境
+            version=1.0.9
+            versionCode=10009
+            author=sunsetlinux
+        """.trimIndent()
+        assertEquals("1.0.9", ModuleStatus.versionOf(prop))
+        val m = ModuleStatus.parse(
+            "###PROP\n" + prop + "\n###DISABLE\n0\n###PENDING\n0\n###PROV\n1\n###END\n",
+        )
+        assertEquals(true, m.readable)
+        assertEquals(true, m.installed)
+        assertEquals(false, m.disabled)
+        assertEquals(false, m.pendingReboot)
+        assertEquals("模块 1.0.9（已启用）", m.label)
+    }
 }
