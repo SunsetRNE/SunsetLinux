@@ -1,23 +1,23 @@
 {
   "schema": 1,
   "channel": "stable",
-  "built_at": "2026-09-16T17:03:59Z",
-  "commit": "96b8377b68f8f189e6ad52bd90e8e55d4faa2230",
-  "run_number": 15,
-  "app_version": "0.3.2",
-  "github_release_tag": "v0.3.2",
-  "module_version": "1.0.19",
+  "built_at": "2026-09-16T18:03:55Z",
+  "commit": "e886f3d6fa52e79e40d2560cad84000596846ca8",
+  "run_number": 17,
+  "app_version": "0.3.3",
+  "github_release_tag": "v0.3.3",
+  "module_version": "1.0.20",
   "variants": [
     {
       "id": "root-minimal",
       "label": "Root 最小版",
       "embed": [],
       "note": "不含任何环境；装完用「更新」页从频道装层。给「有 Wi-Fi、想要最小 APK」的人",
-      "apk": "SunsetLinux-0.3.2-root-minimal-debug.apk",
-      "apk_url": "https://github.com/SunsetRNE/SunsetLinux/releases/download/v0.3.2/SunsetLinux-0.3.2-root-minimal-debug.apk",
-      "apk_size": 13018210,
-      "apk_sha256": "2c76d84ac2f0624bfa437778a2aacaa850be69b78b207db0702098a4c8bf39b5",
-      "bundle": "SunsetLinux-0.3.2-root-minimal.bin"
+      "apk": "SunsetLinux-0.3.3-root-minimal-debug.apk",
+      "apk_url": "https://github.com/SunsetRNE/SunsetLinux/releases/download/v0.3.3/SunsetLinux-0.3.3-root-minimal-debug.apk",
+      "apk_size": 13021270,
+      "apk_sha256": "38102b77ae57455e91728343e6db73217745ae8c28760761e51f56278ab0b348",
+      "bundle": "SunsetLinux-0.3.3-root-minimal.bin"
     },
     {
       "id": "root-base",
@@ -27,11 +27,11 @@
         "runtime"
       ],
       "note": "内置 Ubuntu 基础环境；DSH 从频道装（想自己控制 DSH 版本的人选这档）",
-      "apk": "SunsetLinux-0.3.2-root-base-debug.apk",
-      "apk_url": "https://github.com/SunsetRNE/SunsetLinux/releases/download/v0.3.2/SunsetLinux-0.3.2-root-base-debug.apk",
-      "apk_size": 81234977,
-      "apk_sha256": "f12731eb67306f2c233b66f66b22c78b725670ccea9a971fd52a64e1eadc834e",
-      "bundle": "SunsetLinux-0.3.2-root-base.bin"
+      "apk": "SunsetLinux-0.3.3-root-base-debug.apk",
+      "apk_url": "https://github.com/SunsetRNE/SunsetLinux/releases/download/v0.3.3/SunsetLinux-0.3.3-root-base-debug.apk",
+      "apk_size": 81238017,
+      "apk_sha256": "3a4daff8bfc339e581df7e5379eb739dccfe784e8b0402d736f3895b9f8f47de",
+      "bundle": "SunsetLinux-0.3.3-root-base.bin"
     },
     {
       "id": "root-full",
@@ -42,11 +42,11 @@
         "dsh"
       ],
       "note": "内嵌 Ubuntu + DSH：装完离线即可部署（root 模式不需要 proot 运行时）",
-      "apk": "SunsetLinux-0.3.2-root-full-debug.apk",
-      "apk_url": "https://github.com/SunsetRNE/SunsetLinux/releases/download/v0.3.2/SunsetLinux-0.3.2-root-full-debug.apk",
-      "apk_size": 113988289,
-      "apk_sha256": "11e23b89d2b8badf31d670f866c0bbc51c0edca53aa746a6434e0f3291d8bf5b",
-      "bundle": "SunsetLinux-0.3.2-root-full.bin"
+      "apk": "SunsetLinux-0.3.3-root-full-debug.apk",
+      "apk_url": "https://github.com/SunsetRNE/SunsetLinux/releases/download/v0.3.3/SunsetLinux-0.3.3-root-full-debug.apk",
+      "apk_size": 113991349,
+      "apk_sha256": "1b8a1264eb25eb1a1ae7b4703f2b2fd1af8fa9d07df8bfce4de84d87a8118058",
+      "bundle": "SunsetLinux-0.3.3-root-full.bin"
     },
     {
       "id": "proot-minimal",
@@ -55,11 +55,11 @@
         "proot"
       ],
       "note": "只带 proot 运行时（免 root 必需件）；Ubuntu 与 dsh 走频道/离线包，APK 最小",
-      "apk": "SunsetLinux-0.3.2-proot-minimal-debug.apk",
-      "apk_url": "https://github.com/SunsetRNE/SunsetLinux/releases/download/v0.3.2/SunsetLinux-0.3.2-proot-minimal-debug.apk",
-      "apk_size": 14142874,
-      "apk_sha256": "5996aa7ac62f233eb4b3b24330be0e6813432f9b3e3974979557cbd361683233",
-      "bundle": "SunsetLinux-0.3.2-proot-minimal.bin"
+      "apk": "SunsetLinux-0.3.3-proot-minimal-debug.apk",
+      "apk_url": "https://github.com/SunsetRNE/SunsetLinux/releases/download/v0.3.3/SunsetLinux-0.3.3-proot-minimal-debug.apk",
+      "apk_size": 14142962,
+      "apk_sha256": "f93641e53804d53fbf845b5b02f824aa1b1d47380d9fc391b3bac1a26f785d87",
+      "bundle": "SunsetLinux-0.3.3-proot-minimal.bin"
     },
     {
       "id": "proot-base",
@@ -70,11 +70,11 @@
         "proot"
       ],
       "note": "内嵌 Ubuntu + proot：能起环境，DSH 从频道装",
-      "apk": "SunsetLinux-0.3.2-proot-base-debug.apk",
-      "apk_url": "https://github.com/SunsetRNE/SunsetLinux/releases/download/v0.3.2/SunsetLinux-0.3.2-proot-base-debug.apk",
-      "apk_size": 82359162,
-      "apk_sha256": "cce63e6bdd1563d20fa46bc5ff45a0e75fa83e0931f4d13676225d10d9d38f05",
-      "bundle": "SunsetLinux-0.3.2-proot-base.bin"
+      "apk": "SunsetLinux-0.3.3-proot-base-debug.apk",
+      "apk_url": "https://github.com/SunsetRNE/SunsetLinux/releases/download/v0.3.3/SunsetLinux-0.3.3-proot-base-debug.apk",
+      "apk_size": 82359262,
+      "apk_sha256": "bb31febd4b7cc0ca3c4f0250b17eb03740f857249b5005e1507a897e649c0c5c",
+      "bundle": "SunsetLinux-0.3.3-proot-base.bin"
     },
     {
       "id": "proot-full",
@@ -86,78 +86,78 @@
         "dsh"
       ],
       "note": "内嵌 Ubuntu + proot + DSH：免 root 装完零下载即可起步",
-      "apk": "SunsetLinux-0.3.2-proot-full-debug.apk",
-      "apk_url": "https://github.com/SunsetRNE/SunsetLinux/releases/download/v0.3.2/SunsetLinux-0.3.2-proot-full-debug.apk",
-      "apk_size": 115112526,
-      "apk_sha256": "020ffdc69d251b46d5380b56a449323323828e6608edfb43317aac2f8f53aa50",
-      "bundle": "SunsetLinux-0.3.2-proot-full.bin"
+      "apk": "SunsetLinux-0.3.3-proot-full-debug.apk",
+      "apk_url": "https://github.com/SunsetRNE/SunsetLinux/releases/download/v0.3.3/SunsetLinux-0.3.3-proot-full-debug.apk",
+      "apk_size": 115112622,
+      "apk_sha256": "247b6bf7c9e1a6e6b194c4a5a45a49ebdceb46a2f335c83ad9f3151b39d288a7",
+      "bundle": "SunsetLinux-0.3.3-proot-full.bin"
     }
   ],
   "files": [
     {
-      "name": "SunsetLinux-0.3.2-proot-base-debug.apk",
-      "size": 82359162,
-      "sha256": "cce63e6bdd1563d20fa46bc5ff45a0e75fa83e0931f4d13676225d10d9d38f05"
+      "name": "SunsetLinux-0.3.3-proot-base-debug.apk",
+      "size": 82359262,
+      "sha256": "bb31febd4b7cc0ca3c4f0250b17eb03740f857249b5005e1507a897e649c0c5c"
     },
     {
-      "name": "SunsetLinux-0.3.2-proot-base.bin",
+      "name": "SunsetLinux-0.3.3-proot-base.bin",
       "size": 69205422,
-      "sha256": "11a60670a252c77d464ac1d9f8fe1cdc09a000ea4ca6ea021b8bbf45059c9d5f"
+      "sha256": "6f59d184ba47df149abbba470ebc5720d92a8a0404809075b2103a6703a17669"
     },
     {
-      "name": "SunsetLinux-0.3.2-proot-full-debug.apk",
-      "size": 115112526,
-      "sha256": "020ffdc69d251b46d5380b56a449323323828e6608edfb43317aac2f8f53aa50"
+      "name": "SunsetLinux-0.3.3-proot-full-debug.apk",
+      "size": 115112622,
+      "sha256": "247b6bf7c9e1a6e6b194c4a5a45a49ebdceb46a2f335c83ad9f3151b39d288a7"
     },
     {
-      "name": "SunsetLinux-0.3.2-proot-full.bin",
+      "name": "SunsetLinux-0.3.3-proot-full.bin",
       "size": 101958832,
-      "sha256": "0ac48559005562de3692d54ae4ec8856d45e23a840d7b5e1192843ecd9855d06"
+      "sha256": "487f40ee308e9607fe07d8297c1d3cd22c6dbc6738809d4e03fc81e01c6ac323"
     },
     {
-      "name": "SunsetLinux-0.3.2-proot-minimal-debug.apk",
-      "size": 14142874,
-      "sha256": "5996aa7ac62f233eb4b3b24330be0e6813432f9b3e3974979557cbd361683233"
+      "name": "SunsetLinux-0.3.3-proot-minimal-debug.apk",
+      "size": 14142962,
+      "sha256": "f93641e53804d53fbf845b5b02f824aa1b1d47380d9fc391b3bac1a26f785d87"
     },
     {
-      "name": "SunsetLinux-0.3.2-proot-minimal.bin",
+      "name": "SunsetLinux-0.3.3-proot-minimal.bin",
       "size": 989224,
-      "sha256": "5f9125f2bc8b39604d0051e07cd407d4921d1b955ab0d3f789591522630fec74"
+      "sha256": "750af680792a37ba0bf64f8317671b813266459c09e334c85b5ace663e06b410"
     },
     {
-      "name": "SunsetLinux-0.3.2-root-base-debug.apk",
-      "size": 81234977,
-      "sha256": "f12731eb67306f2c233b66f66b22c78b725670ccea9a971fd52a64e1eadc834e"
+      "name": "SunsetLinux-0.3.3-root-base-debug.apk",
+      "size": 81238017,
+      "sha256": "3a4daff8bfc339e581df7e5379eb739dccfe784e8b0402d736f3895b9f8f47de"
     },
     {
-      "name": "SunsetLinux-0.3.2-root-base.bin",
+      "name": "SunsetLinux-0.3.3-root-base.bin",
       "size": 68216567,
-      "sha256": "01eb4095f12b5667ae80c86d16c92c270ffe2262e34c98b894cc596297620044"
+      "sha256": "08e2ae2310e3ce32468bd7a73470211c378708788bd222b97f91aa6a175502ed"
     },
     {
-      "name": "SunsetLinux-0.3.2-root-full-debug.apk",
-      "size": 113988289,
-      "sha256": "11e23b89d2b8badf31d670f866c0bbc51c0edca53aa746a6434e0f3291d8bf5b"
+      "name": "SunsetLinux-0.3.3-root-full-debug.apk",
+      "size": 113991349,
+      "sha256": "1b8a1264eb25eb1a1ae7b4703f2b2fd1af8fa9d07df8bfce4de84d87a8118058"
     },
     {
-      "name": "SunsetLinux-0.3.2-root-full.bin",
+      "name": "SunsetLinux-0.3.3-root-full.bin",
       "size": 100969962,
-      "sha256": "198de08b81d9f9b9ca03b7a56623e4cd77e6a4802a8aee8fc81a1f8613a2d50a"
+      "sha256": "31fdd827036f1b26eb0facff859feab88f74ddadfa3f4ea6a7deb1c0045102f8"
     },
     {
-      "name": "SunsetLinux-0.3.2-root-minimal-debug.apk",
-      "size": 13018210,
-      "sha256": "2c76d84ac2f0624bfa437778a2aacaa850be69b78b207db0702098a4c8bf39b5"
+      "name": "SunsetLinux-0.3.3-root-minimal-debug.apk",
+      "size": 13021270,
+      "sha256": "38102b77ae57455e91728343e6db73217745ae8c28760761e51f56278ab0b348"
     },
     {
-      "name": "sunsetlinux-module-1.0.19.zip",
-      "size": 217367,
-      "sha256": "966cf7874a22501b8b3bc1b41b1c2f006d29a7ae186aa453d23fb3db0954db7e"
+      "name": "sunsetlinux-module-1.0.20.zip",
+      "size": 220236,
+      "sha256": "68774255c36e8e2b96e4cbe3b3d6715612789b12d82da0fcd8fb3c520a8a224e"
     },
     {
-      "name": "sunsetlinux-module-1.0.19.zip.sha256",
+      "name": "sunsetlinux-module-1.0.20.zip.sha256",
       "size": 143,
-      "sha256": "5a716cc0735db1513aefc41372316c15972ccaab0ca9e2acfbde433082e86256"
+      "sha256": "df93ce494dd062c8d57c7dd1cbeeedebfae9d4d2dabcb8b29c91406a1fc2f67a"
     }
   ]
 }
