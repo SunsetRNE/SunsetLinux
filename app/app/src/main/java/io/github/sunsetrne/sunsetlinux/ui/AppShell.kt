@@ -69,6 +69,8 @@ import androidx.compose.ui.unit.sp
 import io.github.sunsetrne.sunsetlinux.ui.components.CapsuleReserve
 import io.github.sunsetrne.sunsetlinux.BuildConfig
 import io.github.sunsetrne.sunsetlinux.core.DshPaths
+import io.github.sunsetrne.sunsetlinux.core.DshPin
+import io.github.sunsetrne.sunsetlinux.core.Edition
 import io.github.sunsetrne.sunsetlinux.core.EnvMode
 import io.github.sunsetrne.sunsetlinux.core.EnvState
 import io.github.sunsetrne.sunsetlinux.ui.components.Pill
@@ -717,11 +719,13 @@ private fun AboutDialog(ui: LauncherViewModel.UiState, onClose: () -> Unit, onEx
                 AboutLine("git", BuildConfig.GIT_HASH)
                 AboutLine("本机包", "${BuildConfig.EMBED_LABEL} · ${BuildConfig.EMBED_VARIANT}")
                 AboutLine("内嵌内容", BuildConfig.EMBED_PARTS.ifBlank { "无（装环境要联网）" })
-                AboutLine("包名", "io.github.sunsetrne.sunsetlinux")
+                AboutLine("本版", "${Edition.label}（${Edition.applicationId}）")
+                AboutLine("包名", context.packageName)
                 AboutLine("运行模式", ui.mode.modeLabel + if (ui.suAvailable) "（su 可用）" else "（无 su）")
-                AboutLine("模块", ui.moduleLabel ?: "检测中…")
+                if (Edition.needsKernelSuModule) AboutLine("模块", ui.moduleLabel ?: "检测中…")
                 // ★ 免 root 运行时的归属（proroot 许可第 5 条要求 attribution）与实况
-                AboutLine(
+                //   —— 只有免 root 版带 proroot/proot
+                if (!Edition.isRoot) AboutLine(
                     "免 root 运行时",
                     buildString {
                         append("proroot ${BuildConfig.PROROOT_VERSION}（首选）+ proot（降级）")
@@ -735,15 +739,30 @@ private fun AboutDialog(ui: LauncherViewModel.UiState, onClose: () -> Unit, onEx
                 )
                 AboutLine("环境根", DshPaths.linuxHome(context, ui.mode))
                 AboutLine("层模式", ui.status?.layerMode ?: "—（未启动）")
+                // 内置 DSH（随 APK 冻结）与运行时 DSH（真正在跑的）—— 两者不同不是错误，
+                // 但要让人一眼看到"现在跑的是哪一个"（详情在「更新」页，含一键回滚）。
+                runCatching { DshPin.of(context, ui.status?.layer("dsh")?.version) }.getOrNull()?.let { pin ->
+                    AboutLine("DSH（内置/运行时）", "${pin.embedded ?: "无"} / ${pin.runtime ?: "无"} · ${pin.label}")
+                }
                 AboutLine("Linux 侧接口", "linuxctl / status JSON（§3.1 冻结）")
                 AboutLine("当前阶段", ui.stage)
                 Spacer(Modifier.height(10.dp))
                 // ★ 模块更新要"实际可用"：以前只能看到版本号，下一步得自己去 GitHub 找 zip、
                 //   再打开 KernelSU 管理器手装。这里直接下载 + ksud 刷入（重启由用户决定）。
-                ModuleUpdateCard(
-                    installedVersion = ui.moduleVersion,
-                    installedReadable = ui.moduleReadable,
-                )
+                // ⚠️ 只有 **Root 版**显示 —— 免 root 版与 KernelSU 模块无关（装了也没用）。
+                if (Edition.needsKernelSuModule) {
+                    ModuleUpdateCard(
+                        installedVersion = ui.moduleVersion,
+                        installedReadable = ui.moduleReadable,
+                    )
+                } else {
+                    Text(
+                        text = "免 root 版不使用 KernelSU 模块：环境靠 App 内置的宿主脚本 + rootfs（proot/proroot），" +
+                            "所以这里没有模块更新入口。",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = TextMuted,
+                    )
+                }
                 Spacer(Modifier.height(10.dp))
                 Text(
                     text = "本应用不解析 rootfs、不自行挂载：所有环境操作都只经 linuxctl。" +

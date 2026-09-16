@@ -66,6 +66,7 @@ import io.github.sunsetrne.sunsetlinux.core.Channel
 import io.github.sunsetrne.sunsetlinux.core.DshRuntime
 import io.github.sunsetrne.sunsetlinux.core.DshStatus
 import io.github.sunsetrne.sunsetlinux.core.EnvFiles
+import io.github.sunsetrne.sunsetlinux.core.Edition
 import io.github.sunsetrne.sunsetlinux.core.EnvMode
 import io.github.sunsetrne.sunsetlinux.core.Prefs
 import io.github.sunsetrne.sunsetlinux.ui.components.DshCard
@@ -393,20 +394,37 @@ private fun SettingsScreen(
                     .verticalScroll(scrollState)
                     .padding(horizontal = 16.dp),
             ) {
-                // 运行模式
+                // 运行模式：**单模式版**（0.3.0 起两个 App 各自锁死一条路）
+                //   —— 不再提供"切换模式"：Root 版只走真 chroot，免 root 版只走 proot/proroot，
+                //   想换一条路就装另一个 App（两个包名不同，可以同时装）。
                 DshCard(Modifier.fillMaxWidth()) {
                     Column(Modifier.fillMaxWidth()) {
-                        SectionLabel("运行模式")
+                        SectionLabel("运行模式（本版固定）")
                         Spacer(Modifier.height(10.dp))
-                        ModeRow("自动（有 su 用 root，否则 proot）", modeOverride == null) { onPickMode(null) }
-                        ModeRow("强制 root 模式", modeOverride == EnvMode.ROOT, enabled = suAvailable == true) {
-                            onPickMode(EnvMode.ROOT)
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Pill(Edition.labelShort, color = Accent, filled = true)
+                            Spacer(Modifier.width(8.dp))
+                            Pill(effectiveMode.modeLabel, color = StateRunning, filled = true)
+                            if (Edition.needsSu) {
+                                Spacer(Modifier.width(8.dp))
+                                Pill(
+                                    text = if (suAvailable == true) "su 可用" else "无 su（去授权）",
+                                    color = if (suAvailable == true) StateRunning else WarnTone,
+                                    filled = true,
+                                )
+                            }
                         }
-                        ModeRow("强制 proot 模式", modeOverride == EnvMode.PROOT) { onPickMode(EnvMode.PROOT) }
                         Spacer(Modifier.height(8.dp))
                         Text(
-                            text = "当前生效：${effectiveMode.modeLabel} · " +
-                                (if (suAvailable == true) "su 可用" else "su 不可用"),
+                            text = if (Edition.isRoot) {
+                                "本版是 **Root 版**：" + Edition.applicationId + "，只走真 root + chroot 那条路" +
+                                    "（环境由 KernelSU 模块开机启动，与 App 生命周期解耦）。" +
+                                    "设备没有 root 就装「免 root 版」，两个 App 可以同时安装。"
+                            } else {
+                                "本版是 **免 root 版**：" + Edition.applicationId + "，不需要 root、不需要刷机" +
+                                    "（环境铺在 App 私有目录，随 App 进程存活）。" +
+                                    "设备能 root 的话，Root 版的体验更好，两个 App 可以同时安装。"
+                            },
                             style = MaterialTheme.typography.labelSmall,
                             color = TextMuted,
                         )

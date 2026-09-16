@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Root 版的**应用名**。
+  两个 edition 是两个可共存的 App（包名不同），桌面图标上必须一眼分得清 ——
+  否则用户在 KernelSU 里授权时会点错（授权是**按包名**记的）。
+-->
+<resources>
+    <string name="app_name">SunsetLinux Root</string>
+</resources>

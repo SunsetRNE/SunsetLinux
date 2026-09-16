@@ -1,6 +1,8 @@
 package io.github.sunsetrne.sunsetlinux
 
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
@@ -86,9 +88,48 @@ class SigningContractTest {
             "app/build.gradle.kts 必须从 version.properties 读版本",
             buildText.contains("version.properties") && buildText.contains("engineeringVersionCode"),
         )
-        // 四个内置组合都要建得出来
-        for (id in listOf("minimal", "ubuntu", "ubuntu-proot", "ubuntu-proot-dsh")) {
-            assertTrue("构建脚本里没有组合 $id", buildText.contains("\"$id\""))
+        // ★ 0.3.0：内置矩阵（两个 App × 若干档位）的**单一事实源**是
+        //   tools/offline-bundle/variants.json —— Gradle 的 flavor、offline-bundle 工具、
+        //   pipeline 的编译矩阵、下载页全都读它。所以这里断言的是"构建脚本真的在读它"
+        //   （而不是把 id 抄一份），以及**身份约束**（包名不能改错 —— 改错会让用户装成
+        //   另一个 App，KernelSU 授权与 App 数据全都对不上）。
+        val variantsJson = File(repo, "tools/offline-bundle/variants.json")
+        assertTrue("找不到 ${variantsJson.path}（内置矩阵的唯一事实源）", variantsJson.isFile)
+        assertTrue(
+            "build.gradle.kts 必须从 variants.json 读内置矩阵（否则就是又抄了一份，会漂移）",
+            buildText.contains("offline-bundle/variants.json") && buildText.contains("variantSpecs"),
+        )
+        assertTrue(
+            "flavor 维度必须是 edition(两个 App) + embed(内置档位)",
+            buildText.contains("flavorDimensions += listOf(\"edition\", \"embed\")"),
+        )
+        val spec = org.json.JSONObject(variantsJson.readText())
+        val editions = spec.getJSONObject("editions")
+        val variants = spec.getJSONObject("variants")
+        val tiers = spec.getJSONObject("tiers")
+        assertEquals("必须是两个 App（root / proot）", 2, editions.length())
+        assertTrue("editions 里必须有 root 与 proot", editions.has("root") && editions.has("proot"))
+        assertTrue("档位至少三档（minimal/base/full），矩阵还要能继续长", tiers.length() >= 3)
+        val appIds = mutableListOf<String>()
+        for (ed in editions.keys()) {
+            val o = editions.getJSONObject(ed)
+            val id = o.getString("application_id")
+            appIds += id
+            assertTrue("包名必须以 io.github.sunsetrne.sunsetlinux. 开头（$ed=$id）",
+                id.startsWith("io.github.sunsetrne.sunsetlinux."))
+            assertFalse("不能再用拆分前的包名（会和已装的旧 App 撞车）：$id",
+                id == "io.github.sunsetrne.sunsetlinux")
+            assertTrue("edition $ed 必须声明 mode（root/proot）", o.getString("mode") in listOf("root", "proot"))
+        }
+        assertEquals("两个 App 的包名必须不同（否则装一个覆盖另一个）", appIds.size, appIds.distinct().size)
+        for (id in variants.keys()) {
+            val v = variants.getJSONObject(id)
+            val ed = v.getString("edition")
+            val tier = v.getString("tier")
+            assertTrue("variants.json 里的 $id 指向未知 edition：$ed", editions.has(ed))
+            assertTrue("variants.json 里的 $id 指向未知 tier：$tier", tiers.has(tier))
+            assertEquals("组合 id 必须等于 <edition>-<tier>（$id）", "$ed-$tier", id)
+            assertTrue("$id 缺 embed 数组", v.has("embed"))
         }
         // APK 名必须带组合名，否则下载下来全是 app-debug.apk，用户分不清哪个是哪个
         assertTrue(

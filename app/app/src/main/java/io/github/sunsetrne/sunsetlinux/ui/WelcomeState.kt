@@ -13,11 +13,13 @@ import io.github.sunsetrne.sunsetlinux.core.ModuleInstaller
 import io.github.sunsetrne.sunsetlinux.core.ModuleStatus
 import io.github.sunsetrne.sunsetlinux.BuildConfig
 import io.github.sunsetrne.sunsetlinux.core.DshPaths
+import io.github.sunsetrne.sunsetlinux.core.Edition
 import io.github.sunsetrne.sunsetlinux.core.OfflineApplier
 import io.github.sunsetrne.sunsetlinux.core.OfflineBundle
 import io.github.sunsetrne.sunsetlinux.core.ProotRuntime
 import io.github.sunsetrne.sunsetlinux.core.ProotSetup
 import io.github.sunsetrne.sunsetlinux.core.RootProbe
+import io.github.sunsetrne.sunsetlinux.core.RootState
 import io.github.sunsetrne.sunsetlinux.core.EnvMode
 import io.github.sunsetrne.sunsetlinux.core.LinuxCtl
 import io.github.sunsetrne.sunsetlinux.core.Prefs
@@ -51,8 +53,12 @@ class WelcomeState internal constructor(
     var step by mutableStateOf(WelcomeStep.MODE)
         private set
 
-    /** 用户选择的模式（默认沿用已有设置；首次安装时默认 root=推荐）。 */
-    var mode by mutableStateOf(prefs.modeOverride ?: EnvMode.ROOT)
+    /**
+     * 本 App 的模式 —— 0.3.0 起由 **edition 锁定**（Root 版 / 免 root 版是两个可共存的 App），
+     * 不再是"用户选项"。界面上因此没有模式选择（第 34 条那套"先选模式再分叉"的引导
+     * 正是误导用户的根源）。
+     */
+    var mode by mutableStateOf(Edition.lockedMode)
         private set
 
     /** su 探测结果：null = 还在探测。（保留布尔视图，界面另有可解释的 [rootProbe]） */
@@ -132,9 +138,9 @@ class WelcomeState internal constructor(
         message = null
     }
 
+    /** 保留给旧调用点：单模式版里**不做任何事**（模式由 edition 决定，运行期改不了）。 */
     fun selectMode(picked: EnvMode) {
-        mode = picked
-        prefs.modeOverride = picked
+        // 故意留空：改这个值没有意义 —— 包名/资产/引导流程都按 edition 走
     }
 
     fun acknowledgeModule(done: Boolean) {
@@ -358,15 +364,23 @@ class WelcomeState internal constructor(
         if (probing) return
         probing = true
         scope.launch {
-            // ① root：拿到状态（不是布尔） ② 模块：装没装/版本/待重启
-            val probe = withContext(Dispatchers.IO) { DeviceStatus.root(force = true) }
-            val mod = withContext(Dispatchers.IO) { DeviceStatus.module(force = true) }
-            // ③ 免 root：宿主脚本 / proot 运行时 / rootfs（纯文件检查，不需要 su）
+            // ① root/模块：**只有 Root 版才探**（免 root 版探 su 毫无意义，还可能弹授权框）
+            val probe = if (Edition.needsSu) {
+                withContext(Dispatchers.IO) { DeviceStatus.root(force = true) }
+            } else {
+                RootProbe(RootState.UNKNOWN, "免 root 版不探测 su（也不需要）")
+            }
+            val mod = if (Edition.needsKernelSuModule) {
+                withContext(Dispatchers.IO) { DeviceStatus.module(force = true) }
+            } else {
+                null
+            }
+            // ② 免 root：宿主脚本 / proot 运行时 / rootfs（纯文件检查，不需要 su）
             val pr = withContext(Dispatchers.IO) { ProotSetup.inspect(context) }
             rootProbe = probe
             module = mod
             proot = pr
-            val su = probe.granted
+            val su = if (Edition.needsSu) probe.granted else false
             suAvailable = su
             val effective = effectiveMode()
             val (exists, st) = withContext(Dispatchers.IO) {
@@ -376,14 +390,18 @@ class WelcomeState internal constructor(
             provisioned = exists
             status = st
             probing = false
-            append("· 模式选择：${mode.modeLabel}；实际生效：${effective.modeLabel}")
-            append("· root：${probe.label}（${probe.detail}）")
-            append("· 模块：${mod.label}")
+            append("· 本版：${Edition.label}（${Edition.applicationId}）· 模式固定为 ${effective.modeLabel}")
+            if (Edition.needsSu) {
+                append("· root：${probe.label}（${probe.detail}）")
+            } else {
+                append("· root：免 root 版不需要 root（不探测 su）")
+            }
+            append("· 模块：${mod?.label ?: "免 root 版与 KernelSU 模块无关"}")
             append("· 免 root 就绪度：${ProotSetup.summary(pr)}（缺：${pr.missingLabel.ifEmpty { "无" }}）")
             append("· linuxctl：${if (exists) "已就位" else "缺失（需要部署）"}")
             // 状态后面必须跟"下一步做什么"，否则用户只能猜（这次就是要解决这个）
             probe.hint?.let { append("  → $it") }
-            mod.hint?.let { append("  → $it") }
+            mod?.hint?.let { append("  → $it") }
             if (!exists) append("  ${st.lastError ?: ""}")
         }
     }

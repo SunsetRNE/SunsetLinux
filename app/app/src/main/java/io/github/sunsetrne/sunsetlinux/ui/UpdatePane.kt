@@ -48,6 +48,7 @@ import io.github.sunsetrne.sunsetlinux.core.Channel
 import io.github.sunsetrne.sunsetlinux.BuildConfig
 import io.github.sunsetrne.sunsetlinux.core.ChannelReport
 import io.github.sunsetrne.sunsetlinux.core.DshRuntime
+import io.github.sunsetrne.sunsetlinux.core.DshPin
 import io.github.sunsetrne.sunsetlinux.core.DshStatus
 import io.github.sunsetrne.sunsetlinux.core.EnvMode
 import io.github.sunsetrne.sunsetlinux.core.LayerTransport
@@ -135,6 +136,15 @@ class UpdatePaneState internal constructor(
      * 那四个脚本以前得用户手动铺（真机上没人会去铺）。现在 APK 自带 + 一键铺。
      */
     var prootReady by mutableStateOf(false)
+        private set
+
+    /**
+     * 「内置 DSH ↔ 运行时 DSH」的对账结果（用户点名要的那件事：内置一个版本、运行时一个版本）。
+     * 判定逻辑在 [DshPin]（纯函数 + 单测），这里只管显示与"回滚到内置版"。
+     */
+    var dshPin by mutableStateOf<DshPin.State?>(null)
+        private set
+    var rollingBack by mutableStateOf(false)
         private set
 
     /**
@@ -260,6 +270,8 @@ class UpdatePaneState internal constructor(
             }
             mode = m
             status = st
+            // 内置 DSH（APK 里冻结的那份）与运行时 DSH（真正在跑的）对账
+            dshPin = DshPin.of(context, st.layer("dsh")?.version)
             reports = emptyList()
             updates = emptyList()
 
@@ -374,6 +386,34 @@ class UpdatePaneState internal constructor(
         }
     }
 
+    /**
+     * 回滚到**内置**的 DSH 版本（随 APK 冻结的那份）。
+     *
+     * 这是"内置 DSH 与运行时 DSH 解耦"的**退路**：运行时那份被频道更新后出问题，
+     * 一键回到包里那份即可（层文件就在 `layers/`，`update` 不删旧文件）。
+     */
+    fun rollbackDshToEmbedded() {
+        val pin = dshPin ?: return
+        val want = pin.embedded ?: run {
+            notice = "本包没有内置 DSH（${variantLabel}），没有可回滚的目标。"
+            return
+        }
+        if (rollingBack) return
+        rollingBack = true
+        scope.launch {
+            append("$ linuxctl rollback dsh --to $want（回到 APK 内置的那份）")
+            val r = withContext(Dispatchers.IO) { LinuxCtl(context, mode).rollback("dsh", want) }
+            append(if (r.ok) "✓ 已切回 dsh $want" else "✗ 回滚失败：${r.message}")
+            rollingBack = false
+            notice = if (r.ok) {
+                "已回滚到内置的 DSH $want。若环境在运行，重启一次生效（侧边栏「重启环境」）。"
+            } else {
+                "回滚失败：${r.message}。也可以在终端里手动执行：linuxctl rollback dsh --to $want"
+            }
+            check()
+        }
+    }
+
     fun ignoreCurrent() {
         val first = updates.firstOrNull() ?: return
         Prefs(context).ignoredUpdate = first.key
@@ -454,6 +494,42 @@ fun UpdatePane(
             }
 
             Spacer(Modifier.height(12.dp))
+
+            // ── 内置 DSH ↔ 运行时 DSH（用户点名：内置一个版本、运行时一个版本）──────
+            //    两个版本不一致**不是错误**（更新就是让它不一致），要防的是"更新完不知道
+            //    在跑哪个、也回不去" —— 所以这里把两个版本都摆出来 + 给一键回滚。
+            state.dshPin?.let { pin ->
+                DshCard(Modifier.fillMaxWidth()) {
+                    Column(Modifier.fillMaxWidth()) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            SectionLabel("内置 DSH ↔ 运行时 DSH")
+                            Spacer(Modifier.width(8.dp))
+                            Pill(
+                                text = pin.label,
+                                color = if (pin.verdict == DshPin.Verdict.SAME) StateRunning else WarnTone,
+                                filled = true,
+                            )
+                        }
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            text = pin.detail,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = TextSecondary,
+                        )
+                        if (pin.canRollbackToEmbedded) {
+                            Spacer(Modifier.height(10.dp))
+                            OutlinedButton(
+                                onClick = { state.rollbackDshToEmbedded() },
+                                enabled = !state.rollingBack,
+                                modifier = Modifier.fillMaxWidth(),
+                            ) {
+                                Text(if (state.rollingBack) "正在回滚…" else "回滚到内置版本 ${pin.embedded}")
+                            }
+                        }
+                    }
+                }
+                Spacer(Modifier.height(12.dp))
+            }
 
             // 功能 D：通道（dist-tag）选择
             DshCard(Modifier.fillMaxWidth()) {

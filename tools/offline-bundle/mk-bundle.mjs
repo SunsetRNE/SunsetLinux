@@ -6,7 +6,7 @@
  *
  * 现在的装机路径是"装 App + 装模块 → 从频道下 96 MB 层"（几分钟，但**要联网**）。
  * 用户要的是**内嵌**：APK 里直接带环境，装完就能起 —— 而且要**好几套组合**
- * （只带必要组件 / Ubuntu / Ubuntu+proot / Ubuntu+proot+dsh），见 variants.json。
+ * （root 版两档 / 免 root 版两档，共四个），见 variants.json。
  *
  * 上游 DSHA 的做法（`assets/offline-rootfs.bin` = base+runtime，`dsh-runtime.bin` = dsh，
  * 两个都内嵌、冷装两份都解、局部更新只读 dsh 包）我们照搬**思路**，但格式自定：
@@ -31,7 +31,7 @@
  *
  * ## 用法
  *
- *   node tools/offline-bundle/mk-bundle.mjs --variant ubuntu-proot-dsh
+ *   node tools/offline-bundle/mk-bundle.mjs --variant proot-full
  *   node tools/offline-bundle/mk-bundle.mjs --all --dir dist --out dist/bundles
   node tools/offline-bundle/mk-bundle.mjs --available --dir dist --out dist/bundles   # 只打"部件齐"的（CI 用）
  *   node tools/offline-bundle/mk-bundle.mjs --verify dist/bundles/ubuntu.bin
@@ -99,12 +99,22 @@ function loadVariants() {
   const variants = spec.variants ?? {};
   const ids = Object.keys(variants);
   if (ids.length === 0) die(`${args.variants} 里没有任何变体`);
+  const editions = spec.editions ?? {};
   for (const id of ids) {
     const v = variants[id];
     if (!Array.isArray(v.embed)) die(`变体 ${id} 缺 embed 数组`);
     for (const p of v.embed) if (!(p in legend)) die(`变体 ${id} 里的部件 ${p} 不在 parts_legend 里`);
+    // 每个变体必须归属一个 edition（两个 App：root / proot）——
+    // 少了它，pipipeline 的编译矩阵就不知道该建哪个 flavor。
+    if (!v.edition) die(`变体 ${id} 缺 edition（可选：${Object.keys(editions).join('、') || '（editions 段为空）'}）`);
+    if (Object.keys(editions).length && !(v.edition in editions)) die(`变体 ${id} 的 edition=${v.edition} 不在 editions 段里`);
   }
-  return { spec, variants };
+  // embed 为空 = 这个变体**不内嵌任何环境**（现在 root-minimal 就是这种：
+  // root 模式的层从频道装）。这种变体不打 .bin —— 打了也是个 0 部件的空包，
+  // App 端装上只会报"这个组合里没有可安装的部件"。
+  const withParts = ids.filter((id) => variants[id].embed.length > 0);
+  if (withParts.length === 0) die(`${args.variants} 里没有任何**有部件**的变体（全是空 embed？）`);
+  return { spec, variants, editions, withParts };
 }
 
 // ─────────────────────────────────────────────────────────── 部件定位
@@ -163,6 +173,10 @@ const sha256File = (path) => createHash('sha256').update(readFileSync(path)).dig
 
 function buildOne(variantId, variants, rawIndex) {
   const v = variants[variantId] ?? die(`未知变体：${variantId}（可选：${Object.keys(variants).join(', ')}）`);
+  if (v.embed.length === 0) {
+    die(`变体 ${variantId} 不内嵌任何部件 —— 它没有离线包可打（APK 里就是不带环境；` +
+        `请改用 --all/--available，它们会跳过这种变体）`);
+  }
   const parts = [];
   const missing = [];
   let off = 0;
@@ -307,6 +321,11 @@ if (args.all || args.available) {
   // 每个变体都"打完立刻校验一遍"：搬运类代码最怕静默错位，验证是顺手的事
   const skipped = [];
   for (const id of Object.keys(variants)) {
+    if (variants[id].embed.length === 0) {
+      // 不内嵌任何环境 → 没有 .bin 可打（APK 里不会有 offline-bundle.bin，App 会显示"未内嵌"）
+      skipped.push(`${id}（本身不内嵌任何部件）`);
+      continue;
+    }
     if (args.available) {
       // 缺哪个部件就**明确跳过**（CI 上 proot 包可能还没发过），绝不静默少打一个变体
       const missing = variants[id].embed.filter((p) => !resolvePart(args.dir, p));

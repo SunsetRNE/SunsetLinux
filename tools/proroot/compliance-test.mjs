@@ -22,7 +22,7 @@
 
 import { createHash } from 'node:crypto';
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
-import { join, relative } from 'node:path';
+import { basename, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
 
@@ -120,6 +120,10 @@ const apks = process.argv.includes('--apk')
 if (apks.length === 0) {
   console.log('   （没有已构建的 APK，跳过 APK 内部检查；CI 在 Android 构建之后会跑到）');
 } else {
+  // ★ 0.3.0 起有两个 App：**只有免 root 版**带 proroot（root 模式从不用 LD_PRELOAD 运行时）。
+  //   所以这里按 APK 文件名里的 edition 段判断：root 版**必须没有** proroot 的 .so
+  //   （带了反而是打包失误），免 root 版必须 5 个齐全且与 VENDOR.json 逐字节一致。
+  const isRootApk = (p) => /-root-(minimal|full)-/.test(basename(p));
   for (const apk of apks) {
     const name = relative(REPO, apk);
     let list;
@@ -131,6 +135,16 @@ for n in z.namelist(): print(n)
 `, apk], { encoding: 'utf8' }).split('\n').filter(Boolean);
     } catch (e) {
       bad(`读不了 APK 清单：${name}（${e.message}）`);
+      continue;
+    }
+    if (isRootApk(apk)) {
+      const leaked = EXPECTED.filter((e) => list.includes(`lib/arm64-v8a/${e.name}`));
+      if (leaked.length) {
+        bad(`${name} 是 Root 版却带了 proroot 的 .so：${leaked.map((m) => m.name).join(', ')}` +
+            `（root 模式从不用 LD_PRELOAD 运行时；带上是打包失误，也牵扯专有许可）`);
+      } else {
+        ok(`${name}：Root 版不含 proroot 二进制（符合预期）`);
+      }
       continue;
     }
     const missing = EXPECTED.filter((e) => !list.includes(`lib/arm64-v8a/${e.name}`));

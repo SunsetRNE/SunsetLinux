@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  免 root 版的**应用名**。与 Root 版共存时靠名字区分（包名不同、不需要 root 授权）。
+-->
+<resources>
+    <string name="app_name">SunsetLinux 免root</string>
+</resources>

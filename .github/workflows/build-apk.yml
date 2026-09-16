@@ -154,14 +154,31 @@ jobs:
 
       # 内嵌不完整就不要发：App 的首启引导第 2 步是「一键刷入内置模块」，
       # 它读的正是 assets/module/。缺了它，用户看到的按钮点了只会提示"未内嵌"。
-      - name: 断言 — 这个 APK 内嵌了模块包（一键刷入靠它）
+      # 内嵌内容**按 edition 分开断言**（0.3.0 起两个 App 各带各的）：
+      #   · root-*：必须带 KernelSU 模块包（首启引导「一键刷入」靠它）
+      #   · proot-*：必须带 proot 宿主脚本（没有它免 root 根本起不来），且**不该**带模块包
+      - name: 断言 — 这个 APK 的内嵌内容与本版匹配
         run: |
           set -euo pipefail
           apk="$(find app/app/build/outputs/apk -name '*.apk' | head -1)"
           [ -n "$apk" ] || { echo "::error::${{ inputs.variant }} 没有产出 APK"; exit 1; }
-          unzip -l "$apk" | grep -q 'assets/module/sunsetlinux-module.zip' || {
-            echo "::error title=APK 没内嵌模块包::$apk 缺少 assets/module/sunsetlinux-module.zip —— 检查 prep 的模块 zip 制品是否取到"; exit 1; }
-          echo "✓ $(basename "$apk")：$(unzip -p "$apk" assets/module/module.json | tr -d '\n')"
+          list="$(unzip -l "$apk")"
+          case "${{ inputs.variant }}" in
+            root-*)
+              echo "$list" | grep -q 'assets/module/sunsetlinux-module.zip' || {
+                echo "::error title=Root 版没内嵌模块包::$apk 缺少 assets/module/sunsetlinux-module.zip —— 检查 prep 的模块 zip 制品是否取到"; exit 1; }
+              echo "$list" | grep -q 'assets/proot-runtime/' && {
+                echo "::error title=Root 版不该带 proot 脚本::$apk 里有 assets/proot-runtime/（root 模式用不到，白占体积）"; exit 1; }
+              echo "✓ $(basename "$apk")：模块 $(unzip -p "$apk" assets/module/module.json | tr -d '\n')"
+              ;;
+            proot-*)
+              echo "$list" | grep -q 'assets/proot-runtime/linuxctl.sh' || {
+                echo "::error title=免 root 版缺宿主脚本::$apk 缺少 assets/proot-runtime/linuxctl.sh —— 免 root 模式靠它铺 bin/linuxctl"; exit 1; }
+              echo "$list" | grep -q 'assets/module/sunsetlinux-module.zip' && {
+                echo "::error title=免 root 版不该带模块包::$apk 里有 assets/module/（与 KernelSU 模块无关）"; exit 1; }
+              echo "✓ $(basename "$apk")：proot 宿主脚本已内嵌（proot 运行时/层由离线包或频道提供）"
+              ;;
+          esac
 
       - name: 上传 ${{ inputs.variant }} 的 APK
         uses: actions/upload-artifact@v4

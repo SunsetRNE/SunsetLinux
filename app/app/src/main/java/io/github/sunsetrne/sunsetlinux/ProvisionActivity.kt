@@ -48,12 +48,14 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.lifecycleScope
 import io.github.sunsetrne.sunsetlinux.core.Channel
 import io.github.sunsetrne.sunsetlinux.core.DshRuntime
+import io.github.sunsetrne.sunsetlinux.core.Edition
 import io.github.sunsetrne.sunsetlinux.core.EnvMode
 import io.github.sunsetrne.sunsetlinux.core.LinuxCtl
 import io.github.sunsetrne.sunsetlinux.core.DeviceStatus
 import io.github.sunsetrne.sunsetlinux.core.ModuleStatus
 import io.github.sunsetrne.sunsetlinux.core.Prefs
 import io.github.sunsetrne.sunsetlinux.core.RootProbe
+import io.github.sunsetrne.sunsetlinux.core.RootState
 import io.github.sunsetrne.sunsetlinux.core.ProvisionPlan
 import io.github.sunsetrne.sunsetlinux.core.ProotRuntime
 import io.github.sunsetrne.sunsetlinux.ui.components.DshCard
@@ -81,7 +83,8 @@ import kotlinx.coroutines.launch
  */
 class ProvisionActivity : ComponentActivity() {
 
-    private val mode = mutableStateOf(EnvMode.ROOT)
+    // 单模式版：模式由 edition 锁定（Root 版 / 免 root 版是两个可共存的 App）
+    private val mode = mutableStateOf(Edition.lockedMode)
     private val suAvailable = mutableStateOf<Boolean?>(null)
     private val ctlReady = mutableStateOf<Boolean?>(null)
     // root / 模块的**可解释**状态（用户要的"检测"）：不再只显示一个"su 不可用"
@@ -101,7 +104,7 @@ class ProvisionActivity : ComponentActivity() {
         applyDshSystemBars()
         prefs = Prefs(this)
 
-        mode.value = prefs.modeOverride ?: EnvMode.ROOT
+        mode.value = Edition.lockedMode
         seedDir.value = prefs.seedDir ?: ""
         channels.addAll(prefs.channels)
         selectedChannelId.value = channels.firstOrNull { it.enabled }?.id
@@ -155,30 +158,30 @@ class ProvisionActivity : ComponentActivity() {
     /** 自检：su 是否可用、当前模式下 linuxctl 是否就位。 */
     private fun probe() {
         lifecycleScope.launch(Dispatchers.IO) {
-            // ① root：拿到**状态**（没有 su / 被拒 / 超时 / 已授权），不只是布尔
-            val probe = DeviceStatus.root(force = true)
-            val su = probe.granted
-            // ② 模块：装没装、版本、是否停用、是否"装了没重启"
-            val module = DeviceStatus.module(force = true)
+            // ① root/模块：**只有 Root 版才探**（免 root 版探 su 没意义，还可能弹授权框）
+            val probe = if (Edition.needsSu) DeviceStatus.root(force = true)
+                        else RootProbe(RootState.UNKNOWN, "免 root 版不探测 su（也不需要）")
+            val su = Edition.needsSu && probe.granted
+            val module = if (Edition.needsKernelSuModule) DeviceStatus.module(force = true) else null
 
             withMain {
                 rootProbe.value = probe
                 moduleStatus.value = module
                 suAvailable.value = su
             }
-            val effective = when {
-                mode.value == EnvMode.ROOT && !su -> EnvMode.PROOT
-                else -> mode.value
-            }
+            // Root 版没有 su 时**不降级**：降级会去操作另一个环境（最坏的一种"看起来能用"）
+            val effective = mode.value
             val ready = LinuxCtl(this@ProvisionActivity, effective).exists()
             withMain {
                 ctlReady.value = ready
-                appendLog("环境检测：${probe.label}（${probe.detail}）")
-                appendLog("环境检测：${module.label}")
+                if (Edition.needsSu) appendLog("环境检测：${probe.label}（${probe.detail}）")
+                appendLog("本版：${Edition.label}（${Edition.applicationId}）· 模式固定为 ${mode.value.modeLabel}")
+                appendLog("环境检测：${module?.label ?: "免 root 版与 KernelSU 模块无关"}")
                 probe.hint?.let { appendLog("→ $it") }
-                module.hint?.let { appendLog("→ $it") }
+                module?.hint?.let { appendLog("→ $it") }
                 if (mode.value == EnvMode.ROOT && !su) {
-                    appendLog("提示：当前拿不到 root，本次会按 proot 模式走。")
+                    appendLog("提示：本版是 Root 版但没有 su —— 请先在 KernelSU/Magisk 里授权本应用；" +
+                        "不想 root 就用「免 root 版」（两个 App 可同时安装）。")
                 }
             }
         }
@@ -384,24 +387,24 @@ private fun ProvisionScreen(
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = 16.dp),
         ) {
-            // ① 模式
-            StepCard(1, "选择运行模式") {
-                ModeOption(
-                    title = "root 模式（推荐）",
-                    subtitle = "真 chroot + mount 命名空间，真 uid 0；环境由 KernelSU 模块开机启动，与 App 生命周期解耦。",
-                    selected = mode == EnvMode.ROOT,
-                    enabled = suAvailable == true,
-                    disabledReason = if (suAvailable == false) "本机没有可用的 su：请先刷入 KernelSU/Magisk 并授权本应用" else null,
-                    onClick = { onPickMode(EnvMode.ROOT) },
-                )
-                Spacer(Modifier.height(10.dp))
-                ModeOption(
-                    title = "proot 模式（降级兜底）",
-                    subtitle = "不需要 root，环境目录在 App 私有空间；性能与生命周期都受 App 限制。",
-                    selected = mode == EnvMode.PROOT,
-                    enabled = true,
-                    disabledReason = null,
-                    onClick = { onPickMode(EnvMode.PROOT) },
+            // ① 本版（单模式版：模式由 edition 锁定，这里只如实说明，不给"选"）
+            StepCard(1, "本版（模式固定）") {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Pill(Edition.labelShort, color = Accent, filled = true)
+                    Spacer(Modifier.width(8.dp))
+                    Pill(mode.modeLabel, color = StateRunning, filled = true)
+                }
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    text = if (Edition.isRoot) {
+                        "Root 版（${Edition.applicationId}）：环境由 KernelSU 模块铺到 /data/sunsetlinux，" +
+                            "开机自启、与 App 生命周期解耦。部署向导会按这条路走。"
+                    } else {
+                        "免 root 版（${Edition.applicationId}）：宿主脚本随 APK 内置，rootfs 从 base 层/种子解开，" +
+                            "全程不需要 su。部署向导会先自动铺脚本。"
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = TextSecondary,
                 )
             }
 

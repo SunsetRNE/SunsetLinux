@@ -21,7 +21,59 @@
 | 0.2.8 | 10 | **免 root 模式换 proroot 首选 + proot 降级**：proroot（LD_PRELOAD，无 ptrace 开销）随 APK 的 jniLibs 打包，proot 仍随包内嵌；`SUNSETLINUX_ROOTLESS=auto|proroot|proot`（App 设置里可选），`status`/`doctor`/App 都如实报实际用了谁。proroot 是专有许可 —— 只随 APK 分发、不得再分发修改版，带许可原文 + 关于页 attribution，并有合规闸门 |
 | 0.2.9 | 11 | **终端接上原生 PTY**：`/dev/ptmx` + forkpty 路线（NDK 编译的小 `.so` 随 APK），Ctrl-C/Ctrl-D/Tab/方向键真的生效，`vim`/`htop` 这类全屏程序能跑，窗口大小按控件尺寸发 `TIOCSWINSZ`；输出用最小 VT 模拟器渲染（`\r` 覆盖、`ESC[K`、定位、SGR 剥离）；原生库不可用时**优雅降级**回行缓冲并明说 |
 | 0.2.10 | 12 | **加"无 loop 层模式"开关（dir）**：把三层解包成目录 + 目录 overlayfs，**完全不碰 loop / erofs / upper.img**；「设置 → 层模式」可切、也读 `SUNSETLINUX_LAYER_MODE` 与 `etc/config.json` 的 `layer_mode`（默认 loop 省磁盘）。模块 **1.0.15**：dir 模式实现 + doctor §1e 层模式检查 |
-| 0.2.12 | 14 | **免 root 模式的引导从"指路"改成"真的能铺"（两个模式的引导彻底分开）**：新增 `core/ProotSetup.kt`（就绪度 + 有序步骤 + 每步"点哪里"），首启引导按模式给**不同的步骤名与动作**（root：选模式/装模块/部署/完成；免 root：选模式/铺运行时/铺环境/完成），免 root 分支的「铺 proot 运行时（内置脚本）」「铺环境（离线包 + provision）」都是真按钮；诊断页缺 linuxctl 时按模式给**不同**的下一步；部署向导在 proot 模式下先自动铺脚本再往下走。模块 **1.0.18**：proot 的 `linuxctl` 学会吃 **erofs 层**（`fsck.erofs --extract`，以前只认 tar → 频道/离线包给的层在免 root 模式装不进去）、`provision` 在没种子时**自动用已就位的 base 层当 rootfs**、`doctor` 新增"部署就绪度"三件套检查 |
+| 0.3.0 | 15 | **拆成两个可共存的 App（各锁一条路）+ 内置矩阵数据驱动（6 个变体）+ 内置 DSH 与运行时 DSH 解耦**：root 版 `…​.root`、免 root 版 `…​.proot`（不同包名、可同时安装、界面不再有"切换模式"）；内置档位从 2 档扩到 **3 档**（最小 / Ubuntu / 完整离线），矩阵与标签**全部读 `tools/offline-bundle/variants.json`**（加档只改 JSON，Gradle flavor 与 CI 矩阵自动跟上）；新增 `core/DshPin.kt` —— 「内置 DSH（随 APK 冻结）↔ 运行时 DSH（可被频道更新）」对账（纯函数 + 9 条单测），「更新」页给两个版本号与结论、并给**一键回滚到内置版本**（`linuxctl rollback dsh --to <版本>`；`update` 不删旧层文件，所以退路一直在），「关于」页也有一行。模块 **1.0.18**（本轮运行时无改动） |
+
+## 0.3.0 —— 两个 App、一条路各一个；内置矩阵能继续长；内置 DSH 与运行时 DSH 解耦
+
+**用户的三句话**：
+
+1. "一个纯 root 流程，一个纯免 root 流程" → 拆成两个 App；
+2. "纯 Root、免 Root、然后各种内置感觉不止 4 种吧" → 内置矩阵要**能长**，不是两档封顶；
+3. "后续还要考虑到内置 DSH 的解耦（内置一个版本，运行时一个版本的情况判定，避免更新导致崩了）"。
+
+### 1）两个 App（不同包名、可共存）
+
+| | Root 版 | 免 root 版 |
+|---|---|---|
+| 包名 | `io.github.sunsetrne.sunsetlinux.root` | `io.github.sunsetrne.sunsetlinux.proot` |
+| 模式 | 锁死 root（真 chroot + overlayfs） | 锁死 proot/proroot |
+| 带什么 | KernelSU 模块包（一键刷入） | proot 宿主脚本 + proroot `.so`（root 版不带这些） |
+| 引导 | 本版说明 → 装模块 → 部署 → 完成 | 本版说明 → 铺运行时 → 铺环境 → 完成 |
+
+两个 App 都**不再提供"切换模式"**（`DshRuntime.resolveMode` 直接按 edition 返回，
+设置页只显示"本版固定"）。Root 版没有 su 时**不再偷偷降级到 proot** —— 那会去操作另一个环境，
+是最坏的一种"看起来能用"；现在只把原因说清并指向另一个 App。
+
+### 2）内置矩阵：数据驱动、能继续长
+
+`tools/offline-bundle/variants.json` 是唯一事实源，现在是 **edition（2）× tier（3）= 6 个变体**：
+
+| 变体 | 内嵌 |
+|---|---|
+| `root-minimal` | （无 —— 层全走频道） |
+| `root-base` | base, runtime |
+| `root-full` | base, runtime, dsh |
+| `proot-minimal` | proot |
+| `proot-base` | base, runtime, proot |
+| `proot-full` | base, runtime, proot, dsh |
+
+Gradle 的 flavor、每个变体的部件与标签、**pipeline 的编译矩阵**、下载页、App 的「本机包」显示
+全都读这个文件：**加一档只改 JSON 一行**（`tiers` 加一条 + 两个 edition 各加一个变体），
+CI 与构建脚本都不用动。`SigningContractTest` 里加了防漂移断言（构建脚本必须真的在读它、
+两个 edition 包名必须不同且不能退回拆分前的老包名）。
+
+### 3）内置 DSH ↔ 运行时 DSH 解耦
+
+完整离线版把 DSH **冻在 APK 里**，而运行时那份会被频道更新 —— 两者随时可能不一致。
+要防的不是"不一致"（更新就是让它不一致），而是**更新完不知道在跑哪个、也回不去**。所以：
+
+- `core/DshPin.kt`：`reconcile(内置, 运行时)` → NONE / SAME / 运行时更新过 / 运行时比内置旧 /
+  运行时还没装 / 判不了（**纯函数 + 9 条单测**，比较用逐段数字，`rc.10 > rc.9`）；
+- 「更新」页新增一张卡：两个版本号 + 一句人话结论 + **「回滚到内置版本 X」**（只在需要时出现）；
+- 回滚走 `linuxctl rollback dsh --to <内置版本>` —— 装离线包时那一层的文件就在 `layers/` 下，
+  而 `linuxctl update` **不删旧文件**（回滚语义本来就有），所以这条退路一直在；
+- 「关于」页加一行"DSH（内置/运行时）"。
+
 
 ## 0.2.12 —— 免 root 模式的引导：从"指路"到"真的能铺"
 

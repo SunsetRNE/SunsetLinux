@@ -498,6 +498,35 @@ su -c '/data/sunsetlinux/bin/linuxctl doctor'
 | 已装状态读不到时 | —— | **不给刷入按钮**，先让用户修 root 授权（与"读不到 ≠ 没装"一致） |
 | 重启 | —— | 只报告"重启后生效"（KernelSU 落 `modules_update/`），**App 不替用户重启**，脚本里有单测断言不许出现 `reboot` |
 
+### 3.10.24 两个可共存的 App + 数据驱动的内置矩阵（6 变体）+ 内置 DSH 与运行时 DSH 解耦（App 0.3.0）
+
+用户三句话："拆"（两个 App）、"各种内置感觉不止 4 种吧"、"内置 DSH 的解耦（内置一个版本，
+运行时一个版本的情况判定，避免更新导致崩了）"。
+
+**① 两个 App**（不同包名、可同时安装，模式由 edition 锁死）：
+
+| | Root 版 | 免 root 版 |
+|---|---|---|
+| 包名 | `io.github.sunsetrne.sunsetlinux.root` | `io.github.sunsetrne.sunsetlinux.proot` |
+| 带什么 | KernelSU 模块包（一键刷入） | proot 宿主脚本 + proroot `.so` |
+| 探测 | 需要 su（没有就报原因，**绝不偷偷降级 proot**） | **不探测 su**（免 root 设备上探测只会弹框） |
+
+界面不再提供"切换模式"（设置/引导/部署向导都改成只读的"本版说明"）；Root 版不带 proot 脚本与
+proroot（省 ~830 KB 且不牵扯专有许可），免 root 版不带模块包。
+
+**② 内置矩阵数据驱动**：`tools/offline-bundle/variants.json` 加 `editions` / `tiers` /
+每个变体的 `edition`+`tier`；现在是 **2 edition × 3 档 = 6 个变体**
+（`root-minimal|root-base|root-full|proot-minimal|proot-base|proot-full`）。
+**Gradle 的 flavor、每个变体的部件与标签全部从 JSON 读**，pipeline 的编译矩阵按
+`"<edition>-<tier>"` 推 Gradle 任务名 → **加一档只改 JSON 一行**（构建脚本与 CI 都不用动）。
+`SigningContractTest` 的断言改成"构建脚本必须真的在读 JSON" + "两个 edition 包名必须不同、
+不能退回拆分前的老包名"（防身份漂移）。
+
+**③ 内置 DSH ↔ 运行时 DSH 解耦**：`core/DshPin.kt`（纯函数 + 9 条单测）把
+"内置（随 APK 冻结）"与"运行时（可被频道更新）"对账成 6 种结论；「更新」页给两个版本号 +
+一句人话 + **「回滚到内置版本 X」**（`linuxctl rollback dsh --to <版本>`）；「关于」页一行。
+退路的保证是既有语义：装离线包时 dsh 层落到 `layers/`，而 `linuxctl update` **不删旧文件**。
+
 ### 3.10.23 CI 合成一条流水线（环境准备 → 矩阵编译 → 门禁 → 合并发布 → 频道 → 汇总）
 
 用户拿了 KernelSU `build-manager.yml` 的截图作参照："环境准备，然后多个节点编译，

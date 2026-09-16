@@ -41,12 +41,27 @@ adb install -r dist/sunsetlinux-launcher-debug.apk
 
 或直接把 APK 传到手机点击安装。
 
-首次启动后 App 会走**门禁引导**，让你显式选择运行模式（这一步是设计好的，不是出错）：
+首次启动后 App 会走**门禁引导**，按**本版**的路线一步一步来（不需要你选模式）：
 
-| 选择 | 后续流程 | 能力 |
+0.3.0 起 **拆成两个可同时安装的 App**（不同包名，各自锁死一条路，界面里不再有"切换模式"）：
+
+| | **Root 版**（推荐） | **免 root 版** |
 |---|---|---|
-| **Root 模式**（推荐） | 检测 `su` → 引导**安装 KernelSU 模块**（App 0.2.11 起一键刷内置包）→ 重启 → 回到 App 部署层 → 启动 | 真 root + 真 chroot + overlay 分层。**真 capabilities、能挂载、环境不被 App 杀死** |
-| **非 root 模式** | **铺宿主脚本**（APK 内置，一键）→ **铺 rootfs**（内嵌离线包 / 频道 base 层 / 本机种子，一键）→ 启动 | 免 root，但**无真 capabilities、绕不开 FUSE、环境随 App 进程** |
+| 包名 | `io.github.sunsetrne.sunsetlinux.root` | `io.github.sunsetrne.sunsetlinux.proot` |
+| 后续流程 | 检测 `su` → **一键刷入内置 KernelSU 模块** → 重启 → 部署层 → 启动 | **铺宿主脚本**（APK 内置，一键）→ **铺 rootfs**（内嵌离线包 / 频道 base 层 / 本机种子）→ 启动 |
+| 能力 | 真 root + 真 chroot + overlay 分层：**真 capabilities、能挂载、环境不被 App 杀死** | 免 root、免刷机，但**无真 capabilities、绕不开 FUSE、环境随 App 进程** |
+| 前置 | 设备必须已 root（没有 su 时本版**不会**偷偷降级到 proot，只提示你换另一个 App） | 什么都不需要（连 su 都不探测） |
+
+> 两个 App **可以同时装**：环境数据在各自的位置（root 版在 `/data/sunsetlinux`，
+> 免 root 版在 App 私有目录），KernelSU 授权按包名记，互不影响。
+
+每个版本还各有 **3 个内置档位**（矩阵由 `tools/offline-bundle/variants.json` 定义，可以继续加）：
+
+| 档位 | Root 版内嵌 | 免 root 版内嵌 | 适合谁 |
+|---|---|---|---|
+| 最小版 | 无（层全走频道） | proot 运行时 | 有 Wi-Fi、想要最小 APK |
+| Ubuntu 版 | base + runtime | base + runtime + proot | 想自己控制 DSH 版本（从频道装） |
+| 完整离线版 | base + runtime + dsh | base + runtime + proot + dsh | 想装完零下载即可用 |
 
 > 引导页会**诚实写出两者的差距**——这两个模式**不等价**，别被"表面上都能跑起来"迷惑。
 > 两条路径最终都收敛到同一套 `linuxctl`，之后 App 的行为完全一致（模式只体现在 `status.mode`）。

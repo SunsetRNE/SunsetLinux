@@ -2,7 +2,7 @@
 
 > 用途：**对话记录可能被删/会被换掉**，所以把"现在到哪了、还剩什么、怎么接着做"落进仓库。
 > 和 `docs/STATUS.md`（项目总账）配合看：STATUS 讲**项目本身**做到什么程度，本文讲**这次协作的落点**。
-> 最后更新：**2026-09-16**（第 35 条：CI 合成一条流水线到底 —— 环境准备 → 四节点并行编译 → 门禁 → 合并发布 → 频道 → 汇总；下一步拆两个 App）
+> 最后更新：**2026-09-16**（第 36 条：拆成两个可共存的 App + 内置矩阵数据驱动 6 个变体 + 内置/运行时 DSH 解耦 → App 0.3.0）
 
 ---
 
@@ -106,6 +106,44 @@ CI 四条线路：① `ci.yml` 回归门禁（shell / node / android 三并行�
 
 | 35 | *(本次)* | **CI 从"四条线路靠时间对齐"改成"一条流水线到底"**（用户给了 KernelSU `build-manager.yml` 的截图："我想拆成 Ksu工作流这种，环境准备，然后多个节点编译，最后合并打包、多重发布（正式发布、pages发布、频道发布），一个工作流到底"）| 新拓扑：`pipeline.yml`（推 main/beta 时**只有它跑**）① prep 环境准备（版本 / 由 `variants.json` 生成编译矩阵 / 打模块 zip）② bundles 内嵌离线包 ③ build **编译矩阵：一个组合一个节点**（`uses: build-apk.yml`）④ gates 门禁（`uses: ci.yml`，`build_apks=false`，与编译并行）⑤ publish 合并 + index.json + 下载页 + gh-pages + Release（`uses: publish.yml`）⑥ channel 频道发布（channel 分支的签名清单 —— 公钥独立验签 —— gh-pages `/channel/`）⑦ report 汇总。`release.yml` 变手动同构兜底；`ci.yml`/`offline-bundle.yml`/`release.yml` 都**不再监听 push**。证据：main/beta 双通道各跑一遍 **12 个节点全 success**（run 5 / run 6），发布物 = 4 个 APK + 4 个 `.bin` + 模块 zip（同一 Release + gh-pages `/stable` `/beta`），且抽查官方 APK 里 `assets/module/`（209611 B）、`assets/offline-bundle.bin`、`libsunsetlinux_pty.so` 都在。落地踩的 4 个坑都有注释留在文件里：**（a）** 可复用工作流里放**工作流级 `concurrency`** → GitHub 拒收，表现是"调用方那个 job 0 秒失败、没起 runner、日志空白"（改成 job 级）；**（b）** `needs: gate` 残留（搬出来后那个 job 不存在）→ 整个文件被拒加载，只报 "Invalid workflow file"；**（c）** 被调用的 `offline-bundle/publish` 声明了 `contents: write`，调用方必须显式允许，否则计划阶段就失败；**（d）** GitHub 宽松相等 `'' == false` 为真 → push 事件下 `inputs.embed_bundles != false` 为假，"默认该内嵌却整条 ② 被跳过"（改成 prep 里归一化成输出）。另加 `tools/ci-shell-gate.sh` + `tools/ci-step-tee.sh`：失败时用 `::error::` 注释带出"红的是哪几条/日志尾部"（步骤日志要仓库权限，注释匿名可读 —— 手机上排查 CI 就靠它） |
 
+### 第 36 条：两个 App、一条路各一个；矩阵能继续长；内置 DSH 与运行时 DSH 解耦
+
+用户三句话定了这轮的三件事：
+
+| 用户 | 落地 |
+|---|---|
+| "拆" | **两个可共存的 App**（不同包名）：Root 版 `io.github.sunsetrne.sunsetlinux.root`、免 root 版 `…​.proot`；模式由 edition **锁死**，界面不再有"切换模式" |
+| "纯 Root、免 Root、然后各种内置感觉不止 4 种吧" | 内置矩阵**数据驱动**：`variants.json` 里 `editions` × `tiers`，现在是 6 个变体（minimal / base / full 三档 × 两个 edition）；**Gradle flavor 与部件表全部从 JSON 读**，加档只改一行 JSON |
+| "内置 DSH 的解耦（内置一个版本，运行时一个版本的情况判定，避免更新导致崩了）" | `core/DshPin.kt` 对账（6 种结论、纯函数 + 9 条单测）+「更新」页两个版本号与结论 + **一键回滚到内置版本** +「关于」页一行 |
+
+**为什么"锁死模式"比"保留切换"更安全**：Root 版没有 su 时若降级到 proot，它会去操作
+**另一个环境**（App 私有的 `files/sunsetlinux`）—— 用户以为在修 root 环境，其实动的是别处。
+现在只报原因 + 指向另一个 App（两个包名不同，装哪个就是哪条路）。
+
+**矩阵为什么必须数据驱动**：0.3.0 第一版把 edition × 档位写死在构建脚本里，
+"再加一档"要同时改 JSON 与 Gradle，而用户已经明说矩阵不止两档。现在：
+
+```
+variants.json ──┬─▶ Gradle：flavor(edition/embed)、每个变体的部件与标签、APK 名
+                ├─▶ offline-bundle：打哪几个 .bin（embed 为空的档位不打）
+                ├─▶ pipeline：编译矩阵（由 "<edition>-<tier>" 推 Gradle 任务名）
+                └─▶ 下载页 / index.json / App 的「本机包」显示
+```
+
+**DSH 解耦的判定表**（`DshPin.reconcile`）：
+
+| 内置 | 运行时 | 结论 | 界面 |
+|---|---|---|---|
+| 无 | 任意 | NONE | 只说运行时版本（本包没内置 DSH） |
+| 有 | 无 | RUNTIME_MISSING | "还没装 DSH 层，先去部署" |
+| 同 | 同 | SAME | 绿 Pill |
+| 旧 | 新 | RUNTIME_NEWER | 黄 Pill + **「回滚到内置版本 X」**（最主要的场景） |
+| 新 | 旧 | EMBEDDED_NEWER | 黄 Pill + 回滚按钮 + "或从频道更新到最新" |
+| 读不出 | — | UNKNOWN | 如实说"判不了" |
+
+> 有意**不做**的事：不替用户自动选版本、也不因版本不同拒绝启动 —— 那会把"运行时更新"
+> 变成"必须重装 APK"，而运行时更新的全部意义就是不必重装。
+
 ### 第 35 条：一条流水线到底（形状、代价、以及**下一步要拆的两个 App**）
 
 用户给的参照是 KernelSU 的 `build-manager.yml`：环境准备 → 多节点编译 → 合并 → 多重发布。
@@ -128,7 +166,7 @@ layers-release.yml（layers 分支，只收集+上传）、channel.yml（channel
 内嵌离线包只打一次；模块 zip 在编译**之前**产出（否则官方 APK 没有 `assets/module/`，见第 34 条补记）；
 四个组合并行编译（单组合红不影响其它组合出包）；发布逻辑只有一份（`publish.yml`）。
 
-**下一步（用户已拍板，下一轮做）：拆成两个 App**
+**下一步（用户已拍板；已在第 36 条完成）**：拆成两个 App
 
 | 决定 | 选择 |
 |---|---|
@@ -144,7 +182,9 @@ layers-release.yml（layers 分支，只收集+上传）、channel.yml（channel
 3. App 里按 `EDITION` **锁死模式**（引导跳过"选模式"、设置页不显示另一个模式、`DshRuntime` 强制本版模式）；
 4. pipeline 的矩阵自动跟着 variants.json 走（**不用改 workflow**）——这正是这次把它做成数据驱动的原因。
 
-### 第 34 条补记：两处「本机绿、CI 红」的坑（都已修）
+| 36 | *(本次)* | **拆成两个可共存的 App（各锁一条路）+ 内置矩阵数据驱动（2 edition × 3 档 = 6 个变体）+ 内置 DSH 与运行时 DSH 解耦**（用户："拆"；"纯 Root、免 Root、然后各种内置感觉不止 4 种吧"；"后续还要考虑到内置 DSH 的解耦（内置一个版本，运行时一个版本的情况判定，避免更新导致崩了）"）| ① **两个 App**：`io.github.sunsetrne.sunsetlinux.root` / `…​.proot`（不同包名、可同时安装），模式由 `core/Edition.kt` 按 BuildConfig **锁死**；`DshRuntime.resolveMode` 不再看 `prefs.modeOverride`、Root 版没 su 时**不偷偷降级到 proot**（那会去操作另一个环境），免 root 版**根本不探测 su**；设置页/引导页/部署向导都换成只读的"本版说明"；root 版才带 KernelSU 模块包，免 root 版才带 proot 脚本 + proroot `.so`。② **矩阵数据驱动**：`tools/offline-bundle/variants.json` 加 `editions`/`tiers`/每个变体的 `edition`+`tier`，现在是 `root-minimal/root-base/root-full/proot-minimal/proot-base/proot-full` 六个；**Gradle 的 flavor 与部件表全部从 JSON 读**（加一档只改 JSON 一行，构建脚本与 CI 都不用动），pipeline 的编译矩阵本来就按 `"<edition>-<tier>"` 推任务名，自动变成 6 个节点；`SigningContractTest` 改成防漂移断言（构建脚本必须真的在读 JSON、两个 edition 包名不同且不能退回拆分前的老包名）。③ **DSH 解耦**：新增 `core/DshPin.kt`（`reconcile(内置, 运行时)` → NONE/SAME/运行时更新过/运行时比内置旧/运行时还没装/判不了，**纯函数 + 9 条单测**，`rc.10 > rc.9` 逐段数字比），「更新」页新增卡片给两个版本号 + 一句人话结论 + **「回滚到内置版本 X」**（走 `linuxctl rollback dsh --to <版本>`；`linuxctl update` 不删旧层文件 ⇒ 退路一直在），「关于」页加一行；`LinuxCtl.rollback()` 新增。App **0.3.0** / 模块 **1.0.18**（运行时本轮无改动） |
+
+### 第 35 条：一条流水线到底（形状、代价、以及**下一步要拆的两个 App**）
 
 1. **CI 出的 APK 没内嵌模块包。** 第 33 条给 App 加了「一键刷入内置模块」（读
    `assets/module/sunsetlinux-module.zip`），但 `release.yml` 里**模块 zip 是构建 APK 之后**才打的

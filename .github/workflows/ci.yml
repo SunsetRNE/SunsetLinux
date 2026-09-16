@@ -294,11 +294,14 @@ jobs:
           node tools/offline-bundle/mk-bundle.mjs --available --dir dist --out dist/bundles
           ls -l dist/bundles/*.bin
 
-          # ★ 四个组合必须齐全，缺一个就红。宁可让发布失败（重跑一次就好），
-          #   也不要发出一个"装完还得联网"的「完整离线版」——那正是这一版要修的问题。
+          # ★ 该有几个就一个不能少 —— 数量**由 variants.json 决定**（单一事实源）：
+          #   embed 为空的变体（root-minimal：root 模式的层走频道）本来就没有 .bin，
+          #   所以不能写死 4。缺一个就红：宁可发布失败（重跑一次就好），
+          #   也不要发出一个"装完还得联网"的完整版。
+          WANT="$(python3 -c 'import json;v=json.load(open("tools/offline-bundle/variants.json",encoding="utf-8"))["variants"];print(sum(1 for s in v.values() if s.get("embed")))')"
           GOT="$(ls dist/bundles/*.bin 2>/dev/null | wc -l | tr -d ' ')"
-          if [ "$GOT" -ne 4 ]; then
-            echo "::error::离线包只打出 $GOT/4 个（缺的组合对应的 APK 会没有内嵌环境）"
+          if [ "$GOT" -ne "$WANT" ]; then
+            echo "::error::离线包只打出 $GOT/$WANT 个（缺的变体对应的 APK 会没有内嵌环境）"
             echo "- 已有的：$(ls dist/bundles 2>/dev/null | tr '\n' ' ')"
             echo "- 频道清单里的层：$(cut -f1,2 dist/layers.tsv 2>/dev/null | tr '\n' ' ')"
             exit 1
@@ -383,21 +386,34 @@ jobs:
 
       # 内嵌不完整就不要发：App 的首启引导第 2 步是「一键刷入内置模块」，
       # 它读的正是 assets/module/。缺了它，用户看到的按钮点了只会提示"未内嵌"。
-      - name: 断言 — APK 内含内置模块包（一键刷入靠它）
+      # 内嵌内容按 edition 断言（0.3.0 起两个 App：root 带模块包、proot 带宿主脚本）
+      - name: 断言 — APK 的内嵌内容与本版匹配
         if: ${{ inputs.build_apks != false }}
         run: |
           set -euo pipefail
           fail=0
           for apk in $(find app/app/build/outputs/apk -name '*.apk'); do
-            if unzip -l "$apk" | grep -q 'assets/module/sunsetlinux-module.zip'; then
-              echo "✓ $(basename "$apk") 带 assets/module/sunsetlinux-module.zip"
-            else
-              echo "::error title=APK 没内嵌模块包::$apk 缺少 assets/module/sunsetlinux-module.zip ——「一键刷入内置模块」会退化成未内嵌（构建前跑 module/mkmodule.sh 即可）"
-              fail=1
-            fi
+            name="$(basename "$apk")"
+            case "$name" in
+              *-root-*)
+                if unzip -l "$apk" | grep -q 'assets/module/sunsetlinux-module.zip'; then
+                  echo "✓ $name 带 assets/module/sunsetlinux-module.zip"
+                else
+                  echo "::error title=Root 版没内嵌模块包::$apk 缺少 assets/module/sunsetlinux-module.zip ——「一键刷入内置模块」会退化成未内嵌（构建前跑 module/mkmodule.sh 即可）"
+                  fail=1
+                fi ;;
+              *-proot-*)
+                if unzip -l "$apk" | grep -q 'assets/proot-runtime/linuxctl.sh'; then
+                  echo "✓ $name 带 assets/proot-runtime/linuxctl.sh"
+                else
+                  echo "::error title=免 root 版缺宿主脚本::$apk 缺少 assets/proot-runtime/linuxctl.sh"
+                  fail=1
+                fi ;;
+              *)
+                echo "::warning::认不出 edition 的 APK：$name（命名规则变了？）" ;;
+            esac
           done
           [ "$fail" -eq 0 ] || exit 1
-          unzip -p "$(find app/app/build/outputs/apk -name '*minimal*.apk' | head -1)" assets/module/module.json
 
       - name: 断言 — proroot 许可合规（不得独立分发；APK 内必须完整）
         if: ${{ always() && inputs.build_apks != false && steps.android.conclusion == 'success' }}

@@ -130,8 +130,9 @@ jobs:
             echo "::error::没收到任何 APK 制品（apk-artifact/ 下没有 .apk；同步 ci.yml 的 upload-artifact 路径？）"
             exit 1
           }
-          # 四个组合缺一个就明确报出来（不许静默少发一个包）
-          for v in minimal ubuntu ubuntu-proot ubuntu-proot-dsh; do
+          # 组合清单从 variants.json 读（单一事实源；0.3.0 起是 root/proot × minimal/full 四个）
+          # 缺一个就明确报出来（不许静默少发一个包）
+          for v in $(python3 -c 'import json;print(" ".join(json.load(open("tools/offline-bundle/variants.json",encoding="utf-8"))["variants"]))'); do
             ls dist/SunsetLinux-*-"$v"-debug.apk >/dev/null 2>&1 \
               || echo "::warning::缺少组合 $v 的 APK（本次不发这个组合）"
           done

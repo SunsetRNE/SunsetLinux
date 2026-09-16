@@ -38,6 +38,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import io.github.sunsetrne.sunsetlinux.core.Edition
 import io.github.sunsetrne.sunsetlinux.core.EnvMode
 import io.github.sunsetrne.sunsetlinux.core.formatBytes
 import io.github.sunsetrne.sunsetlinux.ui.components.DshCard
@@ -88,10 +89,11 @@ fun WelcomeScreen(
             //   （root：装 KernelSU 模块 → 建层；免 root：铺内置脚本 → 铺 rootfs + 层）。
             //   以前四个 chip 对两种模式用同一套词（"准备"），用户根本不知道免 root 该准备什么。
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                // 单模式版（0.3.0 起）：第 1 步是"这个 App 是什么"，不是"选模式"
                 val labels = if (state.mode == EnvMode.PROOT) {
-                    listOf("选模式", "铺运行时", "铺环境", "完成")
+                    listOf("本版说明", "铺运行时", "铺环境", "完成")
                 } else {
-                    listOf("选模式", "装模块", "部署", "完成")
+                    listOf("本版说明", "装模块", "部署", "完成")
                 }
                 StepChip(1, labels[0], state.step.ordinal >= WelcomeStep.MODE.ordinal)
                 StepChip(2, labels[1], state.step.ordinal >= WelcomeStep.BRANCH.ordinal)
@@ -131,19 +133,24 @@ fun WelcomeScreen(
                     }
                     Spacer(Modifier.height(6.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Pill(
-                            text = state.rootProbe?.label ?: when (su) {
-                                true -> "su 可用"
-                                false -> "无 su"
-                                null -> "检测中…"
-                            },
-                            color = when {
-                                state.rootProbe?.granted == true -> StateRunning
-                                su == false -> WarnTone
-                                else -> TextMuted
-                            },
-                            filled = true,
-                        )
+                        if (Edition.needsSu) {
+                            Pill(
+                                text = state.rootProbe?.label ?: when (su) {
+                                    true -> "su 可用"
+                                    false -> "无 su"
+                                    null -> "检测中…"
+                                },
+                                color = when {
+                                    state.rootProbe?.granted == true -> StateRunning
+                                    su == false -> WarnTone
+                                    else -> TextMuted
+                                },
+                                filled = true,
+                            )
+                        } else {
+                            // 免 root 版：不探测 su，显示"本版不需要 root"才对
+                            Pill("本版不需要 root", color = StateRunning, filled = true)
+                        }
                         if (state.mode == EnvMode.PROOT) {
                             // 免 root 模式：模块与它无关（装不装都一样），要看的就三件东西
                             Pill(
@@ -204,7 +211,7 @@ fun WelcomeScreen(
                     }
                     // ★ 状态后面跟"下一步做什么"：两种模式各自的建议
                     listOfNotNull(
-                        state.rootProbe?.hint,
+                        if (Edition.needsSu) state.rootProbe?.hint else null,
                         if (state.mode == EnvMode.PROOT) {
                             state.prootSteps.firstOrNull { !it.done }?.let { "下一步：${it.title}" }
                         } else {
@@ -244,7 +251,9 @@ fun WelcomeScreen(
                 }
                 Spacer(Modifier.weight(1f))
                 when (state.step) {
-                    WelcomeStep.MODE -> Button(onClick = { state.next() }) { Text("下一步") }
+                    WelcomeStep.MODE -> Button(onClick = { state.next() }) {
+                        Text(if (Edition.isRoot) "明白了，去装模块" else "明白了，去铺运行时")
+                    }
 
                     WelcomeStep.BRANCH -> {
                         if (state.mode == EnvMode.PROOT) {
@@ -333,56 +342,81 @@ private fun StepChip(index: Int, label: String, active: Boolean) {
 
 @Composable
 private fun StepMode(state: WelcomeState) {
-    Text("选择运行方式", style = MaterialTheme.typography.titleMedium)
-    Spacer(Modifier.height(4.dp))
+    // ★ 0.3.0 起两个 App 各自锁死一条路（用户："一个纯 root 流程，一个纯免 root 流程"）。
+    //   这一步不再是"选择"，而是把**本版是什么、另一个版本是什么**说清楚 ——
+    //   以前那套"先选模式再分叉"的引导正是第 34 条里误导用户的根源。
+    Text("这个 App 是「${Edition.labelShort}」", style = MaterialTheme.typography.titleMedium)
+    Spacer(Modifier.height(6.dp))
     Text(
-        text = "两者都能跑 DSH，但能力差距很大 —— 下面把差距写清楚，请按自己的设备情况选。",
+        text = "0.3.0 起拆成两个**可同时安装**的 App，每个只走一条路，装哪个就是哪条路；" +
+            "想换一条路就装另一个（不会覆盖、数据各管各的）。",
         style = MaterialTheme.typography.bodySmall,
         color = TextSecondary,
     )
     Spacer(Modifier.height(14.dp))
 
-    ModeCard(
-        selected = state.mode == EnvMode.ROOT,
-        onClick = { state.selectMode(EnvMode.ROOT) },
-        title = "Root 模式",
-        badge = "推荐 · 能力完整",
-        badgeColor = Accent,
-        available = "需要 KernelSU / Magisk 已 root",
-        rows = listOf(
-            "真 uid=0 + 真 chroot + mount/UTS 命名空间隔离" to true,
-            "overlayfs 三层分层（EROFS 只读层 + ext4 可写层），可快照/回滚" to true,
-            "真 capabilities：环境内可以 mount、改主机名" to true,
-            "sdcard 走 /mnt/pass_through 直挂，绕开 FUSE" to true,
-            "环境由 KernelSU 模块开机启动，**与 App 生命周期解耦**（杀掉 App 不影响 DSH）" to true,
-            "需要先装模块并重启一次" to false,
-        ),
-    )
+    DshCard(Modifier.fillMaxWidth()) {
+        Column(Modifier.fillMaxWidth()) {
+            SectionLabel("本版（${Edition.applicationId}）")
+            Spacer(Modifier.height(8.dp))
+            if (Edition.isRoot) {
+                CapabilityLine(true, "真 uid=0 + 真 chroot + mount/UTS 命名空间隔离")
+                CapabilityLine(true, "overlayfs 三层（EROFS 只读层 + ext4 可写层），可快照/回滚")
+                CapabilityLine(true, "环境由 KernelSU 模块开机启动，**与 App 生命周期解耦**")
+                CapabilityLine(false, "需要先装 KernelSU 模块并重启一次（首启引导里可以一键刷入）")
+            } else {
+                CapabilityLine(true, "免 root、免刷机：铺在 App 私有目录即可运行")
+                CapabilityLine(true, "宿主脚本随 APK 内置（一键铺，约 50 KB）")
+                CapabilityLine(false, "无真 capabilities：`id` 显示 0 是 proot 伪造的，环境内不能 mount")
+                CapabilityLine(false, "**环境随 App 进程存活**：App 被杀/被冻结，环境就停")
+            }
+        }
+    }
 
     Spacer(Modifier.height(12.dp))
 
-    ModeCard(
-        selected = state.mode == EnvMode.PROOT,
-        onClick = { state.selectMode(EnvMode.PROOT) },
-        title = "非 root 模式",
-        badge = "兼容 · 免 root",
-        badgeColor = TextSecondary,
-        available = "任何设备都能用（含未 root）",
-        rows = listOf(
-            "PRoot（ptrace 系统调用翻译）虚拟环境，免 root 即可运行" to true,
-            "环境目录在 App 私有空间，卸载 App 会一起丢掉" to true,
-            "无真 capabilities：`id` 显示 0 是 PRoot 伪造的，不能 mount" to false,
-            "sdcard 走 FUSE，性能与兼容性都受限" to false,
-            "**环境随 App 进程存活**，App 被杀环境就停" to false,
-            "不需要刷机 / 不需要重启" to true,
-        ),
-    )
+    DshCard(Modifier.fillMaxWidth()) {
+        Column(Modifier.fillMaxWidth()) {
+            SectionLabel("另一个版本")
+            Spacer(Modifier.height(8.dp))
+            Text(
+                text = if (Edition.isRoot) {
+                    "**免 root 版**（io.github.sunsetrne.sunsetlinux.proot）：给不能/不想 root 的设备；" +
+                        "能力受限但没有刷机门槛。设备不能 root 时请装它。"
+                } else {
+                    "**Root 版**（io.github.sunsetrne.sunsetlinux.root）：给已经 root 的设备；" +
+                        "真 chroot、开机自启、与 App 解耦，体验明显更好。"
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = TextSecondary,
+            )
+            Spacer(Modifier.height(8.dp))
+            Text(
+                text = "两个 App 包名不同：可以同时装、各自独立（KernelSU 的 root 授权按包名记，" +
+                    "免 root 版不需要授权）。",
+                style = MaterialTheme.typography.labelSmall,
+                color = TextMuted,
+            )
+        }
+    }
+}
 
-    if (state.suAvailable == false && state.mode == EnvMode.ROOT) {
-        Spacer(Modifier.height(12.dp))
-        WarnBox(
-            "本机当前检测不到可用的 su。你可以继续选 Root 模式（先去 KernelSU/Magisk 里授权本应用），" +
-                "但如果不打算 root，请改选非 root 模式。"
+@Composable
+private fun CapabilityLine(positive: Boolean, text: String) {
+    Row(Modifier.padding(vertical = 2.dp), verticalAlignment = Alignment.Top) {
+        Icon(
+            imageVector = if (positive) Icons.Filled.CheckCircle else Icons.Filled.Warning,
+            contentDescription = null,
+            tint = if (positive) StateRunning else WarnTone,
+            modifier = Modifier
+                .padding(top = 1.dp)
+                .size(14.dp),
+        )
+        Spacer(Modifier.width(7.dp))
+        Text(
+            text = text,
+            style = MaterialTheme.typography.bodySmall,
+            color = if (positive) TextSecondary else WarnTone,
         )
     }
 }

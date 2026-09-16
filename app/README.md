@@ -294,11 +294,17 @@ CI 里由 `ci.yml` 的 android job 显式设这两个变量。
 
 `VariantOutput.outputFileName` 在 AGP 9 已移除，只能
 `(output as com.android.build.api.variant.impl.VariantOutputImpl).outputFileName.set(...)`。
-本项目必须改名：四个内置组合产出的是**同一个 App**，不改名就全是 `app-debug.apk`。
+本项目必须改名：四个变体（两个 edition × 两个档位）不改名就全是 `app-debug.apk`。
 
 ### 4. flavor 让任务名变长
 
-四个组合（minimal / ubuntu / ubuntuProot / ubuntuProotDsh）之后：
+现在有**两个维度**：`edition`（root / proot，两个可共存的 App）+ `embed`（minimal / full），
+四个变体：`rootMinimal` / `rootFull` / `prootMinimal` / `prootFull`。于是：
 `testDebugUnitTest` 会变成**歧义任务**（AGP 直接报 ambiguous），要写
-`:app:testUbuntuDebugUnitTest`（代码相同，单测跑一个变体就够）；
+`:app:testRootMinimalDebugUnitTest`（代码相同，单测跑一个变体就够）；
 `assembleDebug` 不受影响（四个一起建）。
+
+> ★ `applicationId` 在 **edition flavor** 里设（`io.github.sunsetrne.sunsetlinux.root` /
+> `…​.proot`）；`defaultConfig` 里那个占位值故意不合法的 —— 漏设会在构建期直接报错，
+> 而不是悄悄产出一个包名错的 APK。组合 id（`root-minimal` 等）在 `onVariants` 里拼出来，
+> 用 variant 级 `BuildConfig.EMBED_VARIANT` 注入。

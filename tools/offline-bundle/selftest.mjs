@@ -49,18 +49,37 @@ console.log('\n== 变体矩阵（variants.json）==');
   const variants = spec.variants ?? {};
   ok(legend.length >= 4, `parts_legend 覆盖四种部件（${legend.join(', ')}）`);
   ok(Object.keys(variants).length >= 4, `至少四个变体（${Object.keys(variants).join(', ')}）`);
+  const editions = spec.editions ?? {};
+  ok(Object.keys(editions).length === 2 && !!editions.root && !!editions.proot,
+     `两个 edition 必须在（${Object.keys(editions).join(', ')}）`);
   let bad = [];
   for (const [id, v] of Object.entries(variants)) {
     if (!Array.isArray(v.embed)) bad.push(`${id}: 缺 embed`);
     if (!v.label) bad.push(`${id}: 缺 label`);
+    if (!v.edition) bad.push(`${id}: 缺 edition`);
+    else if (!(v.edition in editions)) bad.push(`${id}: edition=${v.edition} 不在 editions 里`);
     for (const p of v.embed ?? []) if (!legend.includes(p)) bad.push(`${id}: 部件 ${p} 不在 legend`);
   }
-  ok(bad.length === 0, bad.length ? `矩阵有问题：${bad.join('; ')}` : '每个变体的 embed 都合法');
-  // 关键组合必须在（用户点名的口径）
-  ok(!!variants.minimal && variants.minimal.embed.length <= 1, '有「最小包」（只内嵌必要组件，不含 Ubuntu 层）');
-  ok(!!variants.ubuntu && variants.ubuntu.embed.includes('base') && !variants.ubuntu.embed.includes('dsh'), '有「Ubuntu 不含 dsh」');
-  ok(!!variants['ubuntu-proot'] && variants['ubuntu-proot'].embed.includes('proot'), '有「Ubuntu + proot（不含 dsh）」');
-  ok(!!variants['ubuntu-proot-dsh'] && variants['ubuntu-proot-dsh'].embed.includes('dsh'), '有「Ubuntu + proot + dsh」（完全离线）');
+  ok(bad.length === 0, bad.length ? `矩阵有问题：${bad.join('; ')}` : '每个变体都合法（embed / label / edition）');
+  // 包名必须**可共存**（用户拍板：两个 App 不同包名，各自锁模式）
+  ok(editions.root?.application_id && editions.proot?.application_id &&
+     editions.root.application_id !== editions.proot.application_id,
+     '两个 edition 的 applicationId 不同（可同时安装）');
+  ok(editions.root?.mode === 'root' && editions.proot?.mode === 'proot', 'edition 锁定的模式分别是 root / proot');
+  // 四个变体：每个 edition 各"最小 + 完整"一档
+  for (const ed of ['root', 'proot']) {
+    const mine = Object.entries(variants).filter(([, v]) => v.edition === ed);
+    // 档位数**不封顶**：矩阵是数据驱动的（用户："各种内置感觉不止 4 种吧"），
+    // 这里只要求"至少两档、且必须有最小档与完整档"。
+    ok(mine.length >= 2, `${ed} 版至少两档（${mine.map(([id]) => id).join(', ')}）`);
+    ok(new Set(mine.map(([, v]) => v.tier)).size === mine.length, `${ed} 版的档位没有重复`);
+    const min = mine.find(([, v]) => v.embed.length <= 1);
+    const full = mine.find(([, v]) => v.embed.includes('dsh'));
+    ok(!!min, `${ed} 版有「最小档」（内嵌 ≤1 个部件）`);
+    ok(!!full, `${ed} 版有「完整档」（内嵌 dsh = 零下载可用）`);
+  }
+  ok(variants['proot-full']?.embed.includes('proot') && !variants['root-full']?.embed.includes('proot'),
+     'proot 档带 proot 运行时、root 档不带（root 模式用不到它）');
 }
 
 // ─────────────────────────────────────────── 2) 合成部件的全链路
@@ -85,13 +104,13 @@ try {
     '',
   ].join('\n'));
 
-  const built = run(['--variant', 'ubuntu-proot-dsh', '--dir', dist, '--out', out]);
+  const built = run(['--variant', 'proot-full', '--dir', dist, '--out', out]);
   ok(built.code === 0, `打包成功（退出码 ${built.code}）${built.code === 0 ? '' : '：' + built.out.split('\n').slice(0, 3).join(' / ')}`);
-  const bin = join(out, 'ubuntu-proot-dsh.bin');
+  const bin = join(out, 'proot-full.bin');
   ok(built.out.includes('校验通过'), '打包后自动校验通过');
 
-  const header = JSON.parse(readFileSync(join(out, 'ubuntu-proot-dsh.json'), 'utf8'));
-  ok(header.variant === 'ubuntu-proot-dsh', '头里的 variant 正确');
+  const header = JSON.parse(readFileSync(join(out, 'proot-full.json'), 'utf8'));
+  ok(header.variant === 'proot-full', '头里的 variant 正确');
   ok(header.base_version === '24.04.3-l1' && header.runtime_version === '1.0.0' && header.dsh_version === '0.1.5-rc.1',
     `版本号从文件名解析正确（base=${header.base_version} runtime=${header.runtime_version} dsh=${header.dsh_version}）`);
   ok(header.parts.every((p) => p.sha256 && p.len > 0 && Number.isInteger(p.off)), '每个部件都有 off/len/sha256');
@@ -115,7 +134,7 @@ try {
   const distMinus = join(tmp, 'dist-minus');
   mkdirSync(distMinus, { recursive: true });
   for (const [n, b] of Object.entries(parts)) if (!n.startsWith('dsh-')) writeFileSync(join(distMinus, n), b);
-  const miss = run(['--variant', 'ubuntu-proot-dsh', '--dir', distMinus, '--out', join(tmp, 'b2')]);
+  const miss = run(['--variant', 'proot-full', '--dir', distMinus, '--out', join(tmp, 'b2')]);
   ok(miss.code !== 0 && /找不到/.test(miss.out) && /dsh/.test(miss.out),
     '缺 dsh 部件时明确失败并点名缺什么');
 
@@ -157,12 +176,12 @@ console.log('\n== 真产物（dist/ 里有层时才跑）==');
       ok(lines.length === 4, `四个变体逐个校验通过（实际 ${lines.length} 个）`);
       // 逐字节回验两个月牙层
       const ex = join(out, 'x');
-      const r = run(['--extract', join(out, 'ubuntu.bin'), '--out', ex]);
-      ok(r.code === 0, 'ubuntu 变体解包成功');
+      const r = run(['--extract', join(out, 'proot-full.bin'), '--out', ex]);
+      ok(r.code === 0, 'proot-full 变体解包成功');
       for (const n of ['base-24.04.3-l1.erofs.zst', 'runtime-1.0.0.erofs.zst']) {
         ok(existsSyncSafe(join(ex, n)) && sha(join(ex, n)) === sha(join(dist, n)), `真产物 ${n} 解包后逐字节一致`);
       }
-      const hdr = JSON.parse(readFileSync(join(out, 'ubuntu-proot-dsh.json'), 'utf8'));
+      const hdr = JSON.parse(readFileSync(join(out, 'proot-full.json'), 'utf8'));
       ok(hdr.parts.some((p) => p.kind === 'proot') && hdr.parts.some((p) => p.id === 'dsh'),
         '完全离线变体里同时含 proot 与 dsh');
     } finally {

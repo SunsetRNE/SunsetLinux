@@ -1,5 +1,5 @@
 {
-  "_comment": "内置形态的**唯一事实源**：App 的每个「包」内嵌哪些东西，全看这张表。新增/调整组合只改这里，打包工具与 CI 都读它。",
+  "_comment": "内置形态的**唯一事实源**：两个 App（edition）× 三个内置档位（tier）= 六个变体。新增/调整只改这里 —— Gradle 的 flavor、offline-bundle 工具、pipeline 的编译矩阵、下载页与 App 的组合标签**全部**读它。",
   "format": "sunsetlinux-bundle",
   "layout": "layers-split-v1",
   "parts_legend": {
@@ -8,26 +8,80 @@
     "dsh": "DSH 层（npm 全局安装 + web profile）",
     "proot": "非 root 模式的 proot 运行时（自带动态依赖，解到 $LINUX_HOME/proot）"
   },
-  "variants": {
+  "_editions_comment": "两个 App **不同包名、可共存**：各锁死自己的模式，界面上不再提供模式切换。",
+  "editions": {
+    "root": {
+      "label": "SunsetLinux Root",
+      "label_short": "Root 版",
+      "application_id": "io.github.sunsetrne.sunsetlinux.root",
+      "mode": "root",
+      "note": "真 root + 真 chroot + overlayfs 分层；环境由 KernelSU 模块开机启动，与 App 生命周期解耦"
+    },
+    "proot": {
+      "label": "SunsetLinux 免root",
+      "label_short": "免 root 版",
+      "application_id": "io.github.sunsetrne.sunsetlinux.proot",
+      "mode": "proot",
+      "note": "不需要 root、不需要刷机；环境铺在 App 私有目录，随 App 进程存活"
+    }
+  },
+  "_tiers_comment": "档位 = **内置到多深**（不是两档就封顶：要加就加一条，Gradle 的 flavor 与 pipeline 的矩阵都会自动跟上）。",
+  "tiers": {
     "minimal": {
       "label": "最小版",
-      "embed": ["proot"],
-      "note": "只带 proot 运行时（非 root 必需件）；Ubuntu 与 dsh 按需下载/导入，APK 最小"
+      "note": "只带本版**跑起来必需**的那一件（root 版什么都不带 = 层全走频道；免 root 版带 proot 运行时）"
     },
-    "ubuntu": {
+    "base": {
       "label": "Ubuntu 版",
-      "embed": ["base", "runtime"],
-      "note": "内嵌 Ubuntu 基础环境（base + runtime）；dsh 与 proot 另取"
+      "note": "内置 Ubuntu（base + runtime）：能起环境，DSH 走频道/运行时更新"
     },
-    "ubuntu-proot": {
-      "label": "免 root 版",
-      "embed": ["base", "runtime", "proot"],
-      "note": "内嵌 Ubuntu + proot：root / 非 root 都能离线起步（不含 dsh）"
-    },
-    "ubuntu-proot-dsh": {
+    "full": {
       "label": "完整离线版",
+      "note": "内置 Ubuntu + DSH（免 root 版另带 proot）：装完零下载即可用；DSH 版本随 APK 冻结，运行时仍可更新"
+    }
+  },
+  "variants": {
+    "root-minimal": {
+      "edition": "root",
+      "tier": "minimal",
+      "label": "Root 最小版",
+      "embed": [],
+      "note": "不含任何环境；装完用「更新」页从频道装层。给「有 Wi-Fi、想要最小 APK」的人"
+    },
+    "root-base": {
+      "edition": "root",
+      "tier": "base",
+      "label": "Root Ubuntu 版",
+      "embed": ["base", "runtime"],
+      "note": "内置 Ubuntu 基础环境；DSH 从频道装（想自己控制 DSH 版本的人选这档）"
+    },
+    "root-full": {
+      "edition": "root",
+      "tier": "full",
+      "label": "Root 完整离线版",
+      "embed": ["base", "runtime", "dsh"],
+      "note": "内嵌 Ubuntu + DSH：装完离线即可部署（root 模式不需要 proot 运行时）"
+    },
+    "proot-minimal": {
+      "edition": "proot",
+      "tier": "minimal",
+      "label": "免 root 最小版",
+      "embed": ["proot"],
+      "note": "只带 proot 运行时（免 root 必需件）；Ubuntu 与 dsh 走频道/离线包，APK 最小"
+    },
+    "proot-base": {
+      "edition": "proot",
+      "tier": "base",
+      "label": "免 root Ubuntu 版",
+      "embed": ["base", "runtime", "proot"],
+      "note": "内嵌 Ubuntu + proot：能起环境，DSH 从频道装"
+    },
+    "proot-full": {
+      "edition": "proot",
+      "tier": "full",
+      "label": "免 root 完整离线版",
       "embed": ["base", "runtime", "proot", "dsh"],
-      "note": "内嵌 Ubuntu + proot + dsh：装完开机即用，零下载"
+      "note": "内嵌 Ubuntu + proot + DSH：免 root 装完零下载即可起步"
     }
   }
 }

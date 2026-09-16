@@ -181,6 +181,22 @@ class LinuxCtl(private val context: Context, val mode: EnvMode) {
 
     suspend fun reset(): CtlResult = execBlocking(listOf("reset"), TIMEOUT_UPDATE)
 
+    /**
+     * 把某一层切回指定版本（不给版本就由脚本挑"比当前低的最高版本"）。
+     *
+     * 用途（内置 DSH 解耦）：完整离线版把 DSH 冻在 APK 里，运行时那份会被频道更新；
+     * 更新出问题时，`rollback dsh <内置版本>` 就能回到随包冻结的那份 —— 装离线包时
+     * 那一层的文件就在 `layers/` 下，而 `update` **不删旧文件**，所以这条退路一直在。
+     */
+    suspend fun rollback(layer: String, version: String? = null): CtlResult {
+        val args = buildList {
+            add("rollback")
+            add(layer)
+            version?.trim()?.ifEmpty { null }?.let { add("--to"); add(it) }
+        }
+        return execBlocking(args, TIMEOUT_UPDATE)
+    }
+
     suspend fun snapshot(name: String): CtlResult =
         execBlocking(listOf("snapshot", name), TIMEOUT_UPDATE)
 

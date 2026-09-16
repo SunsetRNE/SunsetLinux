@@ -61,25 +61,74 @@ val gitHash: String = runCatching {
 val standardVersion = "$engineeringVersion-$buildTime-$gitHash"
 
 /**
- * 内置组合（与 tools/offline-bundle/variants.json 的 id 一一对应）。
+ * 内置矩阵：**全部从 `tools/offline-bundle/variants.json` 读**（单一事实源）。
  *
- * ★ Gradle 的 flavor 名必须是合法标识符（不能带 `-`），所以内部用驼峰、产物用带横杠的 id；
- *   两者靠这里的映射对齐 —— 改组合只改这张表 + variants.json。
+ * ## 为什么不再在这里写死 flavor 表
+ *
+ * 0.3.0 第一版把"edition × 档位"写死在构建脚本里，加一档就要改两处（JSON + Gradle），
+ * 而用户明确说了"纯 Root、免 Root、然后各种内置感觉不止 4 种"—— 矩阵还会继续长
+ * （例如再加"只内置 DSH 层"这种组合）。所以现在：
+ *   · editions / tiers / 每个组合的内嵌部件与标签，**全部来自 variants.json**；
+ *   · 加一档 = 改 JSON 一行 + 在 App 里不需要任何改动；
+ *   · pipeline 的编译矩阵也读同一个文件（它按 "<edition>-<tier>" 推 Gradle 任务名），
+ *     所以连 CI 都不用改。
+ *
+ * 构建期只做两件事的推导（都无法从 JSON 直接拿）：
+ *   ① flavor 名必须是合法标识符 → edition/tier 直接用作 flavor 名（root/proot、minimal/base/full）；
+ *   ② 组合 id = "<edition>-<tier>"（与 JSON 的键逐字一致）。
  */
-data class EmbedFlavor(val gradleName: String, val id: String, val label: String, val parts: String)
-val embedFlavors = listOf(
-    EmbedFlavor("minimal", "minimal", "最小版", "proot"),
-    EmbedFlavor("ubuntu", "ubuntu", "Ubuntu 版", "base,runtime"),
-    EmbedFlavor("ubuntuProot", "ubuntu-proot", "免 root 版", "base,runtime,proot"),
-    EmbedFlavor("ubuntuProotDsh", "ubuntu-proot-dsh", "完整离线版", "base,runtime,proot,dsh"),
-)
+val variantsJsonFile = File(rootDir.parentFile, "tools/offline-bundle/variants.json")
+require(variantsJsonFile.isFile) { "找不到 ${variantsJsonFile.path}（内置矩阵的唯一事实源）" }
+@Suppress("UNCHECKED_CAST")
+val variantsSpec = groovy.json.JsonSlurper().parse(variantsJsonFile) as Map<String, Any>
+
+data class Edition(val gradleName: String, val id: String, val label: String, val labelShort: String, val applicationId: String, val mode: String)
+
+@Suppress("UNCHECKED_CAST")
+val editions: List<Edition> = (variantsSpec["editions"] as Map<String, Map<String, Any>>).map { (id, e) ->
+    Edition(
+        gradleName = id,
+        id = id,
+        label = e["label"] as String,
+        labelShort = e["label_short"] as String,
+        applicationId = e["application_id"] as String,
+        mode = e["mode"] as String,
+    )
+}
+
+/** 档位：按 JSON 里的顺序（下载页/说明的顺序也跟着它走）。 */
+@Suppress("UNCHECKED_CAST")
+val tierLabels: Map<String, String> =
+    (variantsSpec["tiers"] as? Map<String, Map<String, Any>>)?.mapValues { it.value["label"] as String } ?: emptyMap()
+
+@Suppress("UNCHECKED_CAST")
+val variantSpecs: Map<String, Map<String, Any>> = variantsSpec["variants"] as Map<String, Map<String, Any>>
+
+/** 所有出现过的档位名（从组合 id 的 "<edition>-<tier>" 里拆出来，保序去重）。 */
+val tierIds: List<String> = variantSpecs.keys.map { it.substringAfter('-') }.distinct()
+require(tierIds.isNotEmpty()) { "variants.json 里没有任何组合" }
+
+/** 组合 id → 内嵌部件（逗号分隔，BuildConfig 用）。 */
+val variantParts: Map<String, String> = variantSpecs.mapValues { (_, v) ->
+    @Suppress("UNCHECKED_CAST")
+    (v["embed"] as List<String>).joinToString(",")
+}
+
+/** 某个 edition × 档位的真实部件（从 JSON 取；缺这个组合就报错，别静默少一个包）。 */
+fun partsOf(editionId: String, tierId: String): String {
+    val id = "$editionId-$tierId"
+    return variantParts[id] ?: error("variants.json 里没有组合 $id（editions: ${editions.map { it.id }}；tiers: $tierIds）")
+}
 
 android {
     namespace = "io.github.sunsetrne.sunsetlinux"
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "io.github.sunsetrne.sunsetlinux"
+        // ★ 真正的 applicationId 在 **edition flavor** 里设（两个 App 不同包名）。
+        //   这里给一个绝不可能被用到的占位值：任何 flavor 漏设都会在构建期直接报错，
+        //   而不是悄悄产出一个包名错误的 APK（真机装上去才发现是另一回事）。
+        applicationId = "io.github.sunsetrne.sunsetlinux.EDITION-NOT-SET"
         minSdk = 26
         targetSdk = 35
         // 版本号来自 app/version.properties；逐版变更说明在 app/VERSION-NOTES.md
@@ -137,14 +186,27 @@ android {
     // 差别只在 assets/ 里内嵌哪份离线包（见 tools/offline-bundle/variants.json）。
     // 换组合 = 覆盖安装另一个 APK，数据不丢；KernelSU 授权按【包名+签名】记，也不受影响。
     // ────────────────────────────────────────────────────────────────────────
-    flavorDimensions += "embed"
+    flavorDimensions += listOf("edition", "embed")
     productFlavors {
-        embedFlavors.forEach { f ->
-            create(f.gradleName) {
+        editions.forEach { e ->
+            create(e.gradleName) {
+                dimension = "edition"
+                // 两个可共存的 App：包名不同（KernelSU 授权、App 数据、卸载互不影响）
+                applicationId = e.applicationId
+                buildConfigField("String", "EDITION", "\"${e.id}\"")
+                buildConfigField("String", "EDITION_LABEL", "\"${e.label}\"")
+                buildConfigField("String", "EDITION_LABEL_SHORT", "\"${e.labelShort}\"")
+                buildConfigField("String", "EDITION_MODE", "\"${e.mode}\"")
+                // 本 edition 锁定的模式：界面据此隐藏"切换模式"（单模式 App）
+                // 档位与部件在 embed flavor 里拼（组合 id = "<edition>-<tier>"）
+                buildConfigField("String", "EDITION_ID", "\"${e.id}\"")
+            }
+        }
+        tierIds.forEach { t ->
+            create(t) {
                 dimension = "embed"
-                buildConfigField("String", "EMBED_VARIANT", "\"${f.id}\"")
-                buildConfigField("String", "EMBED_LABEL", "\"${f.label}\"")
-                buildConfigField("String", "EMBED_PARTS", "\"${f.parts}\"")
+                buildConfigField("String", "EMBED_TIER", "\"$t\"")
+                buildConfigField("String", "EMBED_LABEL", "\"${tierLabels[t] ?: t}\"")
             }
         }
     }
@@ -589,8 +651,20 @@ tasks.matching { it.name == "preBuild" }.configureEach { dependsOn(buildPty) }
 
 androidComponents {
     onVariants { variant ->
-        val flavor = embedFlavors.firstOrNull { it.gradleName == variant.flavorName }
-        val variantId = flavor?.id ?: variant.flavorName
+        // 两个维度拼出组合 id（与 tools/offline-bundle/variants.json 的键逐字一致）：
+        //   edition=root/proot，embed=minimal/full → "root-minimal" / "proot-full" …
+        val editionName = variant.productFlavors.firstOrNull { it.first == "edition" }?.second ?: "root"
+        val tierName = variant.productFlavors.firstOrNull { it.first == "embed" }?.second ?: "minimal"
+        val edition = editions.firstOrNull { it.gradleName == editionName }
+        val variantId = "${edition?.id ?: editionName}-$tierName"
+        val parts = partsOf(edition?.id ?: editionName, tierName)
+
+        // 组合 id / 部件只在**运行时**才知道 → 用 variant 级 BuildConfig 注入
+        // （flavor 级只能给"每个维度各自知道"的值，拼不出组合）
+        val isRootEdition = (edition?.id ?: editionName) == "root"
+        variant.buildConfigFields?.put("EMBED_VARIANT", com.android.build.api.variant.BuildConfigField("String", "\"$variantId\"", null))
+        variant.buildConfigFields?.put("EMBED_PARTS", com.android.build.api.variant.BuildConfigField("String", "\"$parts\"", null))
+        variant.buildConfigFields?.put("APP_ID", com.android.build.api.variant.BuildConfigField("String", "\"${edition?.applicationId ?: ""}\"", null))
 
         // ① APK 名：SunsetLinux-<版本>-<组合>.apk（debug 构建类型再带 -debug，
         //    与 Branchbase 的产物命名规则一致）
@@ -613,52 +687,63 @@ androidComponents {
         }
         variant.sources.assets?.addGeneratedSourceDirectory(embed, EmbedOfflineBundle::outputDir)
 
-        // ②b 内置 KernelSU 模块包：首启引导第 2 步「一键刷入」靠它（四个组合都带 ——
-        //     模块与组合无关，而用户在任何组合下都可能选 Root 模式）。
-        val moduleTaskName = "syncBundledModule" + variant.name.replaceFirstChar { it.uppercase() }
-        val bundledModule = tasks.register<SyncBundledModule>(moduleTaskName) {
-            group = "build"
-            description = "把 dist/sunsetlinux-module-*.zip 内嵌进 assets/module/（没有则跳过）"
-            moduleProp.set(File(rootDir.parentFile, "module/module.prop"))
-            candidates.from(
-                fileTree(File(rootDir.parentFile, "dist")) { include("sunsetlinux-module-*.zip") },
-            )
+        // ②b 内置 KernelSU 模块包：**只有 root 版带** —— 免 root 版与 KernelSU 模块无关，
+        //     装了也没用（首启引导那一步在免 root 分支根本不会出现）。
+        if (isRootEdition) {
+            val moduleTaskName = "syncBundledModule" + variant.name.replaceFirstChar { it.uppercase() }
+            val bundledModule = tasks.register<SyncBundledModule>(moduleTaskName) {
+                group = "build"
+                description = "把 dist/sunsetlinux-module-*.zip 内嵌进 assets/module/（没有则跳过）"
+                moduleProp.set(File(rootDir.parentFile, "module/module.prop"))
+                candidates.from(
+                    fileTree(File(rootDir.parentFile, "dist")) { include("sunsetlinux-module-*.zip") },
+                )
+            }
+            variant.sources.assets?.addGeneratedSourceDirectory(bundledModule, SyncBundledModule::outputDir)
         }
-        variant.sources.assets?.addGeneratedSourceDirectory(bundledModule, SyncBundledModule::outputDir)
 
-        // ③ proot 宿主脚本（四个组合都带；root 模式下用不到，但"免 root 版"必须靠它才能起）
-        val prootTaskName = "syncProotRuntime" + variant.name.replaceFirstChar { it.uppercase() }
-        val prootAssets = tasks.register<SyncProotRuntimeAssets>(prootTaskName) {
-            group = "build"
-            description = "把 runtime/proot 的宿主脚本放进 assets/proot-runtime/"
-            sources.from(
-                fileTree(File(rootDir.parentFile, "runtime/proot")) {
-                    include("*.sh", "*.md")
-                },
-            )
+        // ③ proot 宿主脚本：**只有免 root 版带** —— root 模式的 linuxctl 由 KernelSU 模块铺，
+        //    把这套脚本塞进 root 版只会白占 ~180 KB 且容易让人误以为它有用。
+        if (!isRootEdition) {
+            val prootTaskName = "syncProotRuntime" + variant.name.replaceFirstChar { it.uppercase() }
+            val prootAssets = tasks.register<SyncProotRuntimeAssets>(prootTaskName) {
+                group = "build"
+                description = "把 runtime/proot 的宿主脚本放进 assets/proot-runtime/"
+                sources.from(
+                    fileTree(File(rootDir.parentFile, "runtime/proot")) {
+                        include("*.sh", "*.md")
+                    },
+                )
+            }
+            variant.sources.assets?.addGeneratedSourceDirectory(prootAssets, SyncProotRuntimeAssets::outputDir)
         }
-        variant.sources.assets?.addGeneratedSourceDirectory(prootAssets, SyncProotRuntimeAssets::outputDir)
 
         // ④ proroot（免 root 首选运行时）：二进制进 jniLibs，许可进 assets。
-        //    四个组合都带 —— proroot 只在"非 root 模式"生效，而任何组合都可能被
-        //    用户选成非 root 模式（没 su / 用户强制 proot）。
-        val prorootTaskName = "syncProrootLibs" + variant.name.replaceFirstChar { it.uppercase() }
-        val prorootLibs = tasks.register<SyncProrootLibs>(prorootTaskName) {
-            group = "build"
-            description = "取用 proroot（专有许可，只随 APK 分发）并铺成 jniLibs/arm64-v8a"
-            repoRoot.set(rootDir.parentFile.absolutePath)
-            vendorJson.set(File(rootDir.parentFile, "tools/proroot/VENDOR.json"))
-            sourceDir.set(File(rootDir.parentFile, "dist/proroot"))
+        //    **只有免 root 版带** —— 0.3.0 起模式由 edition 锁定，Root 版永远不会用到它
+        //    （省 ~650 KB，也让 root 版不牵扯 proroot 的专有许可）。
+        // proroot：只有**免 root 版**需要（root 模式从不用 LD_PRELOAD 运行时）。
+        // 少这个 .so 能省 ~650 KB，也让 root 版不牵扯 proroot 的专有许可。
+        if (!isRootEdition) {
+            val prorootTaskName = "syncProrootLibs" + variant.name.replaceFirstChar { it.uppercase() }
+            val prorootLibs = tasks.register<SyncProrootLibs>(prorootTaskName) {
+                group = "build"
+                description = "取用 proroot（专有许可，只随 APK 分发）并铺成 jniLibs/arm64-v8a"
+                repoRoot.set(rootDir.parentFile.absolutePath)
+                vendorJson.set(File(rootDir.parentFile, "tools/proroot/VENDOR.json"))
+                sourceDir.set(File(rootDir.parentFile, "dist/proroot"))
+            }
+            variant.sources.jniLibs?.addGeneratedSourceDirectory(prorootLibs, SyncProrootLibs::outputDir)
         }
-        variant.sources.jniLibs?.addGeneratedSourceDirectory(prorootLibs, SyncProrootLibs::outputDir)
 
-        val prorootLicenseTaskName = "syncProrootLicense" + variant.name.replaceFirstChar { it.uppercase() }
-        val prorootLicense = tasks.register<SyncProrootLicense>(prorootLicenseTaskName) {
-            group = "build"
-            description = "把 proroot 许可原文放进 assets/licenses/（许可第 4 条）"
-            licenseFile.set(File(rootDir.parentFile, "tools/proroot/LICENSE.proroot"))
-            version.set(prorootVersion)
+        if (!isRootEdition) {
+            val prorootLicenseTaskName = "syncProrootLicense" + variant.name.replaceFirstChar { it.uppercase() }
+            val prorootLicense = tasks.register<SyncProrootLicense>(prorootLicenseTaskName) {
+                group = "build"
+                description = "把 proroot 许可原文放进 assets/licenses/（许可第 4 条：只在带它的包里）"
+                licenseFile.set(File(rootDir.parentFile, "tools/proroot/LICENSE.proroot"))
+                version.set(prorootVersion)
+            }
+            variant.sources.assets?.addGeneratedSourceDirectory(prorootLicense, SyncProrootLicense::outputDir)
         }
-        variant.sources.assets?.addGeneratedSourceDirectory(prorootLicense, SyncProrootLicense::outputDir)
     }
 }
