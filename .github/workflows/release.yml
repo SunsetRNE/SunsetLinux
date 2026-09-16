@@ -56,6 +56,9 @@ jobs:
   bundles:
     name: ② 内嵌离线包
     if: ${{ inputs.embed_bundles != false }}
+    # 被调用的 offline-bundle.yml 声明了 contents: write（挂 Release），调用方必须允许
+    permissions:
+      contents: write
     uses: ./.github/workflows/offline-bundle.yml
     with:
       attach_release: false
@@ -72,6 +75,9 @@ jobs:
   publish:
     name: ④ 发布
     needs: gate
+    # publish.yml 声明了 contents: write（推 gh-pages + 建 Release），调用方必须允许
+    permissions:
+      contents: write
     uses: ./.github/workflows/publish.yml
     with:
       channel: ${{ inputs.channel || 'auto' }}

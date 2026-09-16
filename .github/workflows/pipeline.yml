@@ -122,6 +122,11 @@ jobs:
   bundles:
     name: ② 内嵌离线包
     if: ${{ inputs.embed_bundles != false }}
+    # ★ 被调用的 offline-bundle.yml 在工作流级声明了 `contents: write`（它要挂 Release）。
+    #   GitHub 的规则是"调用方只能**收紧**、不能收紧到低于被调用方声明的权限"，
+    #   不显式授权就会在**计划阶段**直接失败（报 Invalid workflow file，工作流一行都不跑）。
+    permissions:
+      contents: write
     uses: ./.github/workflows/offline-bundle.yml
     with:
       # 不在这一步等 Release：流水线里 Release 由 ⑤ publish 统一建，
@@ -159,6 +164,9 @@ jobs:
     name: ⑤ 合并 + 发布
     needs: [prep, build, gates, bundles]
     if: ${{ always() && needs.build.result == 'success' && needs.gates.result == 'success' && (needs.bundles.result == 'success' || needs.bundles.result == 'skipped') }}
+    # 同理：publish.yml 的 publish job 声明了 `contents: write`（推 gh-pages + 建 Release）
+    permissions:
+      contents: write
     uses: ./.github/workflows/publish.yml
     with:
       channel: ${{ inputs.channel || 'auto' }}
