@@ -163,6 +163,7 @@ pipeline.yml（推 main/beta 时**只有它跑**）           ← 2026-09-16 起
 |---|---|---|---|
 | android | Android 单测（必须两条一起跑） | `./gradlew :app:assemble$<档位> :app:test$<变体>UnitTest` | 148 |
 | android | **内嵌离线包真的进了 APK**（0.3.0 新增，见 §三·一） | `tools/ci-assert-embed.sh <apk> <变体>` | 每个 APK 1 条 |
+| android | **包名与桌面标签和矩阵一致**（0.3.1 新增，见 §三·一） | `tools/ci-assert-identity.sh <apk> <变体>` | 每个 APK 2 条 |
 | shell | root 运行时回归（bash） | `bash runtime/root/selftest.sh` | 42 |
 | shell | root 运行时回归（**mksh**，模拟设备侧） | `mksh runtime/root/selftest.sh` | 42 |
 | shell | proot 运行时回归 | `bash runtime/proot/selftest.sh` | 18 |
@@ -201,6 +202,20 @@ pipeline.yml（推 main/beta 时**只有它跑**）           ← 2026-09-16 起
 
 - 接在 **`build-apk.yml` 每个编译节点**（`--require`，因为该 run 确实产出了离线包）
   与 **`ci.yml` 的独立门禁**（`dist/bundles/*.bin` 存在时才 `--require`）。
+
+### 三·二、系统身份的门禁：包名 + 桌面标签（`tools/ci-assert-identity.sh`）
+
+同一类教训的第二例（都是"编译期成功、真机才发现"）：
+
+| 事故 | 后果 | 现在怎么挡 |
+|---|---|---|
+| 0.3.0 拆成两个 App 时只改了 `main/res` 的 `app_name`，按 flavor 覆盖的 `src/<edition>/res/` 不存在 | 真机上两个 App **桌面同名**，用户点哪个纯靠猜 | 用 `aapt2 dump badging` 读 `application-label`，必须等于 `variants.json` 的 `editions[].label` |
+| 两个 App 靠 `applicationId` 共存 | flavor 接线错误导致包名撞车 → 用户装一个**覆盖**另一个，KernelSU 授权与 App 数据全对不上 | 同样读 `package: name=`，必须等于 `editions[].application_id` |
+
+- 判定同样**只认 `variants.json`**（标签与包名都不在 CI 里抄第二份）。
+- `aapt2` 从 `$ANDROID_SDK_ROOT/build-tools/*/aapt2` 取（Gradle 之后跑，build-tools 已在），
+  再退化到 `command -v aapt2` 与 SDK 目录内 `find`；**找不到只告警跳过**，不让发布卡在工具缺失上。
+- 接在 `build-apk.yml`（每个编译节点）与 `ci.yml` 的独立门禁两条路径上。
 - ⚠️ **别用"小于 1 MiB 就是占位"这种启发式**：`proot-minimal` 的包只有 **989224 字节**
   （0.94 MiB，就是 proot 本体），一律按 MiB 也会显示成"0 MiB" —— 实测就会被误杀成假红。
   真判据是"与本地同名包严格等大"；拿不到本地包时才退化成"> 4 KiB 不是空壳"。

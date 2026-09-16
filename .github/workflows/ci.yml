@@ -441,6 +441,8 @@ jobs:
             else
               tools/ci-assert-embed.sh "$apk" "$variant" || fail=1
             fi
+            # 身份（包名 + 桌面标签）：见 tools/ci-assert-identity.sh 头部 —— 两条真事故
+            tools/ci-assert-identity.sh "$apk" "$variant" || fail=1
           done
           [ "$fail" -eq 0 ] || exit 1
 

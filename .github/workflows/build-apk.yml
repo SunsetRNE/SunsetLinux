@@ -200,6 +200,19 @@ jobs:
           done
           exit $fail
 
+      # ★ 身份门禁：**包名**与**桌面标签**必须与 variants.json 一致。
+      #   两件真事：0.3.0 两个 App 在真机上桌面同名（分不清点哪个）；两个 App 靠包名共存，
+      #   万一 flavor 接线错了让包名撞车，用户装一个就把另一个覆盖掉（KernelSU 授权、
+      #   App 数据全对不上）—— 而编译期都是"成功"的。两者都只能打开 APK 看。
+      - name: 断言 — 包名与桌面标签和矩阵一致
+        run: |
+          set -euo pipefail
+          fail=0
+          for apk in $(find app/app/build/outputs/apk -name '*.apk'); do
+            tools/ci-assert-identity.sh "$apk" "${{ inputs.variant }}" || fail=1
+          done
+          exit $fail
+
       - name: 上传 ${{ inputs.variant }} 的 APK
         uses: actions/upload-artifact@v4
         with:
