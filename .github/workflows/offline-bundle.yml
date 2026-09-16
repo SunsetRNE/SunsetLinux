@@ -22,6 +22,10 @@ on:
     paths:
       - 'tools/offline-bundle/**'
       - '.github/workflows/offline-bundle.yml'
+      # ★ 发新版本也要重跑：离线包的**发布名带 App 版本**
+      #   （`SunsetLinux-<App 版本>-<组合>.bin`），版本一改，上一版的 .bin 名字就对不上
+      #   这一版的 Release 了（0.2.5 → 0.2.6 实际发生过：Release 上只有 APK，没有 .bin）。
+      - 'app/version.properties'
   workflow_dispatch:
 
 permissions:
