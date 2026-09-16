@@ -24,6 +24,53 @@
 | 0.2.10 | 12 | **加"无 loop 层模式"开关（dir）**：把三层解包成目录 + 目录 overlayfs，**完全不碰 loop / erofs / upper.img**；「设置 → 层模式」可切、也读 `SUNSETLINUX_LAYER_MODE` 与 `etc/config.json` 的 `layer_mode`（默认 loop 省磁盘）。模块 **1.0.15**：dir 模式实现 + doctor §1e 层模式检查 |
 | 0.3.0 | 15 | **拆成两个可共存的 App（各锁一条路）+ 内置矩阵数据驱动（6 个变体）+ 内置 DSH 与运行时 DSH 解耦**：root 版 `…​.root`、免 root 版 `…​.proot`（不同包名、可同时安装、界面不再有"切换模式"）；内置档位从 2 档扩到 **3 档**（最小 / Ubuntu / 完整离线），矩阵与标签**全部读 `tools/offline-bundle/variants.json`**（加档只改 JSON，Gradle flavor 与 CI 矩阵自动跟上）；新增 `core/DshPin.kt` —— 「内置 DSH（随 APK 冻结）↔ 运行时 DSH（可被频道更新）」对账（纯函数 + 9 条单测），「更新」页给两个版本号与结论、并给**一键回滚到内置版本**（`linuxctl rollback dsh --to <版本>`；`update` 不删旧层文件，所以退路一直在），「关于」页也有一行。模块 **1.0.18**（本轮运行时无改动） |
 | 0.3.1 | 16 | **修「两个 App 桌面同名」**（真机实测）：0.3.0 只改了 `main/res` 的 app_name，`src/<edition>/res/` 根本不存在，于是 root 版与免 root 版在桌面上都叫 "SunsetLinux"，用户点哪个纯靠猜。现在按 edition 设 `app_name`（`resValue` 取 `variants.json` 的 `editions[].label`）：**SunsetLinux Root** / **SunsetLinux 免root**；并打开 AGP 9 默认关闭的 `buildFeatures.resValues`。同时修一批拆版后过时的文案（"四个组合同一个 App、换组合就是覆盖安装"→ "同 App 内换档位＝覆盖安装；root / 免 root 是两个不同的 App"），Release 说明里那个从 0.2.x 起就不存在的 `sunsetlinux-launcher-debug.apk` 也换成了按 `variants.json` 推出来的真实文件名 |
+| 0.3.2 | 17 | **真机挂载归因 + 修掉三处 bug + 本机能力探测**（模块 **1.0.19**）：① **可写层挂载点不一致** —— `mount_upper_rw` 把 `upper.img` 挂到 `$ROOTFS_DIR/upper`，而 `architecture.md`/`stop.sh`/`linuxctl` 全都按 `$LINUX_HOME/upper` 找它 ⇒ overlay 的 `upperdir`（`$UPPER_DIR/upper`）根本看不到那块 ext4，8 GiB 镜像白挂、还被随后挂在 `$ROOTFS_DIR` 的 overlay 遮住；② **toybox 能力探测谎报** —— 判定表认不出 `Unknown option 'propagation'`（大写 U）与 `bad /etc/fstab`，于是每次启动都先按"支持"去调 `--propagation`/`--make-rprivate`（注定失败，日志里那两行就是这么来的）；③ **overlay 失败没诊断** —— 既不记实际入参，`kernel_hint_log` 的 grep 又把 `overlayfs:` 过滤掉了。新增 `overlay_fs_usable()`（同 fs 两个空目录只读试挂，实测该 fs 能不能当 overlay 的层）+ `probe_loop_io`/`probe_fuse_mount`（`PROBE_VERSION=2` 让老 cmdprobe 失效重探）。**真机结论（都有内核原文）**：这台机 `/data` 的 f2fs 被 overlayfs 一律拒绝（`ovl_dentry_weird` 命中 `DCACHE_OP_HASH/COMPARE`）⇒ dir 模式在这台机不可能；loop 的 I/O 在 `kernel` 域被 SELinux 拒（厂商只读 loop 背 `system_file` 正常、我们的文件连**读**都 FAIL、`chcon system_file` 后读通写仍被拒）⇒ **loop 快路需要一条可选的 `kernel` 域 sepolicy 规则，依旧不需要编/刷内核** |
+
+## 0.3.2 —— 真机挂载归因；三处 bug；"这台机起不来"背后的三条限制
+
+**用户的两句话**：
+
+1. "上一轮真机启动失败（loop 层 I/O error → 降级 dir 模式又 EINVAL）"；
+2. "我在想我这台机子上起步比较困难，那后面适配其他安卓系统岂不是也困难？能不能做公共挂载适配，
+   总不能源码级编译内核刷写？"
+
+### 1）修掉的三处 bug（都与这一轮的两个失败直接相关）
+
+| # | bug | 证据 / 后果 |
+|---|---|---|
+| ① | `mount_upper_rw` 把 `upper.img` 挂到 `$ROOTFS_DIR/upper`，而 `docs/architecture.md`、`stop.sh`、`linuxctl.sh`、`doctor` 全按 `$LINUX_HOME/upper` 找它 | overlay 的 `upperdir` 是 `$UPPER_DIR/upper` ⇒ **看到的是 f2fs 上的普通目录，不是那块 ext4**；8 GiB 镜像白挂，而且它还被随后挂在 `$ROOTFS_DIR` 的 overlay 遮住（不可达的死挂载）。已对齐到 `$UPPER_DIR`，`run/mounts` 登记表支持绝对路径、`stop.sh` 跳过绝对项（并给老版本的 `rootfs/upper` 留兜底） |
+| ② | toybox 能力探测谎报：判定表认不出 `Unknown option 'propagation'`（大写 U）与 `mount: bad /etc/fstab` | 真机 `cmdprobe` 记的是 `unshare_propagation=yes` + `mount_make_rslave=long` ⇒ 每次启动都先按"支持"去调 `--propagation private` / `--make-rprivate`，**注定失败**后才回退（日志里两行 `bad /etc/fstab`、两行 `unshare: Unknown option` 就是这么来的）。已换统一的 `probe_says_unsupported`；并写明**为什么不能用 `-o rprivate / /` 顶替**：toybox 见到两个目录参数会自行判成 bind 并清掉 `MS_REC` ⇒ 在 `/` 上压一层非递归 bind，`/data` 这类子挂载会被遮住（比不设更糟） |
+| ③ | overlay 挂载失败没有诊断：不记实际入参；`kernel_hint_log` 的 grep 只含 `loop|ext4|jbd2`，**恰好把 `overlayfs:` 过滤掉** | 上一轮的日志里只剩一句 `Invalid argument`，查不动。现在失败会带上"实际传下去的选项 + 内核原文"，并写进 `last-error`（App 诊断页读它） |
+
+### 2）新增：本机能力探测（"公共挂载适配"的第一块砖）
+
+- `overlay_fs_usable()`：拿**同文件系统上的两个空目录**做一次只读 overlay 试挂，实测这个 fs 能不能当层
+  （不能靠 fs 名字硬编码 —— 有的 f2fs 能用、有的不能）。接在两个 dir 模式入口**解包之前**：
+  不能就立刻带原因退出，不再白等 1.6 GB / 几分钟。
+- `probe_loop_io` / `probe_fuse_mount` 进 `cmdprobe`，并加 `PROBE_VERSION`（=2）让老设备的缓存失效重探；
+  `loop_read=no` 时直接跳过"清残留 loop → e2fsck -p → 显式 losetup"那套仪式（那三步救不了"域没权限"）。
+- 只测**读**：读是同步的、结果可信；写会进页缓存，"dd 成功"不等于写到了文件
+  （真机上就是 `Buffer I/O error … lost async page write` 这种异步失败）。
+
+### 3）这台机的三条限制（都有内核原文，也解释了"为什么不能靠编内核解决"）
+
+1. **overlayfs 拒绝 f2fs**：`overlayfs: filesystem on '/data/sunsetlinux/dirs-upper' not supported` →
+   `fs/overlayfs/util.c` 的 `ovl_dentry_weird()` 命中 f2fs 的 `DCACHE_OP_HASH|DCACHE_OP_COMPARE`
+   （casefold）。**连只读 lowerdir 都不收** ⇒ dir 模式在这台机上不可能（这是内核规则，策略改不了）。
+2. **loop 的 I/O 在 `kernel` 域被 SELinux 拒**：厂商那些只读 loop（backing file 是 `/system_ext` 的
+   `system_file`）正常；换成 `$LINUX_HOME` 下的文件后**连读都 FAIL**（块层 `I/O error, dev loopN,
+   sector 0 op 0x0:(READ)`），`chcon system_file` 后**读通了、写仍被拒**（内核原文仍有
+   `loop: Write error at byte offset 0`）。⇒ 没有"改标签就能当可写层"的捷径；要 loop 就得补一条
+   `allow kernel <type>:file { read write }` —— **用户态一条文本规则，可撤销，不需要编/刷内核**。
+3. **toybox 选项面/能力差异**：纯用户态问题（探测 + 多写法），已在 ② 里修。
+
+### 4）结论与下一步
+
+- 方向不变：**策略池 + 每台机实测选路 + 每条被否的原因进 doctor**，loop 只是其中一格的"快路"；
+- 这台机的当务之急是**不依赖 loop 的路线**（用户态 union（`/dev/fuse` 在，挂载权限待实测）或"无 union：
+  合并目录 + bind 出可写点"），proot 版本来就是无依赖兜底；
+- 真机诊断脚本（4 个，在开发工作区、不入库）：`真机诊断-挂载.sh` / `诊断2-loop与overlay` /
+  `诊断3-loop归因与fuse` / `诊断4-判定表`，逐步把"哪个文件系统能当层 / loop 能不能读写 / 能不能挂 fuse"问清楚。
 
 ## 0.3.1 —— 两个 App 的桌面标签分开（拆版漏掉的那一步）
 

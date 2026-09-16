@@ -2,7 +2,7 @@
 
 > 用途：**对话记录可能被删/会被换掉**，所以把"现在到哪了、还剩什么、怎么接着做"落进仓库。
 > 和 `docs/STATUS.md`（项目总账）配合看：STATUS 讲**项目本身**做到什么程度，本文讲**这次协作的落点**。
-> 最后更新：**2026-09-16**（第 36 条：拆成两个可共存的 App + 内置矩阵数据驱动 6 个变体 + 内置/运行时 DSH 解耦 → App 0.3.0）
+> 最后更新：**2026-09-17**（第 37 条：真机挂载归因 —— 三处 bug + "这台机为什么起不来"的三条限制（overlay 拒 f2fs / loop 在 kernel 域被 SELinux 拒 / toybox 选项面）+ 本机能力探测 → App 0.3.2 / 模块 1.0.19）
 
 ---
 
@@ -204,6 +204,7 @@ layers-release.yml（layers 分支，只收集+上传）、channel.yml（channel
 4. pipeline 的矩阵自动跟着 variants.json 走（**不用改 workflow**）——这正是这次把它做成数据驱动的原因。
 
 | 36 | *(本次)* | **拆成两个可共存的 App（各锁一条路）+ 内置矩阵数据驱动（2 edition × 3 档 = 6 个变体）+ 内置 DSH 与运行时 DSH 解耦**（用户："拆"；"纯 Root、免 Root、然后各种内置感觉不止 4 种吧"；"后续还要考虑到内置 DSH 的解耦（内置一个版本，运行时一个版本的情况判定，避免更新导致崩了）"）| ① **两个 App**：`io.github.sunsetrne.sunsetlinux.root` / `…​.proot`（不同包名、可同时安装），模式由 `core/Edition.kt` 按 BuildConfig **锁死**；`DshRuntime.resolveMode` 不再看 `prefs.modeOverride`、Root 版没 su 时**不偷偷降级到 proot**（那会去操作另一个环境），免 root 版**根本不探测 su**；设置页/引导页/部署向导都换成只读的"本版说明"；root 版才带 KernelSU 模块包，免 root 版才带 proot 脚本 + proroot `.so`。② **矩阵数据驱动**：`tools/offline-bundle/variants.json` 加 `editions`/`tiers`/每个变体的 `edition`+`tier`，现在是 `root-minimal/root-base/root-full/proot-minimal/proot-base/proot-full` 六个；**Gradle 的 flavor 与部件表全部从 JSON 读**（加一档只改 JSON 一行，构建脚本与 CI 都不用动），pipeline 的编译矩阵本来就按 `"<edition>-<tier>"` 推任务名，自动变成 6 个节点；`SigningContractTest` 改成防漂移断言（构建脚本必须真的在读 JSON、两个 edition 包名不同且不能退回拆分前的老包名）。③ **DSH 解耦**：新增 `core/DshPin.kt`（`reconcile(内置, 运行时)` → NONE/SAME/运行时更新过/运行时比内置旧/运行时还没装/判不了，**纯函数 + 9 条单测**，`rc.10 > rc.9` 逐段数字比），「更新」页新增卡片给两个版本号 + 一句人话结论 + **「回滚到内置版本 X」**（走 `linuxctl rollback dsh --to <版本>`；`linuxctl update` 不删旧层文件 ⇒ 退路一直在），「关于」页加一行；`LinuxCtl.rollback()` 新增。App **0.3.0** / 模块 **1.0.18**（运行时本轮无改动） |
+| 37 | *(本次)* | **真机挂载归因：三处 bug + "这台机为什么起不来"的三条限制；"公共挂载适配"的第一块砖（本机能力探测）**（用户贴出启动失败日志 —— loop 可写层 `I/O error` → 自动降级 dir 模式又 `mount: 'overlay'->…: Invalid argument`；并追问："我在想我这台机子上起步比较困难，那后面适配其他安卓系统岂不是也困难？我在想能不能做公共挂载适配，总不能源码级编译内核刷写？这样的话容易死机，得不偿失。"）| **① 三处 bug**：**(a)** `mount_upper_rw` 挂到 `$ROOTFS_DIR/upper`，而 `architecture.md`/`stop.sh`/`linuxctl`/`doctor` 全按 `$LINUX_HOME/upper` 找 ⇒ overlay 的 `upperdir`（`$UPPER_DIR/upper`）看到的是 f2fs 普通目录、那块 ext4 白挂还被 overlay 遮住（`run/mounts` 因此支持绝对路径项、`stop.sh` 跳过绝对项并给老版本 `rootfs/upper` 兜底）；**(b)** 探测判定表认不出 toybox 的 `Unknown option 'propagation'`（大写 U）与 `mount: bad /etc/fstab` ⇒ 真机 `cmdprobe` 谎报 `unshare_propagation=yes`/`mount_make_rslave=long`，每次启动先调注定失败的写法（统一成 `probe_says_unsupported()`，并写明**不能**用 `-o rprivate / /` 顶替：toybox 会判成 bind 且清 `MS_REC` ⇒ 非递归 bind 压住 `/`，`/data` 之类子挂载被遮）；**(c)** overlay 失败不记入参、`kernel_hint_log` 的 grep 又把 `overlayfs:` 过滤掉 ⇒ 只剩 `Invalid argument`（现在带"实际入参 + 内核原文"并进 `last-error`）。**② 新探测**：`overlay_fs_usable()`（同 fs 两空目录只读试挂，实测该 fs 能不能当层；接在两个 dir 入口**解包之前**，不再白等 1.6 GB）、`probe_loop_io`/`probe_fuse_mount` 进 `cmdprobe`、`PROBE_VERSION=2` 让老缓存失效、`loop_read=no` 跳过 loop 自愈仪式。**③ 真机三条限制（内核原文）**：`overlayfs: filesystem on '/data/sunsetlinux/dirs-upper' not supported`（`ovl_dentry_weird` 命中 f2fs 的 `DCACHE_OP_HASH|COMPARE`，**只读 lowerdir 也不收** ⇒ dir 模式在这台机不可能）；loop 的 I/O 在 `kernel` 域被 SELinux 拒（厂商只读 loop 背 `system_file` 正常；我们的文件连**读**都 FAIL —— `I/O error, dev loopN, sector 0 op 0x0:(READ)`；`chcon system_file` 后读通、写仍被拒 `loop: Write error at byte offset 0`）⇒ 要 loop 只能补一条 `allow kernel <type>:file { read write }`（**用户态文本规则、可撤销、不需要编/刷内核**）；toybox 选项面差异属纯用户态。证据：`runtime/root/selftest.sh` **42 → 58 条**，bash+mksh 双跑 0 失败；`shell-compat-check` / `contract-check`(root+proot) / `cmp-consistency`(16 组) / oneshot / provision / detect-mount / customize / webroot 全绿。App **0.3.2** / 模块 **1.0.19** |
 
 ### 第 35 条：一条流水线到底（形状、代价、以及**下一步要拆的两个 App**）
 
@@ -568,3 +569,34 @@ tail -40 /data/sunsetlinux/run/linux.log  # 现在会有内容了：卡在 loop/
   `nativeLibraryDir` 里（App 会透传），纯 root shell 看不到 —— 文案已说明，未再改。
 - `linuxctl start --layer-mode` 目前**不转发其它未知参数**（只认 `--layer-mode`，其余忽略并告警）。
 - 频道清单里的层仍按 erofs 分发（dir 模式在设备侧自己解包，无需改清单）。
+
+---
+
+## 第 37 轮（2026-09-17）：真机挂载的三条限制、三处修复、以及"不需要编内核"的适配方向
+
+**起点**：真机启动日志两个失败 —— loop 可写层 `mount: '/dev/block/loop49'->'…/rootfs/upper': I/O error`，
+自动降级 dir 模式后 `mount: 'overlay'->'/data/sunsetlinux/rootfs': Invalid argument`。用户的追问见上表第 37 条。
+
+**这一轮的取舍**：设备侧我（DSHA）**不能挂载**（策略禁止）、`dmesg`/`lsattr`/`dd` 也被白名单拦，
+旧那次失败的内核原文还随重启丢了（pstore 空、`console=ttynull`）⇒ 只能"我在代码/内核源码侧归因 +
+给用户 4 个一次性诊断脚本"，最终拿到内核原文。
+
+**结论（三条限制，全部有原文）**：
+1. f2fs（带 casefold）被 overlayfs 一律拒绝 ⇒ **dir 模式在这台机上不可能**，与我们的选项无关；
+2. loop 的 I/O 在 `kernel` 域被 SELinux 拒（厂商只读 loop 背 `system_file` 正常）⇒ **loop 快路需要一条
+   可选的 `kernel` 域规则**，不是内核缺功能；
+3. toybox 的选项面/报错文本与 util-linux 不同 ⇒ 纯用户态适配（探测 + 多写法）。
+
+**下一轮该做什么（方向已定）**：
+- **策略层**：探针（`overlay_fs_usable` / `loop_read` / `fuse_mount`，前两个已进 `cmdprobe`）+ 选路结果落
+  `etc/mount-plan.json` + doctor 显示"本机可用路线 + 其余被否的原因"；
+- **loop 快路（可选）**：若用户愿意加一条 sepolicy 规则 ⇒ 规则写入模块 `sepolicy.rule`，
+  **先用宽规则证明概念，再收紧成专用 type**；探针会自动从 `loop_read=no` 变 `yes`（`PROBE_VERSION` 已加）；
+- **跨 ROM 兜底**：用户态 union（`/dev/fuse` 在；挂载权限待实测）→ 无 union（合并目录 + bind 出可写点）；
+  proot 版本来就是无依赖兜底；
+- **别忘**：`--layer-mode loop` 会尊重显式选择（不因探针跳过）；`linuxctl status` 是 `contract-check` 的入参
+  （我这一轮先用错了子命令，门禁要用 `status`）。
+
+**诊断脚本（开发工作区，未入库）**：`真机诊断-挂载.sh`（现场+三种 overlay 写法）、`真机诊断2-loop与overlay.sh`
+（loop 在 f2fs/tmpfs、关 DIO 对照）、`真机诊断3-loop归因与fuse.sh`（厂商文件/标签/API 三种对照 + fuse）、
+`真机诊断4-判定表.sh`（只打结论的判定表）。要入库的话，建议合并成一个 `tools/device-mount-diag.sh`。

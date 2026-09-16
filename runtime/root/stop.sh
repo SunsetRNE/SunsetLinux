@@ -35,8 +35,9 @@ MOUNT=/system/bin/mount
 NSENTER=/system/bin/nsenter
 
 # 兜底卸载顺序（**§4 的严格逆序**）：先叶子后根
-#   mnt/sdcard → dev/shm → dev/pts → dev → sys → proc → run → tmp
-#   → overlay(rootfs) → layers-mnt/* → upper
+#   mnt/sdcard → dev/shm → dev/pts → dev → sys → proc → run → tmp → upper
+#   （overlay 由 §3 卸、layers-mnt/* 由层卸载步骤卸、可写层 $LINUX_HOME/upper 由 §5 卸；
+#    upper 这一项是给**老版本**留下的 $ROOTFS_DIR/upper 兜底，正常状态下它不是挂载点。）
 #
 # 用**逐行字符串**而不是数组：本脚本在设备侧由 /system/bin/sh（Android mksh）执行，
 # 不保证有 bash 数组语义。遍历一律 `while IFS= read -r rel; do … done <<EOF`。
@@ -47,7 +48,8 @@ dev
 sys
 proc
 run
-tmp"
+tmp
+upper"
 # 层挂载（相对 $LH，不在 rootfs 内）
 LAYER_MNT_REL="layers-mnt/dsh
 layers-mnt/runtime
@@ -141,7 +143,14 @@ unmount_rootfs_tree() {
         # （原来的 C 式 for + 数组下标在 mksh 上不可靠）
         local rec=""
         while IFS= read -r rel; do
-            [ -n "$rel" ] && [ "$rel" != "overlay" ] && rec="$rel
+            # 跳过：空行、overlay（由 §3 专门卸）、以及**绝对路径**项。
+            # 绝对路径 = 不在 rootfs 下面的挂载（可写层挂 $LINUX_HOME/upper；
+            # 老版本曾挂到 $ROOTFS_DIR/upper），由 §5 unmount_upper 与兜底表处理，
+            # 这里若按 `$ROOTFS_DIR/$rel` 拼会得到一个怪路径。
+            case "$rel" in
+                ""|overlay|/*) continue ;;
+            esac
+            rec="$rel
 $rec"
         done < "$MOUNTS_FILE"
         order="$rec"

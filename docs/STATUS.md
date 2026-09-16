@@ -503,6 +503,39 @@ su -c '/data/sunsetlinux/bin/linuxctl doctor'
 | 已装状态读不到时 | —— | **不给刷入按钮**，先让用户修 root 授权（与"读不到 ≠ 没装"一致） |
 | 重启 | —— | 只报告"重启后生效"（KernelSU 落 `modules_update/`），**App 不替用户重启**，脚本里有单测断言不许出现 `reboot` |
 
+### 3.10.25 真机挂载归因：三处 bug + "这台机为什么起不来"的三条限制（App 0.3.2 / 模块 1.0.19）
+
+用户贴出真机启动日志（loop 可写层 `I/O error` → 降级 dir 模式又 `EINVAL`），随后问："我这台机子起步困难，
+后面适配其他安卓岂不是也困难？能不能做公共挂载适配，总不能源码级编译内核刷写？"
+
+**① 修掉三处 bug**（都直接相关）：
+
+| # | bug | 后果 | 修法 |
+|---|---|---|---|
+| ① | `mount_upper_rw` 的 `dst="$ROOTFS_DIR/upper"`，而 `architecture.md`/`stop.sh`/`linuxctl`/`doctor` 全按 `$LINUX_HOME/upper` | overlay 的 `upperdir`（`$UPPER_DIR/upper`）看到的是 f2fs 普通目录、**不是那块 ext4** ⇒ `upper.img` 白挂；而且它还被随后挂在 `$ROOTFS_DIR` 的 overlay 遮住 | `dst="$UPPER_DIR"`；`run/mounts` 支持绝对路径项、`stop.sh` 跳过绝对项（保留老版本 `rootfs/upper` 兜底） |
+| ② | 探测判定表认不出 toybox 的 `Unknown option 'propagation'`（大写 U）与 `mount: bad /etc/fstab` | 真机 `cmdprobe` 谎报 `unshare_propagation=yes` / `mount_make_rslave=long` ⇒ 每次启动先调注定失败的 `--propagation`/`--make-rprivate`（日志里那些行就是它） | 统一 `probe_says_unsupported()`；并注明**不能用 `-o rprivate / /` 顶替**（toybox 判成 bind 且清 `MS_REC` ⇒ 非递归 bind 压住 `/`，`/data` 之类子挂载被遮） |
+| ③ | overlay 失败既没记入参，`kernel_hint_log` 的 grep 又只含 `loop|ext4|jbd2`（把 `overlayfs:` 过滤掉） | 只剩 `Invalid argument`，无法归因 | 打"实际入参 + 内核原文"，摘要进 `last-error` |
+
+**② 新增本机能力探测**（"公共挂载适配"的第一块砖）：`overlay_fs_usable()`（同 fs 两空目录只读试挂 ⇒ 实测这个
+fs 能不能当层，接在两个 dir 入口**解包之前**，不再白等 1.6 GB）、`probe_loop_io`/`probe_fuse_mount` 进
+`cmdprobe`、`PROBE_VERSION=2` 让老缓存失效重探、`loop_read=no` 时跳过 loop 自愈仪式。
+只测**读**：读是同步的、可信；写会进页缓存（真机的异步失败是 `lost async page write`）。
+
+**③ 真机三条限制（都有内核原文）**：
+
+1. `overlayfs: filesystem on '/data/sunsetlinux/dirs-upper' not supported` —— `fs/overlayfs/util.c` 的
+   `ovl_dentry_weird()` 命中 f2fs 的 `DCACHE_OP_HASH|DCACHE_OP_COMPARE`（casefold）。**只读 lowerdir 也不收**
+   ⇒ dir 模式在这台机上不可能（内核规则，策略改不了）。
+2. loop 的 I/O 在 `kernel` 域被 SELinux 拒：厂商只读 loop 背 `/system_ext` 的 `system_file` 正常；
+   换成 `$LINUX_HOME` 下的文件后**连读都 FAIL**（`I/O error, dev loopN, sector 0 op 0x0:(READ)`）；
+   `chcon system_file` 后读通、写仍被拒（`loop: Write error at byte offset 0`）⇒ 要 loop 只能补一条
+   `allow kernel <type>:file { read write }`（**用户态文本规则、可撤销、不需要编/刷内核**）。
+3. toybox 选项面差异：纯用户态（见 ①②）。
+
+**④ 测试**：`runtime/root/selftest.sh` **42 → 58 条**，bash 与 mksh 双跑 0 失败；`shell-compat-check`、
+`contract-check`（root/proot）、`cmp-consistency`（16 组）、oneshot/provision/detect-mount/customize/webroot
+全绿。proot `selftest-funcs` 那 3 条端口用例在本容器因 `/proc/net/tcp` 受限失败（HEAD 上同样 3 条，与本次改动无关）。
+
 ### 3.10.24 两个可共存的 App + 数据驱动的内置矩阵（6 变体）+ 内置 DSH 与运行时 DSH 解耦（App 0.3.0）
 
 用户三句话："拆"（两个 App）、"各种内置感觉不止 4 种吧"、"内置 DSH 的解耦（内置一个版本，

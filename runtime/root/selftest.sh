@@ -529,7 +529,7 @@ esac
 # ---------------------------------------------------------------------------
 head_ "可写层挂载的自愈路径（ext4 rw 失败不带走 start）"
 UE="$TMP/upper-env"
-mkdir -p "$UE/run" "$UE/rootfs" "$UE/rootfs/upper" "$FB" "$UE/bin"
+mkdir -p "$UE/run" "$UE/rootfs" "$UE/rootfs/upper" "$UE/upper" "$FB" "$UE/bin"
 : > "$UE/upper.img"
 : > "$UE/calls"
 printf '%s\n' '#!/bin/sh' \
@@ -558,7 +558,7 @@ done
 uout="$(
     PATH="$UE/bin:$PATH" \
     MOUNT="$UE/bin/mount" UMOUNT="$UE/bin/mount" \
-    LH="$UE" LINUX_HOME="$UE" ROOTFS_DIR="$UE/rootfs" RUN_DIR="$UE/run" \
+    LH="$UE" LINUX_HOME="$UE" UPPER_DIR="$UE/upper" ROOTFS_DIR="$UE/rootfs" RUN_DIR="$UE/run" \
     DAEMON_LOG="$UE/run/start.log" UPPER_IMG="$UE/upper.img" LAYERS_DIR="$UE/layers" \
     CALLS_FILE="$UE/calls" \
     "$SH_BIN" -c 'set -uo pipefail; . "$1"; log() { :; }; warn_soft() { :; }; mount_upper_rw && echo "RESULT=ok" || echo "RESULT=fail"' _ "$uh" 2>&1 || true
@@ -576,6 +576,188 @@ case "$calls" in
     *"e2fsck -p"*) ok "失败后先清了残留 loop，并跑过 e2fsck -p（自愈顺序正确）" ;;
     *) bad "失败后没有跑 e2fsck -p（needs_recovery 这类问题修不掉）" ;;
 esac
+# 挂载点回归（2026-09-17 核对）：docs/architecture.md §目录结构/§步骤 3 与 stop.sh、
+# linuxctl.sh 都按 `$LINUX_HOME/upper` 找可写层；曾经 start.sh 挂到 $ROOTFS_DIR/upper，
+# 于是 overlay 的 upperdir（$UPPER_DIR/upper）看不到 ext4，8 GiB 的 upper.img 白挂、
+# 还被随后挂在 $ROOTFS_DIR 的 overlay 遮住。
+case "$calls" in
+    *"$UE/upper"*) ok "可写层挂在 \$LINUX_HOME/upper（与 architecture.md / stop.sh / linuxctl 一致）" ;;
+    *) bad "可写层没挂在 \$LINUX_HOME/upper：$(printf '%s' "$calls" | tr '\n' '|' | cut -c1-120)" ;;
+esac
+case "$calls" in
+    *"$UE/rootfs/upper"*) bad "可写层仍挂在 \$ROOTFS_DIR/upper（会被 overlay 遮住，upper.img 白挂）" ;;
+    *) ok "没有挂到 \$ROOTFS_DIR/upper（不会被 overlay 遮住）" ;;
+esac
+
+# ---------------------------------------------------------------------------
+# toybox 能力探测不许谎报（2026-09-17）
+#   真机上 cmdprobe 记的是 `unshare_propagation=yes` + `mount_make_rslave=long`，
+#   而 toybox 实际打印的是
+#       unshare: Unknown option 'propagation' (see "unshare --help")
+#       mount:   bad /etc/fstab: No such file or directory
+#   旧判定表认不出这两句 → 谎报 → start.sh 每次先试注定失败的语法。
+# 这里用两个假命令驱动真函数（不是复制实现）：一个只会打 toybox 的原话，
+# 一个打"语法没问题、只是挂载失败"的话 —— 后者绝不能被评为不支持。
+# ---------------------------------------------------------------------------
+head_ "toybox 探测不许谎报（真实报错文本）"
+PB="$TMP/probe-bin"
+mkdir -p "$PB" "$TMP/probe-run"
+printf '%s\n' '#!/bin/sh' 'echo "unshare: Unknown option (see \"unshare --help\")" >&2' 'exit 1' > "$PB/unshare"
+printf '%s\n' '#!/bin/sh' 'echo "mount: bad /etc/fstab: No such file or directory" >&2' 'exit 1' > "$PB/mount-unknown"
+printf '%s\n' '#!/bin/sh' 'echo "mount: '\''/nonexistent-sunsetlinux-probe'\''->'\''/tmp/x'\'': No such file or directory" >&2' 'exit 1' > "$PB/mount-ok"
+chmod +x "$PB/unshare" "$PB/mount-unknown" "$PB/mount-ok"
+ph="$TMP/probe-harness.sh"
+{
+    echo 'have() { command -v "$1" >/dev/null 2>&1; }'
+    sed -n '/^probe_get()/,/^}/p'       "$SELF_DIR/start.sh"
+    sed -n '/^probe_set()/,/^}/p'       "$SELF_DIR/start.sh"
+    sed -n '/^probe_says_unsupported()/,/^}/p' "$SELF_DIR/start.sh"
+    sed -n '/^probe_mount_syntax()/,/^}/p'     "$SELF_DIR/start.sh"
+    sed -n '/^probe_unshare_syntax()/,/^}/p'   "$SELF_DIR/start.sh"
+} > "$ph"
+for fn in probe_set probe_get probe_says_unsupported probe_mount_syntax probe_unshare_syntax; do
+    grep -q "^$fn()" "$ph" || bad "抽取 $fn 失败（函数被改名了？）"
+done
+pout="$(
+    RUN_DIR="$TMP/probe-run" PROBE_FILE="$TMP/probe-run/cmdprobe" \
+    "$SH_BIN" -c '. "$1"; probe_unshare_syntax "$2"; probe_mount_syntax "$3"; cat "$PROBE_FILE"' \
+        _ "$ph" "$PB/unshare" "$PB/mount-unknown" 2>&1 || true
+)"
+case "$pout" in
+    *"unshare_propagation=no"*) ok "toybox 的 Unknown option 被判成不支持（不再谎报 propagation=yes）" ;;
+    *) bad "Unknown option 仍被判成支持：$(printf '%s' "$pout" | tr '\n' ' ' | cut -c1-120)" ;;
+esac
+case "$pout" in
+    *"mount_make_rslave=short"*) ok "toybox 的 bad /etc/fstab 被判成不支持（不再谎报 make_rslave=long）" ;;
+    *) bad "bad /etc/fstab 仍被判成支持：$(printf '%s' "$pout" | tr '\n' ' ' | cut -c1-120)" ;;
+esac
+pout2="$(
+    RUN_DIR="$TMP/probe-run" PROBE_FILE="$TMP/probe-run/cmdprobe2" \
+    "$SH_BIN" -c '. "$1"; probe_mount_syntax "$2"; cat "$PROBE_FILE"' \
+        _ "$ph" "$PB/mount-ok" 2>&1 || true
+)"
+case "$pout2" in
+    *"mount_rbind=long"*) ok "语法没问题、只是挂载失败时仍判成支持（新判定没有过度匹配）" ;;
+    *) bad "把'挂载失败'误判成'语法不支持'了：$(printf '%s' "$pout2" | tr '\n' ' ' | cut -c1-120)" ;;
+esac
+
+# ---------------------------------------------------------------------------
+# stop.sh 读登记表：必须跳过**绝对路径**项与 overlay（2026-09-17）
+#   可写层现在登记为绝对路径（挂在 $LINUX_HOME/upper）。stop.sh 的 rootfs 树卸载按
+#   `$ROOTFS_DIR/$rel` 拼路径 —— 不跳过就会去卸
+#   `/data/sunsetlinux//data/sunsetlinux/upper` 这种怪路径（可写层另有 §5 专卸）。
+# ---------------------------------------------------------------------------
+head_ "stop.sh 读登记表：跳过绝对路径与 overlay"
+SB="$TMP/stop-env"; mkdir -p "$SB/run" "$SB/rootfs"
+printf '%s\n' "layers-mnt/base" "overlay" "/data/sunsetlinux/upper" > "$SB/run/mounts"
+sh_h="$TMP/stop-harness.sh"
+{
+    echo 'log() { :; }'
+    echo 'do_umount() { echo "UMOUNT $1" >> "$CALLS_FILE"; return 0; }'
+    # 注意用 `^}$`（整行的 }）而不是 `^}`：unmount_rootfs_tree 里有跨行拼接
+    # `${order:+<换行>}${FALLBACK_ORDER}`，那行的开头也是 `}`。
+    sed -n '/^unmount_rootfs_tree()/,/^}$/p' "$SELF_DIR/stop.sh"
+} > "$sh_h"
+grep -q '^unmount_rootfs_tree()' "$sh_h" || bad "抽取 unmount_rootfs_tree 失败（函数被改名了？）"
+SOUT="$(CALLS_FILE="$SB/calls" ROOTFS_DIR="$SB/rootfs" MOUNTS_FILE="$SB/run/mounts" \
+        FALLBACK_ORDER="proc" "$SH_BIN" -c '. "$1"; unmount_rootfs_tree' _ "$sh_h" 2>&1 || true)"
+scalls="$(cat "$SB/calls" 2>/dev/null || true)"
+case "$scalls" in
+    *"UMOUNT $SB/rootfs/layers-mnt/base"*) ok "rootfs 内的登记项照常被卸载（layers-mnt/base）" ;;
+    *) bad "rootfs 内的登记项没被卸载：$(printf '%s' "$scalls" | tr '\n' '|' | cut -c1-120)（$SOUT）" ;;
+esac
+case "$scalls" in
+    *"$SB/rootfs//data"*) bad "绝对路径项被按 \$ROOTFS_DIR/\$rel 拼成怪路径：$(printf '%s' "$scalls" | tr '\n' '|' | cut -c1-120)" ;;
+    *) ok "绝对路径项（可写层）没被拼成怪路径" ;;
+esac
+case "$scalls" in
+    *"UMOUNT $SB/rootfs/overlay"*) bad "overlay 被 §2 重复卸载（应留给我 §3）" ;;
+    *) ok "overlay 没被 §2 重复卸载" ;;
+esac
+
+# ---------------------------------------------------------------------------
+# overlay 能不能用这个文件系统（overlay_fs_usable，2026-09-17）
+#   真机实测：overlayfs 在挂载时就拒绝 f2fs（ovl_dentry_weird 命中 DCACHE_OP_HASH/COMPARE）：
+#       overlayfs: filesystem on '/data/sunsetlinux/dirs-upper' not supported → EINVAL
+#   于是 dir 模式在这类设备上永远起不来。预检必须**实测**（同 fs 上两个空目录做只读试挂），
+#   不能靠 fs 名字硬编码。这里断言：能挂→0、不能挂→1，且两种情况下探针目录都被清干净。
+# ---------------------------------------------------------------------------
+head_ "overlay 层可用性预检（overlay_fs_usable）"
+OB="$TMP/ovlprobe"; mkdir -p "$OB"
+PB2="$TMP/ovl-bin"; mkdir -p "$PB2"
+printf '%s\n' '#!/bin/sh' 'echo "mount $*" >> "$CALLS_FILE"' 'exit 0' > "$PB2/mount-ok"
+printf '%s\n' '#!/bin/sh' 'echo "mount $*" >> "$CALLS_FILE"' 'echo "mount: '"'"'overlay'"'"'->'"'"'/x'"'"': Invalid argument" >&2' 'exit 1' > "$PB2/mount-bad"
+printf '%s\n' '#!/bin/sh' 'echo "umount $*" >> "$CALLS_FILE"' 'exit 0' > "$PB2/umount"
+chmod +x "$PB2/mount-ok" "$PB2/mount-bad" "$PB2/umount"
+oh="$TMP/ovl-harness.sh"
+{
+    echo 'log() { :; }'
+    sed -n '/^overlay_fs_usable()/,/^}$/p' "$SELF_DIR/start.sh"
+} > "$oh"
+grep -q '^overlay_fs_usable()' "$oh" || bad "抽取 overlay_fs_usable 失败（函数被改名了？）"
+for pair in "ok:mount-ok:R=0" "bad:mount-bad:R=1"; do
+    tag="${pair%%:*}"; rest="${pair#*:}"; stub="${rest%%:*}"; want="${rest##*:}"
+    : > "$OB-calls-$tag"
+    got="$(MOUNT="$PB2/$stub" UMOUNT="$PB2/umount" DAEMON_LOG="$TMP/ovlprobe.log" \
+           CALLS_FILE="$OB-calls-$tag" \
+           "$SH_BIN" -c '. "$1"; overlay_fs_usable "$2" && echo R=0 || echo R=1' _ "$oh" "$OB" 2>&1 || true)"
+    case "$got" in
+        *"$want"*) ok "试挂$tag（stub=$stub）→ $want" ;;
+        *) bad "试挂$tag 结论不对（期望 $want）：$(printf '%s' "$got" | tr '\n' ' ')" ;;
+    esac
+    case "$(ls -a "$OB" 2>/dev/null | tr '\n' ' ')" in
+        *".ovlprobe"*) bad "试挂$tag 后探针目录没清干净：$(ls -a "$OB" | tr '\n' ' ')" ;;
+        *) ok "试挂$tag 后探针目录已清干净" ;;
+    esac
+done
+
+# ---------------------------------------------------------------------------
+# 本机能力探测：loop 能不能读我们的文件 / 能不能挂 fuse（2026-09-17）
+#   真机实测：loop 的 I/O 在 kworker（u:r:kernel:s0）里做，SELinux 按 current_sid() 判权限 →
+#     厂商只读 loop（system_file）读得到；我们的文件（system_data_file/shell_data_file）连读都被拒。
+#   所以 start.sh 必须能拿到 loop_read=no 并**别再走 loop 自愈仪式**（那三步救不了"域没权限"）。
+#   这里用假 losetup/dd/mount 驱动真函数（不是复制实现）。
+# ---------------------------------------------------------------------------
+head_ "loop / fuse 能力探测（loop_read / fuse_mount）"
+LB="$TMP/loop-bin"; mkdir -p "$LB/ok" "$LB/fail" "$TMP/loop-run"
+printf '%s\n' '#!/bin/sh' 'case "$1" in -f) echo /dev/block/loop77 ;; esac' 'exit 0' > "$LB/losetup"
+printf '%s\n' '#!/bin/sh' 'exit 0' > "$LB/ok/dd"
+printf '%s\n' '#!/bin/sh' 'exit 1' > "$LB/fail/dd"
+cp "$LB/losetup" "$LB/ok/losetup"; cp "$LB/losetup" "$LB/fail/losetup"
+chmod +x "$LB/losetup" "$LB/ok/dd" "$LB/fail/dd" "$LB/ok/losetup" "$LB/fail/losetup"
+printf '%s\n' '#!/bin/sh' 'echo "mount: '"'"'none'"'"'->'"'"'/x'"'"': Permission denied" >&2' 'exit 1' > "$LB/mount-denied"
+printf '%s\n' '#!/bin/sh' 'echo "mount: '"'"'none'"'"'->'"'"'/x'"'"': Bad file descriptor" >&2' 'exit 1' > "$LB/mount-badfd"
+chmod +x "$LB/mount-denied" "$LB/mount-badfd"
+lh="$TMP/loop-harness.sh"
+{
+    echo 'have() { command -v "$1" >/dev/null 2>&1; }'
+    sed -n '/^probe_get()/,/^}/p'      "$SELF_DIR/start.sh"
+    sed -n '/^probe_set()/,/^}/p'      "$SELF_DIR/start.sh"
+    sed -n '/^probe_loop_io()/,/^}$/p' "$SELF_DIR/start.sh"
+    sed -n '/^probe_fuse_mount()/,/^}$/p' "$SELF_DIR/start.sh"
+} > "$lh"
+for fn in probe_loop_io probe_fuse_mount; do
+    grep -q "^$fn()" "$lh" || bad "抽取 $fn 失败（函数被改名了？）"
+done
+for pair in "loop读OK:ok:loop_read=yes" "loop读失败:fail:loop_read=no"; do
+    tag="${pair%%:*}"; rest="${pair#*:}"; sub="${rest%%:*}"; want="${rest##*:}"
+    got="$(RUN_DIR="$TMP/loop-run" PROBE_FILE="$TMP/loop-run/p-$sub" PATH="$LB/$sub:$PATH" \
+           "$SH_BIN" -c '. "$1"; probe_loop_io; cat "$PROBE_FILE"' _ "$lh" 2>&1 || true)"
+    case "$got" in
+        *"$want"*) ok "$tag → $want（真机上 loop 读被拒就该判 no）" ;;
+        *) bad "$tag 判定不对（期望 $want）：$(printf '%s' "$got" | tr '\n' ' ')" ;;
+    esac
+done
+for pair in "mount-denied:denied" "mount-badfd:ok"; do
+    sub="${pair%%:*}"; want="${pair##*:}"
+    got="$(RUN_DIR="$TMP/loop-run" PROBE_FILE="$TMP/loop-run/f-$sub" MOUNT="$LB/$sub" \
+           SUNSETLINUX_FUSE_DEV=/dev/null \
+           "$SH_BIN" -c '. "$1"; probe_fuse_mount; cat "$PROBE_FILE"' _ "$lh" 2>&1 || true)"
+    case "$got" in
+        *"fuse_mount=$want"*) ok "fuse 探测（$sub）→ fuse_mount=$want" ;;
+        *) bad "fuse 探测（$sub）判定不对（期望 $want）：$(printf '%s' "$got" | tr '\n' ' ')" ;;
+    esac
+done
 
 printf '\n=========================================\n'
 printf '  通过 %d，失败 %d\n' "$pass" "$fail"

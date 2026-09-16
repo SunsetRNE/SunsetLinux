@@ -189,41 +189,59 @@ probe_set() {
     printf '%s=%s\n' "$key" "$val" >> "$PROBE_FILE" 2>/dev/null || true
 }
 
+# toybox 说"这个参数我不认识"时到底怎么打印（**真机实测，2026-09-16/17**）：
+#     unshare: Unknown option 'propagation' (see "unshare --help")
+#     mount:   bad /etc/fstab: No such file or directory    ← 不认的参数被当成 fstab 挂载
+# 早期判定只认 usage / bad option / **小写** unknown option / invalid，于是真机上：
+#   · `Unknown option`（大写 U）不匹配 → unshare_propagation=yes（谎报）
+#   · `bad /etc/fstab` 不匹配         → mount_make_rslave=long（谎报）
+# 结果 start.sh 每次启动都先按"支持"去调 --propagation / --make-rprivate，注定失败后才回退：
+# 探测白做、日志里的两行 `bad /etc/fstab` 就是这么来的，而那句
+# "私有 ns 已由 unshare 保证"在 `/` 是 shared 的机器上**并不成立**（会回流宿主 ns）。
+probe_says_unsupported() {   # probe_says_unsupported "<命令输出>"
+    case "$1" in
+        *[Uu]sage*)          return 0 ;;
+        *[Bb]ad*option*)     return 0 ;;
+        *[Uu]nknown*option*) return 0 ;;
+        *[Uu]nrecognized*)   return 0 ;;
+        *bad*fstab*)         return 0 ;;
+        *[Nn]ot*found*)      return 0 ;;
+    esac
+    return 1
+}
+
 # 探测 mount 的绑定挂载语法。**无害**：全是必然失败的挂载（源路径不存在），
 # 我们只看"命令是否把参数判成语法错误"，不看挂载成功与否。
-# 判定：stderr 出现 usage/bad/unknown/invalid 之类 => 该语法不被支持。
+# 判定：输出里出现 toybox 的"我没听懂"就算该语法不被支持 —— 见 probe_says_unsupported。
 probe_mount_syntax() {
     local m="$1" tmp out rc
     tmp="$RUN_DIR/.probe-$$"
     mkdir -p "$tmp" 2>/dev/null || tmp=/tmp
     rc=0
     out="$("$m" --rbind /nonexistent-sunsetlinux-probe "$tmp" 2>&1)" || rc=$?
-    case "$out" in
-        *[Uu]sage*|*[Bb]ad*option*|*unknown*option*|*[Ii]nvalid*|*unrecognized*)
-            probe_set mount_rbind short ;;
-        *)  [ "$rc" -ne 0 ] && probe_set mount_rbind long || probe_set mount_rbind long ;;
-    esac
-    rc=0
-    out="$("$m" -o rbind /nonexistent-sunsetlinux-probe "$tmp" 2>&1)" || rc=$?
-    case "$out" in
-        *[Uu]sage*|*[Bb]ad*option*|*unknown*option*|*[Ii]nvalid*|*unrecognized*)
-            probe_set mount_rbind_o none ;;
-        *)  probe_set mount_rbind_o short ;;
-    esac
-    rc=0
-    out="$("$m" --make-rslave "$tmp" 2>&1)" || rc=$?
-    case "$out" in
-        *[Uu]sage*|*[Bb]ad*option*|*unknown*option*|*[Ii]nvalid*|*unrecognized*)
-            probe_set mount_make_rslave short ;;
-        *)  probe_set mount_make_rslave long ;;
-    esac
-    rc=0
-    out="$("$m" -o remount,bind "$tmp" 2>&1)" || rc=$?
-    case "$out" in
-        *[Uu]sage*|*[Bb]ad*option*|*unknown*option*|*[Ii]nvalid*|*unrecognized*)
-            probe_set mount_remount_bind none ;;
-        *)  probe_set mount_remount_bind ok ;;
-    esac
+    if probe_says_unsupported "$out"; then
+        probe_set mount_rbind short
+    else
+        probe_set mount_rbind long
+    fi
+    out="$("$m" -o rbind /nonexistent-sunsetlinux-probe "$tmp" 2>&1)" || true
+    if probe_says_unsupported "$out"; then
+        probe_set mount_rbind_o none
+    else
+        probe_set mount_rbind_o short
+    fi
+    out="$("$m" --make-rslave "$tmp" 2>&1)" || true
+    if probe_says_unsupported "$out"; then
+        probe_set mount_make_rslave short
+    else
+        probe_set mount_make_rslave long
+    fi
+    out="$("$m" -o remount,bind "$tmp" 2>&1)" || true
+    if probe_says_unsupported "$out"; then
+        probe_set mount_remount_bind none
+    else
+        probe_set mount_remount_bind ok
+    fi
     rmdir "$tmp" 2>/dev/null || true
 }
 
@@ -231,11 +249,11 @@ probe_mount_syntax() {
 probe_unshare_syntax() {
     local u="$1" out
     out="$("$u" -m --propagation private true 2>&1)" || true
-    case "$out" in
-        *[Uu]sage*|*[Bb]ad*option*|*unknown*option*|*[Ii]nvalid*|*unrecognized*|*[Nn]otfound*|*not*found*)
-            probe_set unshare_propagation no ;;
-        *)  probe_set unshare_propagation yes ;;
-    esac
+    if probe_says_unsupported "$out"; then
+        probe_set unshare_propagation no
+    else
+        probe_set unshare_propagation yes
+    fi
 }
 
 # 关键挂载（proc/sys/dev）是否有一条能用的 util-linux 回退路径
@@ -263,10 +281,65 @@ detect_util_mount() { # detect_util_mount [base_dir]（默认 loop 模式下的 
     fi
 }
 
+# 探测 loop 能不能**读**我们目录里的文件。为什么必须实测（真机实测 2026-09-17，6.1.141-android14）：
+#   loop 的 I/O 不在我们进程里做，而在 kworker（u:r:kernel:s0）里做，SELinux 用 current_sid()
+#   判权限。实测结论：
+#     · 厂商只读 loop（backing = /system_ext 的 system_file）读得到；
+#     · 我们的文件（system_data_file / shell_data_file）**连读都被拒** → 块层统一报 I/O error；
+#     · chcon 成 system_file 后读通了、写仍被拒（内核原文仍有 `loop: Write error`）
+#       ⇒ 没有"改标签就能当可写层"的捷径，真要用 loop 只能补 kernel 域的 sepolicy。
+#   所以：读不通 ⇒ 本机 loop 这条链没戏（连只读层都挂不上），别再走
+#   "清残留 loop → e2fsck -p → 显式 losetup" 那套仪式（那三步救不了"域没权限"）。
+#   读得通**不代表**能当可写层（写权限另算）—— 那一步由 mount_upper_rw 实测。
+probe_loop_io() {
+    local f="$RUN_DIR/.loopprobe.img" dev=""
+    have losetup || { probe_set loop_read none; return 0; }
+    if ! dd if=/dev/zero of="$f" bs=4096 count=64 2>/dev/null; then
+        probe_set loop_read no; rm -f "$f"; return 0
+    fi
+    dev="$(losetup -f --show "$f" 2>/dev/null || true)"
+    if [ -z "$dev" ]; then
+        probe_set loop_read no; rm -f "$f"; return 0
+    fi
+    # 只测**读**：读是同步的，结果可信；写会进页缓存，"dd 成功"不等于写到了文件
+    #（真机上就是 `Buffer I/O error … lost async page write` 这种异步失败）。
+    if dd if="$dev" of=/dev/null bs=4096 count=1 2>/dev/null; then
+        probe_set loop_read yes
+    else
+        probe_set loop_read no
+    fi
+    losetup -d "$dev" 2>/dev/null || true
+    rm -f "$f"
+    return 0
+}
+
+# 探测"我们能不能挂 fuse"（用户态 union 路线的前提；/dev/fuse 在不在是另一回事）。
+# 用一个**故意无效的 fd** 去挂：读回 "Permission denied" = 策略不让（SELinux 的 mount 判定），
+# 其他错误（Bad file descriptor / Invalid argument / No such device）= mount 这条被允许，
+# 缺的只是真正的 fuse 守护进程。
+# FUSE_DEV 是给自测用的接缝（同 SUNSETLINUX_EROFS_EXTRACT 的用法）。
+probe_fuse_mount() {
+    local mnt="$RUN_DIR/.fuseprobe" out="" rc=0
+    FUSE_DEV="${SUNSETLINUX_FUSE_DEV:-/dev/fuse}"
+    [ -c "$FUSE_DEV" ] || { probe_set fuse_mount no_dev; return 0; }
+    mkdir -p "$mnt" 2>/dev/null || { probe_set fuse_mount unknown; return 0; }
+    out="$("$MOUNT" -t fuse -o fd=9999,rootmode=040000,user_id=0,group_id=0 none "$mnt" 2>&1)" || rc=$?
+    rmdir "$mnt" 2>/dev/null || true
+    case "$out" in
+        *[Pp]ermission*|*[Dd]enied*) probe_set fuse_mount denied ;;
+        *) probe_set fuse_mount ok ;;
+    esac
+    return 0
+}
+
 # 跑一次全部探测（幂等：已有结果且不是 --force 就跳过）
+# PROBE_VERSION：**探测项变了就要 +1**，否则老设备上 cmdprobe 里没有新键，
+# probe_get 只能拿到默认值（新增的 loop_read/fuse_mount 就永远不生效）。
+PROBE_VERSION=2
 run_probes() {
     local force="${1:-0}"
-    if [ "$force" != "1" ] && [ -s "$PROBE_FILE" ] && grep -q '^probed=' "$PROBE_FILE" 2>/dev/null; then
+    if [ "$force" != "1" ] && [ -s "$PROBE_FILE" ] && grep -q '^probed=' "$PROBE_FILE" 2>/dev/null \
+       && [ "$(sed -n 's/^probe_version=//p' "$PROBE_FILE" 2>/dev/null | head -n1)" = "$PROBE_VERSION" ]; then
         return 0
     fi
     : > "$PROBE_FILE" 2>/dev/null || true
@@ -281,9 +354,12 @@ run_probes() {
     if [ -x "$MOUNT" ]; then probe_mount_syntax "$MOUNT"; fi
     if [ -x "$UNSHARE" ]; then probe_unshare_syntax "$UNSHARE"; fi
     if find_layer base >/dev/null 2>&1; then detect_util_mount; fi
+    probe_loop_io
+    probe_fuse_mount
+    printf 'probe_version=%s\n' "$PROBE_VERSION" >> "$PROBE_FILE" 2>/dev/null || true
     printf 'probed=%s\n' "$(date +%s)" >> "$PROBE_FILE" 2>/dev/null || true
     set -e
-    log "探测结果：rbind=$(probe_get mount_rbind) | rbind_o=$(probe_get mount_rbind_o) | make_rslave=$(probe_get mount_make_rslave) | unshare_propagation=$(probe_get unshare_propagation) | util_mount=$(probe_get util_mount)"
+    log "探测结果：rbind=$(probe_get mount_rbind) | rbind_o=$(probe_get mount_rbind_o) | make_rslave=$(probe_get mount_make_rslave) | unshare_propagation=$(probe_get unshare_propagation) | util_mount=$(probe_get util_mount) | loop_read=$(probe_get loop_read unknown) | fuse_mount=$(probe_get fuse_mount unknown)"
 }
 
 # rbind 挂载（语法自适应）
@@ -466,10 +542,20 @@ record_mount() {
     printf '%s\n' "$rel" >> "$MOUNTS_FILE"
 }
 
+# 登记项 → 绝对路径。以 / 开头的按原样（可写层挂在 $LINUX_HOME/upper，**不在**
+# $ROOTFS_DIR 下面），其余相对 $ROOTFS_DIR。
+mount_path_of() {
+    case "$1" in
+        /*) printf '%s' "$1" ;;
+        *)  printf '%s' "$ROOTFS_DIR/$1" ;;
+    esac
+}
+
 is_mounted() {
-    local rel="$1"
-    [ -d "$ROOTFS_DIR/$rel" ] || return 1
-    mountpoint -q "$ROOTFS_DIR/$rel" 2>/dev/null
+    local p
+    p="$(mount_path_of "$1")"
+    [ -d "$p" ] || return 1
+    mountpoint -q "$p" 2>/dev/null
 }
 
 # ---------------------------------------------------------------------------
@@ -536,13 +622,17 @@ kernel_hint() {
     # `|| true`：grep 无命中会返回 1，在 `set -o pipefail` 下会让命令替换整体失败，
     # 进而被 `set -e` 带走 —— 那会把"挂载失败"变成"脚本静默退出"（真机上踩过同类）。
     out="$(dmesg 2>/dev/null | grep -iE 'loop|ext4|jbd2|overlay' | tail -n 5 | tr '\n' '|' | sed 's/|*$//' || true)"
-    printf '%s' "${out:-（dmesg 里没有 loop/ext4/jbd2 相关行）}"
+    printf '%s' "${out:-（dmesg 里没有 loop/ext4/jbd2/overlay 相关行）}"
 }
 
 kernel_hint_log() {
     have dmesg || return 0
-    log "—— 内核原文（dmesg | grep -iE 'loop|ext4|jbd2' | tail -20）——"
-    dmesg 2>/dev/null | grep -iE 'loop|ext4|jbd2' | tail -n 20 >> "$DAEMON_LOG" 2>/dev/null || true
+    # ★ 模式必须与 kernel_hint 一致：**要包含 overlay**。
+    #   真机事故（2026-09-16 23:53）：dir 模式的 `mount -t overlay` 回 EINVAL，
+    #   而这里只 grep 'loop|ext4|jbd2'，于是内核那句 `overlayfs: …`（唯一能说明
+    #   为什么 EINVAL 的原话）被过滤掉了 —— 事后只剩一句 "Invalid argument"，查不动。
+    log "—— 内核原文（dmesg | grep -iE 'loop|ext4|jbd2|overlay' | tail -20）——"
+    dmesg 2>/dev/null | grep -iE 'loop|ext4|jbd2|overlay' | tail -n 20 >> "$DAEMON_LOG" 2>/dev/null || true
 }
 
 # 清掉"backing 指向 $LH 下镜像"且**没有被任何进程挂载**的残留 loop。
@@ -608,7 +698,15 @@ e2fsck_preen() {
 
 # 挂 ext4 可写层。成功返回 0，并把 UPPER_ERR 留空；失败返回 1 且 UPPER_ERR 可读。
 mount_upper_rw() {
-    local dst="$ROOTFS_DIR/upper" dev=""
+    # ★ 挂到 $UPPER_DIR（= $LINUX_HOME/upper），**不是** $ROOTFS_DIR/upper。
+    #   真机实测（2026-09-17 核对代码与文档）：两者曾不一致 ——
+    #     · docs/architecture.md 第 90/243 行：`mount -t ext4 … upper.img upper/`，
+    #       第 252 行：`upperdir=upper/upper`；
+    #     · stop.sh（do_umount "$UPPER_DIR"）、linuxctl.sh（mountpoint -q "$UPPER_DIR"）也都在 $LH/upper 上找它；
+    #     · 而这里原来挂到 $ROOTFS_DIR/upper，于是 overlay 的 upperdir（$UPPER_DIR/upper）
+    #       根本看不到这块 ext4：可写层实际落在 f2fs 的普通目录上，8 GiB 的 upper.img 白挂，
+    #       而且它还被随后挂在 $ROOTFS_DIR 的 overlay **遮住**（成了不可达的死挂载）。
+    local dst="$UPPER_DIR" dev=""
     UPPER_ERR=""
     [ -f "$UPPER_IMG" ] || { UPPER_ERR="缺少可写层镜像 $UPPER_IMG"; return 1; }
     mkdir -p "$dst" || { UPPER_ERR="无法创建挂载点 $dst"; return 1; }
@@ -616,9 +714,9 @@ mount_upper_rw() {
     cleanup_stale_loops
 
     # ① 与历史行为一致的第一步（toybox 的 `-o loop` 自己分配 loop 设备）
-    log "mount upper <- $UPPER_IMG -t ext4 -o loop,rw,noatime"
+    log "mount upper <- $UPPER_IMG -t ext4 -o loop,rw,noatime -> $dst"
     if "$MOUNT" -t ext4 -o loop,rw,noatime "$UPPER_IMG" "$dst" 2>>"$DAEMON_LOG"; then
-        record_mount upper
+        record_mount "$dst"
         return 0
     fi
     UPPER_ERR="$(kernel_hint)"
@@ -634,7 +732,7 @@ mount_upper_rw() {
     else
         log "显式 losetup：$dev <- $UPPER_IMG"
         if "$MOUNT" -t ext4 -o rw,noatime "$dev" "$dst" 2>>"$DAEMON_LOG"; then
-            record_mount upper
+            record_mount "$dst"
             log "显式 losetup 路径挂载成功（记下：本机 toybox 的 -o loop 不可靠，已自动兜住）"
             return 0
         fi
@@ -647,6 +745,36 @@ mount_upper_rw() {
 
     kernel_hint_log
     return 1
+}
+
+# ---------------------------------------------------------------------------
+# 这个文件系统能不能给 overlayfs 当层？——**经验性预检**（真机实测 2026-09-17）
+#
+# 为什么要它：overlayfs 在挂载时就会筛文件系统。fs/overlayfs/util.c 的
+#   bool ovl_dentry_weird(struct dentry *d) {
+#       return d->d_flags & (DCACHE_NEED_AUTOMOUNT | DCACHE_MANAGE_TRANSIT |
+#                            DCACHE_OP_HASH | DCACHE_OP_COMPARE);
+#   }
+# 一旦命中就直接 `pr_err("filesystem on '%s' not supported")` + **EINVAL**。
+# 本机（OnePlus 6.1.141-android14，/data 是 f2fs）三个路径上都被拒：
+#   overlayfs: filesystem on '/data/sunsetlinux/dirs-upper' not supported
+#   overlayfs: filesystem on '/data/local/tmp/sl-diag/lo/lower' not supported   ← 只读 lowerdir 也不行
+# 也就是说 **dir 模式在这台机上永远起不来**，而它要先解包 1.6 GB / 几分钟才失败。
+# 所以：拿同文件系统上的两个空目录做一次**只读**试挂，挂不上就立刻带原因退出。
+# 注意不能用"fs 名字"硬编码判断（有的 f2fs 能用、有的不能，取决于 casefold 等特性），
+# 只能这样实测 —— 探测本身就是无害的（不写任何内容，只建空目录，挂完立刻卸）。
+# ---------------------------------------------------------------------------
+overlay_fs_usable() {  # overlay_fs_usable <该文件系统上的一个目录>
+    local base="$1" a b m rc=1
+    [ -d "$base" ] || return 1
+    a="$base/.ovlprobe-a"; b="$base/.ovlprobe-b"; m="$base/.ovlprobe-mnt"
+    mkdir -p "$a" "$b" "$m" 2>/dev/null || return 1
+    if "$MOUNT" -t overlay overlay -o "lowerdir=$a:$b" "$m" 2>>"$DAEMON_LOG"; then
+        rc=0
+        "$UMOUNT" -l "$m" 2>/dev/null || "$UMOUNT" "$m" 2>/dev/null || true
+    fi
+    rmdir "$m" "$a" "$b" 2>/dev/null || true
+    return "$rc"
 }
 
 # ---------------------------------------------------------------------------
@@ -666,8 +794,8 @@ $rev"
         [ -n "$rel" ] || continue
         if is_mounted "$rel"; then
             log "回滚：umount $rel"
-            "$UMOUNT" -l "$ROOTFS_DIR/$rel" 2>/dev/null || \
-                "$UMOUNT" -f "$ROOTFS_DIR/$rel" 2>/dev/null || \
+            "$UMOUNT" -l "$(mount_path_of "$rel")" 2>/dev/null || \
+                "$UMOUNT" -f "$(mount_path_of "$rel")" 2>/dev/null || \
                 log "WARN: umount $rel 失败（可能需要手动清理）"
         fi
     done <<EOF
@@ -761,9 +889,27 @@ build_mount_tree() {
         unmount_recorded
     fi
 
+    # 本机 loop 连**读**都过不去（cmdprobe loop_read=no，原因见 probe_loop_io 的注释：
+    # loop 的 I/O 在 kernel 域做，本机策略不给它读我们的文件）→ 别走
+    # "清残留 loop → e2fsck -p → 显式 losetup" 那套仪式：那三步救不了"域没权限"，
+    # 只会再刷一屏 I/O error。显式 `--layer-mode loop` 时尊重用户选择、照旧试。
+    if [ "$LAYER_MODE" = "loop" ] && [ -z "${LAYER_MODE_FLAG:-}" ] \
+       && [ "$(probe_get loop_read unknown)" = "no" ]; then
+        warn_soft "本机 loop 读不通（cmdprobe loop_read=no）→ 跳过 loop 模式，直接按 dir 模式处理（要强试：linuxctl start --layer-mode loop）"
+        LAYER_MODE=dir
+        printf 'dir\n' > "$RUN_DIR/layer-mode" 2>/dev/null || true
+    fi
+
     local ovl_opts="" base_for_util=""
     if [ "$LAYER_MODE" = "dir" ]; then
         # ---- 目录模式：不碰 loop / 不挂 erofs / 不需要 upper.img ----
+        # ★ 先判"这个文件系统能不能当 overlay 的层"（见 overlay_fs_usable 的注释）：
+        #   不行的话，解包 1.6 GB 只是白等 —— 直接带原因退出。
+        if ! overlay_fs_usable "$LH"; then
+            die "目录模式不可用：$LH 所在的文件系统不能给 overlayfs 当层（内核：filesystem on '…' not supported → EINVAL）。
+  原因见 fs/overlayfs/util.c 的 ovl_dentry_weird()：f2fs 一旦带 casefold 等特性就命中 DCACHE_OP_*，overlayfs 一律拒绝（连只读 lowerdir 都不行）。
+  这台设备上请改用 loop 模式（linuxctl start --layer-mode loop）：那里 upper 在 ext4、lower 在 erofs，都不是被拒的文件系统。"
+        fi
         materialize_dirs
         base_for_util="$DIRS_DIR/base"
         mkdir -p "$DIRS_UPPER" "$DIRS_WORK" || die "无法创建目录模式 upper/work：$DIRS_UPPER"
@@ -803,6 +949,13 @@ build_mount_tree() {
 
             LAYER_MODE=dir
             printf 'dir\n' > "$RUN_DIR/layer-mode" 2>/dev/null || true
+            # 降级也要先判：本机 /data 的 f2fs 被 overlayfs 拒（见 overlay_fs_usable），
+            # 那就没有必要解包 1.6 GB —— 直接把两条路都不通的事实摆清楚。
+            if ! overlay_fs_usable "$LH"; then
+                die "loop 可写层挂不上，而目录模式在这台机上也不可用：$LH 所在的文件系统不能给 overlayfs 当层（内核：filesystem on '…' not supported → EINVAL）。
+  证据：loop 原文 $UPPER_ERR
+  两条路都不通 ⇒ 需要修 loop（可写层）或换一个能当 overlay 层的文件系统；详见 docs/（诊断脚本已记录内核原文）。"
+            fi
             materialize_dirs
             base_for_util="$DIRS_DIR/base"
             mkdir -p "$DIRS_UPPER" "$DIRS_WORK" || die "无法创建目录模式 upper/work：$DIRS_UPPER"
@@ -815,8 +968,16 @@ build_mount_tree() {
     detect_util_mount "$base_for_util"
     # 挂载点先建好（overlay 要求目录存在且为空；非空会报 ENOTEMPTY）
     [ -d "$ROOTFS_DIR" ] || mkdir -p "$ROOTFS_DIR" || die "无法创建 $ROOTFS_DIR"
+    # overlay 失败时 toybox 只回一句 "Invalid argument"，**原因只在 dmesg**（overlayfs
+    # 会用 pr_err 说明是哪条检查不过：missing 'lowerdir' / unrecognized mount option /
+    # workdir 与 upperdir 不在同一 mount / upper fs is r/o / 栈深超限 …）。
+    # 所以这里：① 先把**实际传下去的选项**记进日志（否则事后无法还原我们的入参），
+    #            ② 失败时抓内核原文，并把摘要写进 last-error（App 诊断页读的就是它）。
+    log "overlay 参数：mount -t overlay overlay -o $ovl_opts $ROOTFS_DIR"
     if ! "$MOUNT" -t overlay overlay -o "$ovl_opts" "$ROOTFS_DIR" 2>>"$DAEMON_LOG"; then
-        die "overlay 挂载失败（lowerdir/upperdir/workdir 见 $DAEMON_LOG）"
+        OVL_ERR="$(kernel_hint)"
+        kernel_hint_log
+        die "overlay 挂载失败：mount -t overlay overlay -o $ovl_opts $ROOTFS_DIR（内核原文：$OVL_ERR）"
     fi
     # 登记为 'overlay'（相对 rootfs 就是它自己），stop.sh 会把它放到**最后**卸载
     record_mount "overlay"
@@ -1149,13 +1310,23 @@ main() {
         log "=== inner 启动（pid=$$，LINUX_HOME=$LH）==="
         # 如果外层 unshare 不支持 --propagation，就在这里把整个 ns 设为私有
         #   （--make-rprivate /：一条命令覆盖 ns 内所有挂载点）
+        # ★ 真机事实（2026-09-17）：**toybox 的 mount 根本没有 --make-rprivate**，
+        #   也没有 `-o make-rprivate`（它的选项表里只有 private/rprivate/slave/rslave）。
+        #   不认识的参数会被 toybox 当成"只给了一个位置参数"→ 走 fstab 分支 →
+        #   打印 `bad /etc/fstab` 后失败。日志里那两行就是这么来的。
+        # ⚠ 也不要用 `-o rprivate / /` 顶替：toybox 见到"两个目录参数"会自行判成 bind，
+        #   并且把 MS_REC 清掉 —— 结果是在 / 上压一层**非递归 bind**，/data 这类子挂载
+        #   会被遮住（比不设私有更糟）。真正能改传播的只有 util-linux 的 mount：
+        #   base 层里那份（用 util_mount_run 经动态加载器跑）或外层 unshare。
         if [ "${MAKE_PRIVATE:-0}" = "1" ]; then
             if "$MOUNT" --make-rprivate / 2>>"$DAEMON_LOG"; then
                 log "已把 mount ns 根设为 rprivate"
-            elif "$MOUNT" -o make-rprivate / 2>>"$DAEMON_LOG"; then
-                log "已把 mount ns 根设为 rprivate（-o 形式）"
+            elif [ -n "$UTIL_MNT_BIN" ] && util_mount_run --make-rprivate / 2>>"$DAEMON_LOG"; then
+                log "已把 mount ns 根设为 rprivate（base 层的 util-linux）"
             else
-                warn_soft "make-rprivate 失败（私有 ns 已由 unshare 保证，可继续）"
+                # 不必惊慌也不必撒谎：/ 与 /data 是 slave(master:) 时本就不会回流，
+                # 只有它们是 shared(:) 时才有风险 —— 给出可核对的判据。
+                warn_soft "make-rprivate 未成功（toybox 无此选项）：若 / 或 /data 是 shared: 则本 ns 的挂载会回流宿主（用 grep -E ' / | /data ' /proc/self/mountinfo 看 master:/shared: 字段；是 master: 就安全）"
             fi
         fi
         printf '%s\n' "$LAYER_MODE" > "$RUN_DIR/layer-mode" 2>/dev/null || true
