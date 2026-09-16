@@ -217,6 +217,25 @@ if LINUX_HOME="$LH2" "$SH_BIN" "$SELF_DIR/linuxctl.sh" update dsh "$FIXTURES/ero
 fi
 
 # ---------------------------------------------------------------------------
+# 挂载冲突检查（§1d）必须存在且能给出结论
+#
+# 背景：KernelSU 的模块挂载由 metamodule 在启动时完成（把常规模块的 system/ overlay
+# 到 Android 系统路径）。我们的 chroot 自己挂 loop/erofs/overlay，用户最担心的就是
+# "两套挂载会不会打架"。doctor §1d 就是把这个问题的证据摆出来：私有命名空间、
+# 目标路径不相交、只占空闲 loop、模块不含 system/。这里断言它确实在、且 JSON 可解析。
+# ---------------------------------------------------------------------------
+head_ "doctor 的挂载冲突检查（§1d）"
+DH="$TMP/doctor-env"
+mkdir -p "$DH/run" "$DH/etc"
+install -d "$DH/layers" 2>/dev/null || mkdir -p "$DH/layers"
+dout="$(LINUX_HOME="$DH" MODDIR="$SELF_DIR/../.." "$SH_BIN" "$SELF_DIR/doctor.sh" 2>/dev/null | tail -n1 || true)"
+case "$dout" in
+    *'"id":"mount_conflict"'*) ok "doctor 给出了 mount_conflict 结论（挂载冲突可判定）" ;;
+    *'"schema":1'*) bad "doctor 的 JSON 里没有 mount_conflict（§1d 没接进 findings？）" ;;
+    *) bad "doctor 没有输出可解析的 JSON：$(printf '%s' "$dout" | head -c 120)" ;;
+esac
+
+# ---------------------------------------------------------------------------
 # 真机事故回归（2026-09-16，第二起）：**探测把 start.sh 自己带走了**
 #
 # `run_probes` 里的探测命令是**设计成失败**的（拿不存在的源去 mount，只看它是不是

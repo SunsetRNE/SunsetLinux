@@ -405,6 +405,108 @@ else
     fi
 fi
 
+# ===========================================================================
+head_ "1d. 挂载冲突检查（我们的挂载 vs KernelSU/metamodule 的自动挂载）"
+# 背景：KernelSU 的模块挂载由 **metamodule**（如 magic_mount_rs）在启动时完成，
+#   它的职责是把**常规模块的 system/ 等目录** overlay/重定向到 Android 系统路径，
+#   且要求挂载 source 标成 KSU。我们的 chroot 环境自己挂 loop/erofs/overlay，
+#   所以必须能证明"两者不打架"。这一节就是把证据摆出来：
+#     ① 我们的挂载在 unshare -m 出来的**私有命名空间**里（PID 1 的 mountinfo 里看不到）
+#     ② 我们的挂载目标全部在 $LINUX_HOME 下 → 与 /system /vendor /product … **不相交**
+#     ③ 我们只用**空闲** loop 设备（losetup -f），不抢别人的
+#     ④ 本模块**没有** system/ 等目录 → metamodule 对本模块无事可做
+#     ⑤ 环境运行期间我们的挂载点仍然存在（没被 KSU 的 umount 特性或别人清掉）
+# ===========================================================================
+MOUNT_CONFLICT_BAD=0
+
+# ④ 先看本模块有没有"会被 metamodule 挂载"的东西（最根本的一条）
+if [ -n "${MODDIR:-}" ] && [ -d "${MODDIR:-/nonexistent}" ]; then
+    _mm_dirs=""
+    for _d in system system_ext vendor product odm my_product my_heytap oplus .replace; do
+        [ -d "$MODDIR/$_d" ] && _mm_dirs="$_mm_dirs $_d"
+    done
+    if [ -z "$_mm_dirs" ]; then
+        ok "本模块目录下没有 system/ vendor/ 等（只有脚本）：metamodule **无事可做**，不存在挂载冲突"
+    else
+        warn "本模块目录下有会被 metamodule 挂载的内容：$_mm_dirs —— 那才会与 metamodule 交互"
+        MOUNT_CONFLICT_BAD=1
+    fi
+fi
+
+# ① 命名空间隔离：我们的 supervisor 与 PID 1 的 mount namespace 必须不同
+SUP_PID=""
+if [ -f "$RUN_DIR/supervisor.pid" ]; then
+    SUP_PID="$(tr -dc '0-9' < "$RUN_DIR/supervisor.pid" 2>/dev/null | head -c 12)"
+fi
+if [ -n "$SUP_PID" ] && [ -d "/proc/$SUP_PID" ]; then
+    _ours="$(readlink "/proc/$SUP_PID/ns/mnt" 2>/dev/null || printf '?')"
+    _init="$(readlink /proc/1/ns/mnt 2>/dev/null || printf '?')"
+    if [ "$_ours" = "?" ] || [ "$_init" = "?" ]; then
+        info "读不到 mount namespace（受限上下文）→ 跳过隔离性判定"
+    elif [ "$_ours" != "$_init" ]; then
+        ok "我们的挂载在**私有** mount namespace 里（supervisor=$_ours ≠ PID1=$_init）"
+    else
+        warn "supervisor 与 PID 1 同一个 mount namespace —— 挂载会**泄漏到全局**（应检查 unshare 是否失败）"
+        MOUNT_CONFLICT_BAD=1
+    fi
+else
+    info "环境未运行 → 命名空间隔离性无法判定（start 之后再看）"
+fi
+
+# ② PID 1 的挂载表里不许出现我们的路径（泄漏检查）+ 我们的挂载点清单
+if [ -r /proc/1/mountinfo ]; then
+    _leak="$(grep -c "[[:space:]]$LINUX_HOME" /proc/1/mountinfo 2>/dev/null || true)"
+    case "${_leak:-}" in ''|*[!0-9]*) _leak=0 ;; esac
+    if [ "$_leak" = "0" ]; then
+        ok "全局挂载表（PID 1）里没有任何 $LINUX_HOME/… 条目 → 与 metamodule 的目标路径**不相交**"
+    else
+        warn "全局挂载表里有 $_leak 条 $LINUX_HOME/… —— 有挂载泄漏到全局命名空间"
+        grep "[[:space:]]$LINUX_HOME" /proc/1/mountinfo 2>/dev/null | head -n 3 | sed 's/^/        /'
+        MOUNT_CONFLICT_BAD=1
+    fi
+fi
+if [ -n "$SUP_PID" ] && [ -r "/proc/$SUP_PID/mountinfo" ]; then
+    _mine="$(grep -o "[^ ]*$LINUX_HOME[^ ]*" "/proc/$SUP_PID/mountinfo" 2>/dev/null | sort -u | head -n 6)"
+    if [ -n "$_mine" ]; then
+        info "我们命名空间内的挂载点（全部在 $LINUX_HOME 下）："
+        printf '%s\n' "$_mine" | sed 's/^/          /'
+    fi
+fi
+
+# ③ loop 设备占用：只报"谁在用"，并确认我们的都指向 $LINUX_HOME
+if have losetup; then
+    _lo="$(losetup -a 2>/dev/null || true)"
+    if [ -z "$_lo" ]; then
+        info "当前没有 loop 设备在用（我们的 erofs/upper 只在环境运行时占用）"
+    else
+        _ours_n="$(printf '%s\n' "$_lo" | grep -c "$LINUX_HOME" 2>/dev/null || true)"
+        case "${_ours_n:-}" in ''|*[!0-9]*) _ours_n=0 ;; esac
+        _all_n="$(printf '%s\n' "$_lo" | grep -c ":'" 2>/dev/null || true)"
+        case "${_all_n:-}" in ''|*[!0-9]*) _all_n=0 ;; esac
+        if [ "$_all_n" -gt "$_ours_n" ]; then
+            warn "loop 设备：我们在用 $_ours_n 个，另有 $(( _all_n - _ours_n )) 个被别的模块占用（我们走 losetup -f 取空闲，不抢）"
+        else
+            ok "loop 设备：在用 $_ours_n 个，且都指向 $LINUX_HOME（未与其它模块争用）"
+        fi
+        printf '%s\n' "$_lo" | head -n 4 | sed 's/^/        /'
+    fi
+fi
+
+# ⑤ 运行中挂载点是否还在（KSU 的 umount 特性 / 别的机制可能清掉它们）
+if [ -n "$SUP_PID" ] && [ -d "/proc/$SUP_PID" ]; then
+    if [ -d "$ROOTFS_DIR/etc" ] && [ -r "$ROOTFS_DIR/etc/os-release" ]; then
+        ok "运行中：overlay 根仍挂在 $ROOTFS_DIR（没有被其它机制清掉）"
+    else
+        warn "环境在运行，但 $ROOTFS_DIR 里读不到 etc/os-release —— 挂载可能已被清掉"
+        MOUNT_CONFLICT_BAD=1
+    fi
+fi
+if [ "$MOUNT_CONFLICT_BAD" = "0" ]; then
+    add_finding ok mount_conflict "无冲突：私有命名空间 + 目标路径不相交 + 模块不含 system/"
+else
+    add_finding warn mount_conflict "有可疑项，见上面 [warn]"
+fi
+
 head_ "2. 三层只读镜像（erofs / squashfs）"
 # ★ 三态：/proc/filesystems 可读→按内容判定；不可读→ **skip**（信息不可得≠不支持）。
 #   被真实场景逼出来的：某次 /proc/filesystems 变成 Permission denied，旧写法把

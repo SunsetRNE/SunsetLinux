@@ -498,6 +498,29 @@ su -c '/data/sunsetlinux/bin/linuxctl doctor'
 | 已装状态读不到时 | —— | **不给刷入按钮**，先让用户修 root 授权（与"读不到 ≠ 没装"一致） |
 | 重启 | —— | 只报告"重启后生效"（KernelSU 落 `modules_update/`），**App 不替用户重启**，脚本里有单测断言不许出现 `reboot` |
 
+### 3.10.19 挂载冲突检查（§1d，模块 1.0.14）
+
+用户的问题：「我主要是怕挂载冲突的问题，模块本身就有自动挂载机制，项目的模块再写个挂载，怕不是会冲突哟。」
+
+结论：**不会冲突**，依据（写进 `docs/mount-conflict.md`）：
+
+| 维度 | KernelSU 的模块挂载（metamodule） | 我们的环境挂载 |
+|---|---|---|
+| 目标 | `/system`、`/vendor`、`/product`…（Android 系统路径） | `$LINUX_HOME/**`（我们的目录）+ rootfs 内部 bind |
+| 实现 | overlayfs（meta-overlayfs）或**内核级路径重定向**（magic_mount_rs），不产生 mount 条目 | 真 mount：erofs/ext4/overlay/bind |
+| 作用域 | 全局 | 我们 `unshare -m` 出来的**私有 namespace** |
+| 约定 | 必须 `source=KSU` | 不标 KSU → KSU 不认也不管 |
+
+三条硬理由：① 目标路径不相交；② 命名空间不同（我们的挂载不出现在 PID 1 的 mountinfo）；
+③ 我们的模块**没有 `system/` 目录** → metamodule 对本模块无事可做。
+
+**为什么不能"交给 metamodule"**：它的钩子契约是"模块目录 → Android 系统路径"，没有通用挂载服务；
+且 metamodule **单实例**，自带一个会顶掉用户的 `magic_mount_rs`，其它模块全部失效。
+
+新增 doctor **§1d 挂载冲突检查**（五条判据：模块自身是否含 system/、私有命名空间隔离、
+全局挂载表泄漏、loop 占用、运行期挂载点存续），环境未运行时降级为 info 不硬断言；
+`runtime/root/selftest.sh` 加断言"doctor 必须给出 mount_conflict 结论"。
+
 ### 3.10.18 真机「start.sh 失败 / 层永远挂不上」第二起：探测被 `set -e` 带走（模块 1.0.13）
 
 用户贴的 `linuxctl doctor` 里，唯一真 blocker 是 `== 8` 的 `start.sh 失败`。设备日志
