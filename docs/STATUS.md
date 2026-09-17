@@ -503,6 +503,59 @@ su -c '/data/sunsetlinux/bin/linuxctl doctor'
 | 已装状态读不到时 | —— | **不给刷入按钮**，先让用户修 root 授权（与"读不到 ≠ 没装"一致） |
 | 重启 | —— | 只报告"重启后生效"（KernelSU 落 `modules_update/`），**App 不替用户重启**，脚本里有单测断言不许出现 `reboot` |
 
+### 3.10.41 修完推上去才暴露的阻塞：⑤ 的 Release 上传挂住 1 小时+ ⇒ 改走「本地打包 → 直送手机 Download」（2026-09-18）
+
+**现象**：`454ed75`（模块 1.0.32）推上 main 后按并发组排队，前面 `d7a2795`（App 0.3.11 / 模块 1.0.31）那次
+从 **17:50:37Z** 起停在 ⑤「发布到 GitHub Releases」，一小时多没有变化。`githubstatus.com` 全绿 ⇒ 不是平台故障；
+**也不是仓库的问题**（删库重建照样会在下一次 push 遇到同一个动作）。判据：
+
+| 观察 | 说明 |
+|---|---|
+| `git ls-remote --tags` 只有 `v0.3.10`(→`8fe892e`)，**没有 `v0.3.11`** | publish.yml 是"先建草稿 → 逐个传资产 → 最后 `--draft=false`"，草稿对匿名 API 不可见 ⇒ 它确实在传 v0.3.11 的草稿，人看不到进度 |
+| 该步骤开始时间一直不变、Release 对象无变化 | 不是"跑得快慢"，是这一步在长时间上传/重试 |
+| publish.yml 自己的注释 | 一轮 **1.3 GB**（12 个 APK ≈500 MB + 6 个 `.bin` ≈430 MB）；串行实测 33 分钟，3 路并发压到约 1/3 |
+
+**三条必须记住的 Actions 语义**（这次全踩到）：
+
+- 并发组 `pipeline-<ref>-<event>` + `cancel-in-progress: false`：**组内"还在排队"的旧 run 会被新 run 取消**
+  （`8fe892e` 那次 pending run 在 18:20:58 我推 `454ed75` 的那一刻被自动取消）。
+- **`workflow_dispatch` 是独立队列**（组名带 `event_name`）⇒ 手动 Run workflow 不会被卡住的 push run 挡住。
+  ⚠️ 但它和卡住那条写**同一个 Release**：卡住那条若复活跑完，末尾"撤掉非当前版本的模块资产"会删掉新发的
+  **1.0.32 模块 zip** ⇒ **先强杀，再手动跑**。
+- UI 的 Cancel 是**协作式**的：runner 卡在网络调用里时不响应，点多少次都没用；仓库没有 `timeout-minutes`
+  覆盖 ⇒ **默认 6 小时**上限兜底（约 23:50Z 被强杀）。要立刻清掉只能用 API
+  `POST /repos/<o>/<r>/actions/runs/<id>/force-cancel`（本机实测端点存在：未鉴权返回 401），需 `Actions: write` 的 PAT。
+
+**解困路径（本轮实际用了，不依赖 Release）**：容器能直接写设备共享存储（实测 `/sdcard/Download/` 可写、
+设备侧 `ls` 也看得见）⇒ 本地打包 + 直送：
+
+```bash
+bash module/mkmodule.sh --version 1.0.32 --variant full \
+  --dsh-layer dist/dist-backup/dsh-0.1.5-rc.2.erofs.gz \
+  --dsh-sums  dist/dist-backup/SHA256SUMS.dsh-layer.txt --out /tmp/sl/sunsetlinux-module-1.0.32.zip
+bash module/mkmodule.sh --version 1.0.32 --variant bare --out /tmp/sl/sunsetlinux-module-1.0.32-bare.zip
+cp /tmp/sl/sunsetlinux-module-1.0.32*.zip* /sdcard/Download/
+```
+
+- 产物：full **50,089,501 B**（官方 1.0.30 是 50,079,737 B，同形，层版本 `0.1.5-rc.2` 与设备现存一致）、
+  bare **264,815 B**；sha256 `00b9d13cc29ac5c95b04ad11071faa4c3feb5e5e1faaa8cb2cb50ad4eda4617c` /
+  `4fcaacb4b79c45b90c040832216cb8fb3d8ec5fcbb8898e717efb7541b00a2a0`。
+- 已核：包内 `bin/{linuxctl.sh,start.sh,stop.sh,supervise.sh,common/port-probe.sh}` 与仓库 working tree
+  **逐字节 diff 一致**；9 处 nsenter 调用全部带 `--`；`--wd=` 残留 0 处。
+- **装完必须重启一次**：`bin/` 是 `module/post-fs-data.sh` 在开机时同步到 `/data/sunsetlinux/bin` 的，
+  而 App 调的就是这个路径（`core/LinuxCtl.kt` 的契约路径）。
+
+**★ 不要「删库重建」**（用户当时正在考虑）：`CHANNEL_SIGNING_KEY` 是 Actions secret，而 GitHub 的 secret
+**只写不可读** ⇒ 删库等于这把 Ed25519 私钥永久消失，App 内嵌公钥之后再也验不过（把 §3.10.36 那条"签名校验失败"
+从"待查"变永久）；`app/app/debug.keystore` 是仓库内的固定签名，丢了已装 App 无法覆盖升级；再加上 Releases /
+gh-pages / Actions 历史全没，而**已删仓库的 run 照样会跑完** —— 既没解决"上传慢/挂"，又是一次不可逆损失。
+（不放心的话本地 `git clone --mirror` 留镜像即可；`docs/**`、`**/*.md` 在 `paths-ignore` 里，
+**纯文档提交不触发流水线**。）
+
+**待改进（下一轮值得做）**：Release 的"已一致就跳过"按 `name + size + sha256` 比对，而 APK 每次重建字节都不同
+⇒ 跳过逻辑形同虚设、每轮全量重传 ~1.3 GB。方向：按变体输入哈希决定"重建 + 上传"，或把 `.bin` 挪到
+`layers-*` 静态托管、Release 只传 `index.json`，把一轮发布的上传量压到几十 MB。
+
 ### 3.10.40 toybox nsenter 会吃掉**命令之后**的选项 ⇒ `dsh start` / 终端 / stop 的卸载全坏（模块 1.0.32）
 
 **真机（2026-09-18 02:00）**：环境按「仅环境」起来了、状态卡也承认"DSH 未启动"，但点「启动 DSH」永远起不来；
@@ -533,8 +586,8 @@ nsenter: Unknown option 'port' (see "nsenter --help")
 
 **修法**：
 
-- **8 处调用全部在命令前补 `--`**（`linuxctl` 的 spawn×2、`run_in_env`×2、ns 内卸载×3，`stop.sh` 的
-  `umount -l`/`-f`×2），并在 `NSENTER=` 附近写清 toybox 行为与实测表；`stop.sh` 里**教用户敲的那句**
+- **9 处调用全部在命令前补 `--`**（`linuxctl` 7 处 = spawn×2、`run_in_env`×2、ns 内卸载×3；`stop.sh` 2 处 =
+  `umount -l`/`-f`），并在 `NSENTER=` 附近写清 toybox 行为与实测表；`stop.sh` 里**教用户敲的那句**
   `nsenter … umount -l` 也补上 `--`（原文案本身就是坏的）。
 - **端口被占自动让路**（真机现场：免 root 的 DSHA 占着 `127.0.0.1:3080`）：**两个入口**都让路 ——
   一键启动在 `start.sh` 传给 `entry.sh` 之前选端口（这条路上端口是在那里定死的），

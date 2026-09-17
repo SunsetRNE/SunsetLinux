@@ -2,12 +2,23 @@
 
 > 用途：**对话记录可能被删/会被换掉**，所以把"现在到哪了、还剩什么、怎么接着做"落进仓库。
 > 和 `docs/STATUS.md`（项目总账）配合看：STATUS 讲**项目本身**做到什么程度，本文讲**这次协作的落点**。
-> 最后更新：**2026-09-18（第 42 轮）**（本轮：**§3.10.40** —— toybox nsenter 会吃掉**命令之后**的选项，
-> 于是 `dsh start` / 终端 attach·exec / stop 的 `umount -l` **三处全坏**；已给 8 处调用补 `--`、
-> 端口被占自动让路、失败文案分"没起来/没 URL"，并加了两道会红的闸门 + 抽出 `port-probe.sh` 共用库；
-> App **0.3.10** / 模块 **1.0.32**）
+> 最后更新：**2026-09-18（第 43 轮）**（本轮两段：**§3.10.40** toybox nsenter 吃掉**命令之后**的选项 →
+> `dsh start` / 终端 attach·exec / stop 的 `umount -l` **三处全坏**，已修（`454ed75`，模块 **1.0.32**）；
+> **§3.10.41** 修完推上去才发现**流水线卡在 ⑤ 的 Release 上传**（`d7a2795` 那次从 17:50Z 起挂了 1 小时+），
+> 于是改走**本地打包直送手机**：1.0.32 的 full/bare 两个 zip 已在 `/sdcard/Download/`。
+> **★ 不建议删库重建**（会永久毁掉 `CHANNEL_SIGNING_KEY` 这把只写不可读的签名私钥），理由见 §3.10.41。）
 >
 > **★ 下一轮第一件事（真机交接，按优先级）**：
+> 0. **拿 `/sdcard/Download/sunsetlinux-module-1.0.32.zip` 装上、重启一次**，然后验本轮修的三处：
+>    ① `linuxctl dsh start` 能起来（3080 被免 root 的 DSHA 占着时应落到 **3081**，看 `run/dsh.port`）
+>    ② 终端 `attach` 能进、`linuxctl exec -- ls -l /`（带选项)能跑 ③ `stop` 之后挂载/loop 干净了。
+>    不重启的话，`bin/` 不会同步到 `/data/sunsetlinux/bin`（那是 `post-fs-data.sh` 开机干的活）。
+>    当前环境**还在跑**（`env-mode=env-only`、`run/supervisor.pid=26586`），也可先在终端里
+>    `setsid /opt/sunsetlinux/supervise.sh --port 3081 >/root/supervise.log 2>&1 &` 立刻把 DSH 接上。
+> 0b. **那条卡住的 run 的收尾**：`35254264922`（`d7a2795`，App 0.3.11 / 模块 1.0.31）默认 6 小时上限约
+>    **23:50Z（北京 07:50）**被强杀；我推的 `454ed75` 排队中，它一死自动开跑。要立刻清掉就用 API
+>    `force-cancel`（UI 的 Cancel 对不响应的 runner 无效）；**手动 `workflow_dispatch` 是另一条队列、能立刻跑，
+>    但它和卡住那条写同一个 Release，若卡住那条后来复活会删掉 1.0.32 的模块资产 ⇒ 先强杀再手动跑**。
 > 1. **App 报「频道 签名校验失败，已拒绝该频道」**（0.3.9，22:5x 之后；App 0.3.8 时还是"已是最新"）。
 >    第 41 轮**已独立复核发布侧**（本机 curl 走的就是这台手机的网络）：线上 `/channel/channel.json` + `.sig`
 >    与 **gh-pages 分支**里的副本**逐字节一致**（sha256 `f28669bb…` / `a550ae0d…`），用 App 内嵌公钥按 App 的
@@ -20,7 +31,8 @@
 > 2. ~~`nsenter: Unknown option 'wd=…'`~~ → **第 41 轮删 `--wd=` + 第 42 轮补 `--`，两段合起来才算修完**。
 >    第 41 轮只清掉了**我们自己的** cwd 选项；本轮实测发现 toybox 还会把**命令之后**的选项（无论长短）
 >    一并当成自己的：`… /bin/echo -l` → `Unknown option 'l'`、`… --port 3080` → `Unknown option 'port'`
->    （真机 02:00 的 `dsh start` 就是这条）。修法是 8 处调用在命令前写 `--`（`--` 之后才真正交给命令）。
+>    （真机 02:00 的 `dsh start` 就是这条）。修法是 **9 处调用**（`linuxctl` 7 = spawn×2 + `run_in_env`×2 +
+>    ns 内卸载×3，`stop.sh` 2 = `umount -l`/`-f`）在命令前写 `--`（`--` 之后才真正交给命令）。
 >    **仍需真机端到端验**：① `linuxctl exec -- ls -l /`（带选项的用户命令）② 终端 `attach` 能进 ③
 >    `dsh start` 能起来（若 3080 被免 root 的 DSHA 占着，新逻辑会自动换端口，看 `run/dsh.port`）。
 > 3. **「root 已授权 + linuxctl 已就位，但模块状态未知（经 su 读取失败）」**（欢迎页/环境检测）：自相矛盾，
@@ -31,7 +43,9 @@
 >    没就位（`supervise.sh` 会先检查并在缺失时退 78），要么是离线环境下装不上这些 bundle 而退化成桌面版。
 >    查法：`linuxctl exec -- sh -c 'cat /root/.dsh/profiles/web/package.json; ls /root/.dsh/profiles/web'`。
 >
-> （另：手机上的老问题仍在 —— 残留 dsh **pid 4898** 占着 `127.0.0.1:3080`，装 1.0.30 后**重启一次**即可清掉。）
+> （另：设备侧已核过 —— 模块 **1.0.30** 在跑、`env-mode=env-only`、DSH 没起；`127.0.0.1:3080` 与
+> `[::1]:3090` 都归 uid 10497（**免 root 那个 DSHA App 自己**，不是残留 dsh），`3081` 空闲。
+> 老那条"残留 pid 4898 占着 3080"已作废：那个进程早没了。）
 
 ---
 
@@ -898,3 +912,83 @@ gh-pages 推送 101 s），而编译 6 个节点各 2~3 分钟、并行墙钟约
 从 1.0.3 到 1.0.30）。它们**有消费方**（下载页的"下载模块 zip"是站内相对链接），但只有**当前版本**需要；
 而且项目本来就在 Release 上主动撤掉旧模块包（"下错会得到一份看起来能装的旧包"）。
 要不要把"每个通道只保留当前模块版本"也做成 `cleanup_pages` 的一部分？说一声我就加。
+
+## 第 43 轮（2026-09-18）：nsenter 修完 → 新阻塞是流水线自己 → 改走本地送达（+ 为什么不能删库重建）
+
+第 42 轮的诊断与修法已落进 `docs/STATUS.md` §3.10.40（toybox nsenter 吃掉**命令之后**的选项）。
+本节只记 43 轮**新增**的部分 —— 这些是"修完推上去之后"才暴露出来的。
+
+### 1. 真正卡住你的不是代码，是 ⑤ 的 Release 上传
+
+- `454ed75`（模块 **1.0.32**）已推 main 并排队，但前面 `d7a2795`（App 0.3.11 / 模块 1.0.31）那次从
+  **17:50:37Z** 起停在 ⑤「发布到 GitHub Releases」，一小时多没有任何变化；`githubstatus.com` 全绿，
+  不是平台故障。证据：`git ls-remote --tags` 里只有 `v0.3.10`(→`8fe892e`)，**没有 `v0.3.11`**；
+  而 publish.yml 是"先建草稿 → 逐个传资产 → 最后才 `--draft=false`"，且**草稿匿名 API 看不见** ——
+  所以那一步确实是在往 v0.3.11 的草稿里传东西，人是看不到进度的。
+- 量级（§3.10.39 自己量过）：一轮发布要上传 **1.3 GB**（12 个 APK ≈500 MB + 6 个 `.bin` ≈430 MB），
+  3 路并发墙钟仍以十分钟计。而"已一致就跳过"是按 `name + size + sha256` 比对的，**APK 每次重建字节都不同**
+  ⇒ 每轮都全量重传。**这是结构性的，不是这次偶发**（改进方向见 §4）。
+
+### 2. 三条必须记住的 GitHub Actions 语义（这次踩全了）
+
+| 语义 | 具体表现 | 后果 |
+|---|---|---|
+| 并发组里**排队的**旧 run 会被新 run 取消 | 组名 `pipeline-<ref>-<event>`、`cancel-in-progress: false`；`8fe892e` 那次 pending 的 run 在 **18:20:58**（我推 `454ed75` 的那一刻）被自动取消 | 别把"我没取消它"当异常 |
+| **`workflow_dispatch` 是另一条队列** | 组名带 `event_name` | 手动 Run workflow **不会被卡住的 push run 挡住**（但要先看下面那条警告） |
+| UI 的 Cancel 是**协作式**的 | runner 卡在网络调用里时不响应，点十几次也没用；仓库没有 `timeout-minutes` 覆盖 ⇒ 默认 **6 小时**上限兜底 | 唯一能立刻强杀的是 API `POST /repos/<o>/<r>/actions/runs/<id>/force-cancel`（本机实测端点存在：未鉴权返回 401），需要 `Actions: write` 的 PAT |
+
+⚠️ **手动 `workflow_dispatch` 的次序警告**：它和卡住那条会写**同一个 Release**（都是 v0.3.11）。
+卡住那条若之后复活跑完，它末尾"撤掉非当前版本的模块资产"会把你刚发的 **1.0.32 模块 zip 删掉**。
+⇒ **先强杀 → 再手动跑**；或者已经装了本地包的话，就别急。
+
+### 3. 本轮的解困路径：本地打包 → 直接写进手机 `/sdcard/Download/`
+
+容器能直接写设备共享存储（实测可写、设备侧 `ls` 也看得见），于是不依赖 Release 也能交付：
+
+```bash
+# full（内置 DSH，和你设备现存层同版本 0.1.5-rc.2）
+bash module/mkmodule.sh --version 1.0.32 --variant full \
+  --dsh-layer dist/dist-backup/dsh-0.1.5-rc.2.erofs.gz \
+  --dsh-sums  dist/dist-backup/SHA256SUMS.dsh-layer.txt \
+  --out /tmp/sl/sunsetlinux-module-1.0.32.zip          # 50,089,501 B（官方 1.0.30 是 50,079,737 B，同形）
+bash module/mkmodule.sh --version 1.0.32 --variant bare \
+  --out /tmp/sl/sunsetlinux-module-1.0.32-bare.zip     # 264,815 B
+cp /tmp/sl/sunsetlinux-module-1.0.32*.zip* /sdcard/Download/
+```
+
+- 已核：包内 `bin/{linuxctl.sh,start.sh,stop.sh,supervise.sh,common/port-probe.sh}` 与仓库 working tree
+  **逐字节 diff 一致**；9 处 nsenter 调用**全部**带 `--`（含 `umount -l`/`-f`）；`--wd=` 残留 0 处。
+- sha256：full `00b9d13cc29ac5c95b04ad11071faa4c3feb5e5e1faaa8cb2cb50ad4eda4617c`、
+  bare `4fcaacb4b79c45b90c040832216cb8fb3d8ec5fcbb8898e717efb7541b00a2a0`（`.sha256` 也在同目录）。
+- **装完必须重启一次**：`bin/` 是 `module/post-fs-data.sh` 在**开机时**同步到 `/data/sunsetlinux/bin` 的，
+  而 App 调的正是 `/data/sunsetlinux/bin/linuxctl`（`core/LinuxCtl.kt` 的契约路径）。
+- 不想重启也想立刻用：当前环境还活着（`env-mode=env-only`、`run/supervisor.pid=26586`），
+  在 App 的**终端**里 `setsid /opt/sunsetlinux/supervise.sh --port 3081 >/root/supervise.log 2>&1 &`
+  （交互终端那条 nsenter 命令尾部只有 `-i`，是 nsenter 自己的 IPC 短选项、被无害吞掉 ⇒ 终端本身没坏）。
+
+### 4. ★ 为什么"强制删库重建"是错的（用户当时正在考虑）
+
+| 会永久丢的东西 | 为什么补不回来 |
+|---|---|
+| **`CHANNEL_SIGNING_KEY`（Actions secret）** | GitHub 的 secret **只写不可读** —— 删库=这把 Ed25519 私钥永久消失；App 里内嵌的是对应公钥，之后频道清单再也签不成已装 App 认的样子 ⇒ HANDOFF 第 1 条"频道签名校验失败"会从"待查"变成**永久** |
+| `app/app/debug.keystore`（仓库内固定签名） | 丢了以后两个 App 的签名就换了 ⇒ 手机上**已装的 App 无法覆盖升级**，只能卸载重装（数据全没） |
+| 全部 Release / gh-pages / Actions 历史 | 下载页历史包、`/channel/channel.json`（站点根）、构建记录；重建后路径虽同名，但内容与签名链要重做 |
+| 而且**卡住的那条 run 不会因此停** | 它已经在 GitHub 的 runner 上，属已删仓库的 run 照样跑完 |
+
+**结论**：重建仓库既不解决"上传慢/挂"，又是一次不可逆的损失。真要不放心，本地 `git clone --mirror`
+留一份镜像就够了（`.git` 约 809 MB，就在 `/root/Q/SunsetLinux`）。另外 `docs/**`、`**/*.md` 在
+`paths-ignore` 里 —— **纯文档提交不会触发流水线**，所以写交接不会往那条队列里再加一次运行。
+
+### 5. 本轮之后的第一件事（按优先级）
+
+1. 装 `/sdcard/Download/sunsetlinux-module-1.0.32.zip` → **重启** → 验三处：
+   `linuxctl dsh start`（3080 被占时应落到 **3081**，看 `run/dsh.port`）/ 终端 `attach` 与
+   `linuxctl exec -- ls -l /`（带选项的命令）/ `stop` 之后挂载与 loop 干净。
+2. 清掉卡住那条 run（先强杀再手动，理由见 §2 的警告）。
+3. 流水线改进候选（**下一轮值得做**）：让"没改的变体不必重传"真正生效 —— 现在 APK 每次重建字节都不同，
+   跳过逻辑形同虚设；可行方向是"按变体源码/输入哈希决定重建与上传"，或把 `.bin` 挪到 `layers-*` 静态托管
+   只传 `index.json`，把一轮发布的上传量从 ~1.3 GB 压到几十 MB。
+4. 一处**小文案**（不值得单独发版，下次顺手改）：`runtime/root/start.sh` 外层那段端口预检还是旧口气
+   ——「WARN: 端口 X 已被占用；dsh 可能自行换端口，实际端口以 run/dsh.port 为准」，而现在的行为是
+   **环境主动让路**（环境内 `port_pick_free` 直接挑空闲端口）。改成"环境会让路到空闲端口（实际端口看
+   run/dsh.port）"即可；外层只报信息、不参与选端口，别让它和里面的判定各说一套。
