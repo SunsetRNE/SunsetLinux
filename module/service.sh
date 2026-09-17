@@ -179,26 +179,28 @@ fi
 # 为什么需要（真机 2026-09-17）：`customize.sh` 是在**安装时**一次性展开内置 DSH 层的，
 # 而那次失败（当时是空间检查的 32 位算术 bug 报"空间不足"，见 linuxctl dsh builtin 注释）
 # 之后**没有任何第二次机会** —— 用户看到的就是"装了 full 模块，重启后照样起不来"。
-# 这里只做一次**幂等**的尝试，两个条件同时满足才跑：
-#   · 模块里确实有载荷（full 变体：dsh/manifest.json）
-#   · 环境里还没有内置记录（etc/dsh-builtin.json）
+# 这里只做一次**幂等**的尝试：模块里确实有载荷（full 变体：dsh/manifest.json）就跑。
+#   ★ 不能只在"还没有内置记录"时才跑（2026-09-17 真机教训）：现场是"载荷早就落地、
+#     state.json 却还指着坏的旧层"，只在缺记录时补就永远治不好这一种。
+#     载荷已解压时 `linuxctl dsh builtin` 走 "already" 快路径（不重复解 200 MB），
+#     但仍会做**启用判断**（生效层缺 web profile → 切到内置那份）。
 # 并且用 setsid 脱离 boot 进程：解压约 200 MB，绝不能拖住开机。结果只进日志
 # （`linuxctl dsh info` / doctor §7 都能看到它到底成没成）。
-if [ -f "$MODDIR/dsh/manifest.json" ] && [ ! -f "$LINUX_HOME/etc/dsh-builtin.json" ]; then
+if [ -f "$MODDIR/dsh/manifest.json" ]; then
   _dhctl=""
   for c in "$LINUX_HOME/bin/linuxctl.sh" "$MODDIR/bin/linuxctl.sh"; do
     [ -f "$c" ] && { _dhctl="$c"; break; }
   done
   if [ -n "$_dhctl" ]; then
-    log "内置 DSH 尚未展开（安装时失败/被跳过）→ 开机补一次：linuxctl dsh builtin"
+    log "内置 DSH 自愈检查（载荷存在）→ linuxctl dsh builtin（幂等：缺就展开，指向不对就纠正）"
     if [ -x /system/bin/setsid ]; then
       setsid /system/bin/sh -c "LINUX_HOME='$LINUX_HOME' /system/bin/sh '$_dhctl' dsh builtin --module-dir '$MODDIR' >>'$SERVICE_LOG' 2>&1" >/dev/null 2>&1 &
     else
       ( LINUX_HOME="$LINUX_HOME" /system/bin/sh "$_dhctl" dsh builtin --module-dir "$MODDIR" >>"$SERVICE_LOG" 2>&1 ) &
     fi
-    log "内置 DSH 展开已在后台发起（不阻塞 boot；结果见 $SERVICE_LOG）"
+    log "内置 DSH 自愈已在后台发起（不阻塞 boot；结果见 $SERVICE_LOG）"
   else
-    log "内置 DSH 未展开，但找不到 linuxctl（模块包不完整？）"
+    log "内置 DSH 自愈：找不到 linuxctl（模块包不完整？）"
   fi
 fi
 

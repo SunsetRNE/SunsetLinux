@@ -101,26 +101,20 @@ find_layer() {
 #   两个假阴性，把用户引向"重装层/重跑 provision"（其实层是好的）。
 #   正确做法是**直接问那条路径**：erofs 用 `dump.erofs --path=<p>`（不存在的路径会打印
 #   "read inode failed"），squashfs 用 `unsquashfs -l <img> <dir>`。
-layer_has_path() {
-    local f="$1" p="$2" fmt out=""
-    [ -f "$f" ] || return 2
-    fmt="$(layer_format "$f" 2>/dev/null || echo unknown)"
-    case "$fmt" in
-        erofs)
-            have dump.erofs || return 2
-            out="$(dump.erofs --path="$p" "$f" 2>&1 || true)"
-            case "$out" in
-                *"read inode failed"*|*"No such file"*) return 1 ;;
-                "") return 2 ;;
-                *) return 0 ;;
-            esac ;;
-        squashfs)
-            have unsquashfs || return 2
-            out="$(unsquashfs -l "$f" "$p" 2>/dev/null || true)"
-            case "$out" in *"$p"*) return 0 ;; *) return 1 ;; esac ;;
-        *) return 2 ;;
-    esac
-}
+# layer_has_path 现在住在 runtime/common/layer-inspect.sh（doctor 与 linuxctl 共用一份）。
+# 为什么搬走：`linuxctl dsh builtin` 也要用同一个判断（"生效层里有没有 web profile"）来决定
+# 要不要把层切到内置那份 —— 两处各写一遍必然漂移（真机 2026-09-17：内置层已就位却没被启用）。
+COMMON_DIR=""
+for _c in "$SELF_DIR/common" "$SELF_DIR/../common"; do
+    [ -f "$_c/layer-inspect.sh" ] && { COMMON_DIR="$_c"; break; }
+done
+if [ -n "$COMMON_DIR" ]; then
+    # shellcheck source=/dev/null
+    SUNSETLINUX_SOURCED=1 . "$COMMON_DIR/layer-inspect.sh"
+else
+    # 兜底：找不到公共库时**明说**并让检查退化成"判不了"（return 2），绝不假装"层里没有"
+    layer_has_path() { return 2; }
+fi
 
 # 环境是否真的在跑（ready + supervisor 进程都活着）。§1d/§3/§8 都要用，
 # 所以放在最前面统一定义一次 —— 三处各写一遍迟早漂移（"运行中"与"没在跑"会互相矛盾）。
@@ -1066,10 +1060,22 @@ if [ -z "$PROBE_OK" ]; then
                 ok "dsh 层内含 /root/.dsh/profiles/web/package.json"
                 add_finding ok profile "in-layer" ;;
             1)
-                bad "dsh 层内**没有** /root/.dsh/profiles/** → dsh web 界面会退化成桌面版"
-                info "修复：换一份带 profile 的 dsh 层（docs/dsh-profile.md §3.1 / §5）——"
-                info "  linuxctl update dsh <dsh-<版本>.erofs> --version <版本>"
-                info "或重跑 device-provision.sh（模块 ≥1.0.6 随包带 profiles/，构建时会装好 profile）"
+                bad "**当前生效**的 dsh 层内没有 /root/.dsh/profiles/** → dsh web 会退化成桌面版（supervise.sh 会退 78）"
+                # ★ 真机 2026-09-17 的教训：这里最容易误读 —— 上面 §7a 可能刚说过
+                #   "内置 DSH 0.1.5-rc.2 已就位"，而这条 fail 说的是 **state.json 指的那份**
+                #   （可能是设备侧自建的旧层）。两行同时出现时用户完全无从下手，
+                #   所以必须把"有好的、却没被用上"直接点出来，并给出那一条命令。
+                _bv="$(tr -d ' \n\t' < "$ETC_DIR/dsh-builtin.json" 2>/dev/null | sed -n 's/.*"version":"\([^"]*\)".*/\1/p' | head -n1)"
+                if [ -n "$_bv" ] && [ -f "$LAYERS_DIR/dsh-$_bv.erofs" ] && [ "$(basename "$dl")" != "dsh-$_bv.erofs" ]; then
+                    info "但**内置那份是好的**：$LAYERS_DIR/dsh-$_bv.erofs（版本 $_bv，带 profile）"
+                    info "一条命令切过去（只改 state.json 指向，不删任何层文件）："
+                    info "  linuxctl rollback dsh"
+                    info "（本机 dsh 生效版本会从 $(basename "$dl") 变成 dsh-$_bv.erofs；随后 linuxctl start）"
+                else
+                    info "修复：换一份带 profile 的 dsh 层（docs/dsh-profile.md §3.1 / §5）——"
+                    info "  linuxctl update dsh <dsh-<版本>.erofs> --version <版本>"
+                    info "或重跑 device-provision.sh（模块 ≥1.0.6 随包带 profiles/，构建时会装好 profile）"
+                fi
                 add_finding fail profile "layer-missing-profile" ;;
             *)
                 info "环境未运行且无 dump.erofs/unsquashfs，跳过 profile 检查（启动后可用 linuxctl exec -- ls /root/.dsh/profiles/web 复核）"

@@ -307,6 +307,91 @@ else bad(`负例没拦住：rc=${r.status} stdout=${r.stdout}`);
   if (r) { /* 上面 makeLayer 只是复用夹具，不再打包 */ }
 }
 
+// ── ②a2 「生效层坏了」时内置那份必须被启用（真机 2026-09-17 的 rc=78 就是这么来的）──
+// 真机现场：装 full 模块后，内置的 dsh-0.1.5-rc.2 已经落到 layers/ 了，但 state.json 还指着
+// **设备侧自建**的 dsh-0.1.5-rc.1（那份没有 /root/.dsh/profiles/**）→ 每次 start 都用坏层 →
+// supervise.sh 永远退 78。而 doctor 里同时出现"内置 DSH 0.1.5-rc.2 已就位"与
+// "dsh 层内没有 profile"，用户根本无从下手。
+// 规则：**没有记录** 或 **生效层确定缺 profile** → 切到内置；生效层是好的 → 绝不动。
+{
+  const mkSandbox = (tag, activeHasProfile) => {
+    const lh = join(root, `lh-active-${tag}`);
+    mkdirSync(join(lh, 'layers'), { recursive: true });
+    mkdirSync(join(lh, 'etc'), { recursive: true });
+    // 生效层：9.9.8（假的 erofs 夹具，magic 在偏移 1024）
+    cpSync(join(REPO, 'testdata/fixtures/erofs-head.bin'), join(lh, 'layers/dsh-9.9.8.erofs'));
+    writeFileSync(join(lh, 'etc/state.json'),
+      '{"schema":1,"layers":{"dsh":{"version":"9.9.8","file":"dsh-9.9.8.erofs"}}}\n');
+    // 桩 dump.erofs：按"哪个层文件"回答有没有 profile
+    const fb = join(root, `fakebin-dump-${tag}`);
+    mkdirSync(fb, { recursive: true });
+    const verdict = activeHasProfile
+      ? 'echo "Path : /root/.dsh/profiles/web/package.json"; echo "Size: 1  regular file"; exit 0'
+      : 'echo "<E> erofs: read inode failed @ /root/.dsh/profiles/web/package.json"; exit 1';
+    writeFileSync(join(fb, 'dump.erofs'),
+      `#!/bin/sh\nf=""; for a in "$@"; do case "$a" in *.erofs) f="$a" ;; esac; done\n` +
+      `case "$f" in *9.9.8*) ${verdict} ;; *) echo "Path : /root/.dsh/profiles/web/package.json"; exit 0 ;; esac\n`);
+    execFileSync('bash', ['-c', `chmod +x ${JSON.stringify(join(fb, 'dump.erofs'))}`]);
+    return { lh, fb };
+  };
+
+  // ① 生效层缺 profile → 必须切到内置（9.9.9）
+  {
+    const { lh, fb } = mkSandbox('broken', false);
+    const out = spawnSync('mksh', [ctl, 'dsh', 'builtin', '--module-dir', modDir], {
+      encoding: 'utf8', cwd: REPO,
+      env: { ...process.env, PATH: `${fb}:${process.env.PATH}`, LINUX_HOME: lh, LINUXCTL_KERNEL_FS_OVERRIDE: 'erofs' },
+    });
+    const json = (() => { try { return JSON.parse((out.stdout || '').trim().split('\n').pop()); } catch { return {}; } })();
+    const st = readFileSync(join(lh, 'etc/state.json'), 'utf8');
+    if (json.state_updated === true && /"dsh":\s*\{[^}]*"version":\s*"9\.9\.9"/.test(st)) {
+      ok('生效层缺 profile 时，内置那份被启用（state.json 切到 9.9.9）');
+    } else {
+      bad(`生效层坏了却没切到内置：state_updated=${json.state_updated} state=${st.slice(0, 160)}`);
+    }
+  }
+  // ①b 载荷与记录都已在，但 state.json 还指着坏层 → **already 快路径也必须纠正**
+  //     （真机现场就是这样：record 有、rc.2 文件也在，只是从没被启用；
+  //      如果快路径直接 return，`dsh builtin` 会永远答"already"，环境永远起不来）
+  {
+    const { lh, fb } = mkSandbox('already', false);
+    // 先把内置那份灌好（会产生 dsh-builtin.json + layers/dsh-9.9.9.erofs）
+    spawnSync('mksh', [ctl, 'dsh', 'builtin', '--module-dir', modDir], {
+      encoding: 'utf8', cwd: REPO,
+      env: { ...process.env, PATH: `${fb}:${process.env.PATH}`, LINUX_HOME: lh, LINUXCTL_KERNEL_FS_OVERRIDE: 'erofs' },
+    });
+    // 再把 state.json 拨回坏的旧层，模拟"装模块前就已经有坏层"
+    writeFileSync(join(lh, 'etc/state.json'),
+      '{"schema":1,"layers":{"dsh":{"version":"9.9.8","file":"dsh-9.9.8.erofs"}}}\n');
+    const out = spawnSync('mksh', [ctl, 'dsh', 'builtin', '--module-dir', modDir], {
+      encoding: 'utf8', cwd: REPO,
+      env: { ...process.env, PATH: `${fb}:${process.env.PATH}`, LINUX_HOME: lh, LINUXCTL_KERNEL_FS_OVERRIDE: 'erofs' },
+    });
+    const json = (() => { try { return JSON.parse((out.stdout || '').trim().split('\n').pop()); } catch { return {}; } })();
+    const st = readFileSync(join(lh, 'etc/state.json'), 'utf8');
+    if (json.action === 'already' && json.state_updated === true && /"dsh":\s*\{[^}]*"version":\s*"9\.9\.9"/.test(st)) {
+      ok('载荷已就位（action=already）时仍会纠正生效层（真机现场的入口）');
+    } else {
+      bad(`already 快路径跳过了启用判断：action=${json.action} state_updated=${json.state_updated}`);
+    }
+  }
+  // ② 生效层是好的 → 绝不动它（用户从频道更新的层不能被模块升级悄悄退回）
+  {
+    const { lh, fb } = mkSandbox('good', true);
+    const out = spawnSync('mksh', [ctl, 'dsh', 'builtin', '--module-dir', modDir], {
+      encoding: 'utf8', cwd: REPO,
+      env: { ...process.env, PATH: `${fb}:${process.env.PATH}`, LINUX_HOME: lh, LINUXCTL_KERNEL_FS_OVERRIDE: 'erofs' },
+    });
+    const json = (() => { try { return JSON.parse((out.stdout || '').trim().split('\n').pop()); } catch { return {}; } })();
+    const st = readFileSync(join(lh, 'etc/state.json'), 'utf8');
+    if (json.state_updated === false && /"dsh":\s*\{[^}]*"version":\s*"9\.9\.8"/.test(st)) {
+      ok('生效层是好的时不抢它（用户的频道更新不会被模块退回）');
+    } else {
+      bad(`好层被无故切走了：state_updated=${json.state_updated} state=${st.slice(0, 160)}`);
+    }
+  }
+}
+
 // ── ②b CI 侧那道「APK 内嵌的必须是 bare」闸门：必须先去掉空白再匹配 ──────────
 // 【真事故，0.3.6 首跑】三个 root 变体全红，报"APK 内嵌的模块不是 bare 变体"，
 // 而 module.json 明明是 `"variant": "bare"`。原因：Gradle 写出的 JSON 冒号后**有空格**，

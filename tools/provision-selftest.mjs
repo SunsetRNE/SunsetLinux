@@ -235,9 +235,14 @@ printf 'nodisk|%s\\n' "$(autoprovision_decision 0 1 0 1 '')"
   // ★ 内置 DSH 的自愈（真机 2026-09-17）：full 模块的内置 DSH 层是在**安装时**由
   //   customize.sh 展开的，那次失败（当时是空间检查的 32 位算术 bug）之后没有第二次机会，
   //   用户看到的就是"装了 full 模块、重启照样起不来"。所以 service.sh 必须能在开机时补一次
-  //   —— 条件是两个（有载荷 + 还没有内置记录），且**脱离 boot 进程**（解压约 200 MB）。
-  ok(/dsh\/manifest\.json/.test(code) && /dsh-builtin\.json/.test(code),
-    'service.sh 会在"安装时没展开成功"后于开机补一次内置 DSH');
+  //   —— 触发条件是"模块里有载荷"，且**脱离 boot 进程**（解压约 200 MB）。
+  //   ★ 2026-09-17 放宽：原来还要求"没有内置记录"，而真机现场偏偏是**记录在、但没被启用**
+  //     （state.json 指着坏的旧层）—— 只在缺记录时补，那一种永远治不好。现在只要载荷在就试
+  //     一次：`dsh builtin` 自己走 already 快路径 + 启用判断，幂等且便宜。
+  ok(/\[\s*-f\s+"\$MODDIR\/dsh\/manifest\.json"\s*\]/.test(code),
+    '开机自愈的触发条件是"模块里有 DSH 载荷"（不要求"没有内置记录"）');
+  ok(!/dsh-builtin\.json"?\s*\]/.test(code),
+    '"还有内置记录就不跑"这个条件已去掉（真机现场：记录在、指向坏层 → 必须能纠正）');
   ok(/dsh builtin --module-dir/.test(code), '自愈走的是 linuxctl dsh builtin（唯一实现，不另写解压逻辑）');
   const dhIdx = code.indexOf('dsh builtin --module-dir');
   const dhWin = code.slice(Math.max(0, dhIdx - 400), dhIdx);

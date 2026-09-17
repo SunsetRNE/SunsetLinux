@@ -70,6 +70,14 @@ else
 fi
 # shellcheck source=/dev/null
 SUNSETLINUX_SOURCED=1 . "$COMMON_DIR/http_health.sh"
+# 层内容检查（layer_has_path）：与 doctor 共用一份实现 —— `dsh builtin` 要靠它判断
+# "当前生效的 dsh 层是不是坏的"（真机 2026-09-17：内置层已就位、却因为旧记录一直没被启用）。
+if [ -f "$COMMON_DIR/layer-inspect.sh" ]; then
+    # shellcheck source=/dev/null
+    SUNSETLINUX_SOURCED=1 . "$COMMON_DIR/layer-inspect.sh"
+else
+    layer_has_path() { return 2; }   # 三态里的"判不了"，绝不假装"没有"
+fi
 
 # ---------------------------------------------------------------------------
 # 选一个能跑**设备侧脚本**的 shell（start/stop/update/doctor 都靠它）
@@ -1374,6 +1382,9 @@ EOF
 #   回滚是 update.sh 的既有实现（唯一一份）；在这里重写一份必然漂移（repo-strategy §2.3）。
 # ---------------------------------------------------------------------------
 DSH_BUILTIN_JSON="$ETC_DIR/dsh-builtin.json"
+# dsh 层里"能不能起 DSH web"的关键路径（supervise.sh 的前置检查之一）。
+# 唯一事实源：doctor §7 与这里的"层坏没坏"判断都指向它。
+LAYER_DSH_PROFILE_PATH="/root/.dsh/profiles/web/package.json"
 
 # 从 etc/dsh-builtin.json 取字段（纯 sed：设备侧没有 jq 也能读）
 dsh_builtin_field() { # <key>
@@ -1476,87 +1487,128 @@ cmd_dsh_builtin() {
     dst="$LAYERS_DIR/$(layer_file_name dsh "$ver")"
     mkdir -p "$LAYERS_DIR" "$ETC_DIR" 2>/dev/null || true
 
-    # 幂等：同版本已落地、且内置记录一致 → 直接返回（不重复解 200 MB）
+    # 幂等：同版本已落地、且内置记录一致 → **跳过解压**（不重复解 200 MB）。
+    # ★ 但**不能就此返回**：启用与否是另一件事 —— 真机 2026-09-17 的现场正是
+    #   "载荷早就解开了、state.json 却还指着坏的旧层"，如果这里直接 return，
+    #   `dsh builtin` 会一直答"already"，而环境永远起不来。所以分成两步：
+    #     A. 确保载荷在磁盘上（下面这段，贵）
+    #     B. 确保启用的是它（函数末尾，便宜）
+    local already=0
     if [ "$force" != "1" ] && [ -f "$dst" ] && [ "$(dsh_builtin_field version)" = "$ver" ]; then
-        emit "{\"ok\":true,\"action\":\"already\",\"layer\":\"dsh\",\"version\":$( _jstr "$ver" ),\"file\":\"$(jesc "$dst")\"}"
-        return 0
+        already=1
     fi
+    if [ "$already" = "1" ]; then
+        log "内置 DSH 载荷已在磁盘上（$dst），跳过解压；继续检查是否需要启用它"
+    else
+        # 空间检查：解压后 ≈ size_raw（拿不到就按 320 MB 估），至少留 300 MB 余量
+        #
+        # ★★ **只在 KB 这一档做比较，绝不乘成字节**（真机事故，2026-09-17）：
+        #   设备侧跑的是 mksh（/system/bin/sh），它的 `$(( ))` 是 **32 位有符号**整数。
+        #   写成 `[ $(( avail_kb * 1024 )) -lt "$need_b" ]` 时，空闲多的机器会溢出成负数：
+        #       632669468 KB（603 GiB 空闲）× 1024 = 647853535232 → 环绕成 **-686526464**
+        #   → 被判成"空间不足"，而 needed 只有 620 MB。用户装 full 模块时就是这么被挡住的。
+        #   （本机 mksh 也能复现：`mksh -c 'echo $((632669468 * 1024))'` → -686526464。）
+        local avail_kb="" need_kb=0
+        avail_kb="$(df -k "$LAYERS_DIR" 2>/dev/null | awk 'NR==2{print $4}' | tr -dc '0-9')"
+        case "$size_raw" in ''|*[!0-9]*) size_raw=0 ;; esac
+        if [ "$size_raw" -gt 0 ]; then need_kb=$(( size_raw / 1024 )); else need_kb=$(( 320 * 1024 )); fi
+        need_kb=$(( need_kb + 300 * 1024 ))
+        if [ -n "$avail_kb" ] && [ "$avail_kb" -gt 0 ]; then
+            if [ "$avail_kb" -lt "$need_kb" ]; then
+                emit "{\"ok\":false,\"error\":\"空间不足，无法展开内置 DSH 层\",\"available_kb\":$avail_kb,\"needed_kb\":$need_kb,\"hint\":\"清理 cache/ 或 snapshots/ 后重试：linuxctl dsh builtin --force\"}"
+                return 1
+            fi
+        fi
 
-    # 空间检查：解压后 ≈ size_raw（拿不到就按 320 MB 估），至少留 300 MB 余量
-    #
-    # ★★ **只在 KB 这一档做比较，绝不乘成字节**（真机事故，2026-09-17）：
-    #   设备侧跑的是 mksh（/system/bin/sh），它的 `$(( ))` 是 **32 位有符号**整数。
-    #   写成 `[ $(( avail_kb * 1024 )) -lt "$need_b" ]` 时，空闲多的机器会溢出成负数：
-    #       632669468 KB（603 GiB 空闲）× 1024 = 647853535232 → 环绕成 **-686526464**
-    #   → 被判成"空间不足"，而 needed 只有 620 MB。用户装 full 模块时就是这么被挡住的。
-    #   （本机 mksh 也能复现：`mksh -c 'echo $((632669468 * 1024))'` → -686526464。）
-    local avail_kb="" need_kb=0
-    avail_kb="$(df -k "$LAYERS_DIR" 2>/dev/null | awk 'NR==2{print $4}' | tr -dc '0-9')"
-    case "$size_raw" in ''|*[!0-9]*) size_raw=0 ;; esac
-    if [ "$size_raw" -gt 0 ]; then need_kb=$(( size_raw / 1024 )); else need_kb=$(( 320 * 1024 )); fi
-    need_kb=$(( need_kb + 300 * 1024 ))
-    if [ -n "$avail_kb" ] && [ "$avail_kb" -gt 0 ]; then
-        if [ "$avail_kb" -lt "$need_kb" ]; then
-            emit "{\"ok\":false,\"error\":\"空间不足，无法展开内置 DSH 层\",\"available_kb\":$avail_kb,\"needed_kb\":$need_kb,\"hint\":\"清理 cache/ 或 snapshots/ 后重试：linuxctl dsh builtin --force\"}"
+        have gzip || { emit '{"ok":false,"error":"缺少 gzip（toybox 应自带）"}'; return 1; }
+        local tmp="$dst.tmp.$$"
+        rm -f "$tmp" 2>/dev/null || true
+        if ! gzip -dc "$src" > "$tmp" 2>/dev/null; then
+            rm -f "$tmp" 2>/dev/null || true
+            emit '{"ok":false,"error":"gzip 解压失败（模块包损坏？重刷模块后再试）"}'
             return 1
         fi
+        local got=""
+        if have sha256sum; then got="$(sha256sum "$tmp" 2>/dev/null | awk '{print $1}')"; fi
+        if [ -n "$sha_raw" ] && [ -n "$got" ] && [ "$got" != "$sha_raw" ]; then
+            rm -f "$tmp" 2>/dev/null || true
+            emit "{\"ok\":false,\"error\":\"解压结果 sha256 与载荷清单不符（模块包损坏）\",\"expected\":\"$(jesc "$sha_raw")\",\"actual\":\"$(jesc "$got")\"}"
+            return 1
+        fi
+        local dfmt=""
+        dfmt="$(layer_format "$tmp" 2>/dev/null || echo unknown)"
+        if [ "$dfmt" != "erofs" ] && [ "$dfmt" != "squashfs" ]; then
+            rm -f "$tmp" 2>/dev/null || true
+            emit '{"ok":false,"error":"解压结果不是有效的 erofs/squashfs 镜像（载荷损坏）"}'
+            return 1
+        fi
+        if ! mv -f "$tmp" "$dst" 2>/dev/null; then
+            rm -f "$tmp" 2>/dev/null || true
+            emit '{"ok":false,"error":"落盘失败（空间不足？）"}'
+            return 1
+        fi
+        chmod 0644 "$dst" 2>/dev/null || true
+
+        # etc/dsh-builtin.json = **内置版本的唯一事实源**（回滚与 doctor 都读它）
+        {
+            printf '{\n'
+            printf '  "schema": 1,\n'
+            printf '  "version": "%s",\n' "$(jesc "$ver")"
+            printf '  "file": "%s",\n' "$(jesc "$(basename "$dst")")"
+            printf '  "path": "%s",\n' "$(jesc "$dst")"
+            printf '  "sha256_raw": %s,\n' "$(_jstr "$sha_raw")"
+            printf '  "size_raw": %s,\n' "$( [ "$size_raw" -gt 0 ] && printf '%s' "$size_raw" || printf 'null' )"
+            printf '  "source": "module",\n'
+            printf '  "module_dir": "%s",\n' "$(jesc "$mod_dir")"
+            printf '  "at": "%s"\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date)"
+            printf '}\n'
+        } > "$DSH_BUILTIN_JSON" 2>/dev/null || warnl "写 $DSH_BUILTIN_JSON 失败（回滚目标会退化）"
+        chmod 0644 "$DSH_BUILTIN_JSON" 2>/dev/null || true
     fi
 
-    have gzip || { emit '{"ok":false,"error":"缺少 gzip（toybox 应自带）"}'; return 1; }
-    local tmp="$dst.tmp.$$"
-    rm -f "$tmp" 2>/dev/null || true
-    if ! gzip -dc "$src" > "$tmp" 2>/dev/null; then
-        rm -f "$tmp" 2>/dev/null || true
-        emit '{"ok":false,"error":"gzip 解压失败（模块包损坏？重刷模块后再试）"}'
-        return 1
-    fi
-    local got=""
-    if have sha256sum; then got="$(sha256sum "$tmp" 2>/dev/null | awk '{print $1}')"; fi
-    if [ -n "$sha_raw" ] && [ -n "$got" ] && [ "$got" != "$sha_raw" ]; then
-        rm -f "$tmp" 2>/dev/null || true
-        emit "{\"ok\":false,\"error\":\"解压结果 sha256 与载荷清单不符（模块包损坏）\",\"expected\":\"$(jesc "$sha_raw")\",\"actual\":\"$(jesc "$got")\"}"
-        return 1
-    fi
-    local fmt=""
-    fmt="$(layer_format "$tmp" 2>/dev/null || echo unknown)"
-    if [ "$fmt" != "erofs" ] && [ "$fmt" != "squashfs" ]; then
-        rm -f "$tmp" 2>/dev/null || true
-        emit '{"ok":false,"error":"解压结果不是有效的 erofs/squashfs 镜像（载荷损坏）"}'
-        return 1
-    fi
-    if ! mv -f "$tmp" "$dst" 2>/dev/null; then
-        rm -f "$tmp" 2>/dev/null || true
-        emit '{"ok":false,"error":"落盘失败（空间不足？）"}'
-        return 1
-    fi
-    chmod 0644 "$dst" 2>/dev/null || true
-
-    # etc/dsh-builtin.json = **内置版本的唯一事实源**（回滚与 doctor 都读它）
-    {
-        printf '{\n'
-        printf '  "schema": 1,\n'
-        printf '  "version": "%s",\n' "$(jesc "$ver")"
-        printf '  "file": "%s",\n' "$(jesc "$(basename "$dst")")"
-        printf '  "path": "%s",\n' "$(jesc "$dst")"
-        printf '  "sha256_raw": %s,\n' "$(_jstr "$sha_raw")"
-        printf '  "size_raw": %s,\n' "$( [ "$size_raw" -gt 0 ] && printf '%s' "$size_raw" || printf 'null' )"
-        printf '  "source": "module",\n'
-        printf '  "module_dir": "%s",\n' "$(jesc "$mod_dir")"
-        printf '  "at": "%s"\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date)"
-        printf '}\n'
-    } > "$DSH_BUILTIN_JSON" 2>/dev/null || warnl "写 $DSH_BUILTIN_JSON 失败（回滚目标会退化）"
-    chmod 0644 "$DSH_BUILTIN_JSON" 2>/dev/null || true
-
-    # state.json：**只在还没有 dsh 记录时**写。
-    #   · 全新环境：让 start.sh 一上来就能定位到内置层（否则要等 device-provision 写完 state）
-    #   · 已有环境：不动 —— 用户可能已经从频道更新过 dsh，模块升级不该把它悄悄退回去
-    local cur="" activated=false
+    # ------------------------------------------------------------------
+    # 第二步（**两条路径都要走**）：决定要不要把生效层切到内置这份
+    #   ① 没有 dsh 记录            → 切（全新环境，start.sh 要能立刻定位到它）
+    #   ② 生效层**确定**缺 web profile → 切（这份层起不来：supervise.sh 必退 78）
+    #   ③ 生效层是好的             → **不动**（用户可能已经从频道更新过 dsh，
+    #                                模块升级不该把好意变成回退）
+    #
+    # ② 是真机事故补上的（2026-09-17）：装 full 模块后内置 rc.2 已经落到 layers/ 了，
+    # 但 state.json 还指着**设备侧自建**的 rc.1（那份没有 /root/.dsh/profiles/**），
+    # 于是每次 start 都用坏层 → 永远 rc=78；而 doctor 里"内置 DSH 0.1.5-rc.2 已就位"
+    # 与"dsh 层内没有 profile"两行同时出现，用户完全无法理解。
+    # layer_has_path 三态：0 有 / 1 没有 / 2 判不了 —— 只有**确定的 1** 才切（保守）。
+    # ------------------------------------------------------------------
+    local fmt="" cur="" cur_file="" profile_rc=2 why="" activated=false
+    fmt="$(layer_format "$dst" 2>/dev/null || echo erofs)"
     cur="$(dsh_layer_version "$STATE_JSON" dsh 2>/dev/null || true)"
-    case "$cur" in ""|unknown|null)
-        write_state_for_layer dsh "$ver" "$dst" "$sha_raw" "$fmt" && activated=true ;;
-    esac
-    log "内置 DSH 已就位：$dst（版本 $ver${sha_raw:+, sha256_raw 已核}）"
-    emit "{\"ok\":true,\"action\":\"materialized\",\"layer\":\"dsh\",\"version\":$( _jstr "$ver" ),\"file\":\"$(jesc "$dst")\",\"sha256_raw\":$(_jstr "$sha_raw"),\"size_raw\":$( [ "$size_raw" -gt 0 ] && printf '%s' "$size_raw" || printf 'null' ),\"state_updated\":$activated}"
+    case "$cur" in ""|unknown|null) cur="" ;; esac
+    cur_file="$(find_layer dsh 2>/dev/null || true)"
+    if [ -z "$cur" ]; then
+        why="本机还没有 dsh 记录（全新环境）"
+    elif [ -n "$cur_file" ] && [ "$cur_file" = "$dst" ]; then
+        why=""   # 生效的就是这份内置层，什么都不用做
+    else
+        if [ -n "$cur_file" ]; then
+            if layer_has_path "$cur_file" "$LAYER_DSH_PROFILE_PATH"; then
+                profile_rc=0
+            else
+                profile_rc=$?
+            fi
+        fi
+        if [ "$profile_rc" = "1" ]; then
+            why="当前生效层 $cur 里没有 $LAYER_DSH_PROFILE_PATH（这份层起不来：supervise.sh 会退 78）"
+        fi
+    fi
+    if [ -n "$why" ]; then
+        write_state_for_layer dsh "$ver" "$dst" "$sha_raw" "$fmt" && activated=true
+        log "把生效层切到内置 DSH（版本 $ver）：$why"
+    fi
+
+    local action="materialized"
+    [ "$already" = "1" ] && action="already"
+    log "内置 DSH 就位：$dst（版本 $ver${sha_raw:+, sha256_raw 已核}；启用更新=$activated）"
+    emit "{\"ok\":true,\"action\":\"$action\",\"layer\":\"dsh\",\"version\":$( _jstr "$ver" ),\"file\":\"$(jesc "$dst")\",\"sha256_raw\":$(_jstr "$sha_raw"),\"size_raw\":$( [ "$size_raw" -gt 0 ] && printf '%s' "$size_raw" || printf 'null' ),\"state_updated\":$activated,\"reason\":$(_jstr "$why")}"
     return 0
 }
 

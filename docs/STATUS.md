@@ -503,6 +503,51 @@ su -c '/data/sunsetlinux/bin/linuxctl doctor'
 | 已装状态读不到时 | —— | **不给刷入按钮**，先让用户修 root 授权（与"读不到 ≠ 没装"一致） |
 | 重启 | —— | 只报告"重启后生效"（KernelSU 落 `modules_update/`），**App 不替用户重启**，脚本里有单测断言不许出现 `reboot` |
 
+### 3.10.30 内置 DSH「已就位却从没被启用」→ 永远 rc=78（模块 1.0.26）
+
+**真机现场（2026-09-17，装完 full 模块 1.0.24/1.0.25 后）**：doctor 里同时出现两行，
+看起来互相矛盾，用户完全无从下手：
+
+```
+[ok]   内置 DSH：0.1.5-rc.2（随模块冻结 → /data/sunsetlinux/layers/dsh-0.1.5-rc.2.erofs）
+[fail] **当前生效**的 dsh 层内没有 /root/.dsh/profiles/** …（supervise.sh 会退 78）
+```
+
+而 `run/linux.log` 里每次 start 都是：`层 dsh = …/dsh-0.1.5-rc.1.erofs` → `rc=78`。
+
+**根因（两处叠加，都在我这边）**：
+
+1. `linuxctl dsh builtin` 当时只在「**还没有** dsh 记录」时才写 `state.json`（原意是
+   "别把用户从频道更新的层悄悄退回去"）。而这台机早有记录 = 设备侧自建的 `rc.1`（坏的），
+   于是一路跳过 → 内置 `rc.2` 只落盘、**从未被启用**，`find_layer` 永远返回 rc.1。
+2. 幂等快路径（"同版本已落地 → return already"）在**启用判断之前**就返回了 ——
+   于是即使后来补了规则，`dsh builtin` 也只会一直答 "already"，不会纠正指向。
+
+**修法**：把「确保载荷在磁盘上」与「确保启用的是它」**拆成两步**，后一步两条路径都要走：
+
+| 生效层状态 | 行为 |
+|---|---|
+| 没有 dsh 记录 | 切到内置 |
+| 生效层**确定**缺 `/root/.dsh/profiles/web/package.json` | 切到内置（这份层起不来） |
+| 生效层是好的 | **不动**（用户的频道更新不会被模块退回） |
+| 判不了（没有 dump.erofs / 格式不认识） | 不动（保守） |
+
+配套：
+- `layer_has_path` 从 `doctor.sh` 抽到 **`runtime/common/layer-inspect.sh`**（doctor 与 linuxctl
+  共用一份；mkmodule 的 `BIN_COMMON` 已带上它）—— 同一判断两处各写一遍必然漂移。
+- `doctor §7` 的 profile fail 现在会**点名**："但内置那份是好的 → 一条命令切过去：
+  `linuxctl rollback dsh`"（把"有好的却没用上"直接说破）。
+- `module/service.sh` 的开机自愈条件从「有载荷 **且** 没有内置记录」放宽为「**有载荷**」：
+  真机现场恰恰是"记录在、指向错"，只在缺记录时补永远治不好这一种。
+
+**回归**：`tools/module-variant-selftest.mjs` **33 → 36**（新增三条，含**反方向**"生效层是好的
+时绝不抢"，以及"**already 快路径也必须纠正指向**"——真机现场的正门）；`tools/provision-selftest.mjs`
+**86 → 87**（断言触发条件是"有载荷"，且"还有记录就不跑"这个条件确实没了）。
+
+> **不用等新模块的现场解法**（1.0.25 上就有效）：
+> `linuxctl rollback dsh` —— 不带 `--to` 时优先回**内置版本**，只改 `state.json` 指向、不删层文件；
+> 然后 `linuxctl start`。1.0.26 起这件事在开机自愈里自动做掉。
+
 ### 3.10.29 **32 位算术**事故：空闲 603 GB 被判成"空间不足"（模块 1.0.25）
 
 **真机实测（装 full 模块时，customize.sh 的输出）**：

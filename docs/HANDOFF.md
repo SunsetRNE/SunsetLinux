@@ -734,8 +734,8 @@ I/O error 上 —— 因为重启后规则失效；本次改动正是为了消�
 
 ### 回归与门禁
 
-模块 **1.0.25**（`STATUS.md` §3.10.28 doctor §3 假警报 + §3.10.29 **32 位算术**事故；
-回归：root selftest 66/0 × bash+mksh、模块变体 33/0、provision 86/0）；
+模块 **1.0.26**（`STATUS.md` §3.10.28 doctor §3 假警报 + §3.10.29 **32 位算术** + §3.10.30 内置 DSH 未被启用；
+回归：root selftest 66/0 × bash+mksh、模块变体 36/0、provision 87/0）；
 App 单测 **175/0 × 2 个变体**（`LC_ALL=C.utf8 LANG=C.utf8 ./gradlew --no-daemon --offline `
 `:app:testProotFullDebugUnitTest` / `:app:testRootFullDebugUnitTest`；POSIX locale 下中文测试名会让
 kotlinc 报 `InvalidPathException`，那是环境问题、CI 已设 C.UTF-8）；
