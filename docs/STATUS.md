@@ -519,8 +519,10 @@ su -c '/data/sunsetlinux/bin/linuxctl doctor'
 **修法**：§3 只留**一个**结论 —— 与 `start.sh` 的 `mount_upper_rw` 同口径的读写探针
 （① `-o loop,rw,noatime` → ② 显式 `losetup` 兜底）；只读探针降级为**诊断信息**
 （只在读写也失败时才跑，报 info，不产生 finding）。doctor 仍然只读：不跑 `e2fsck -p`、
-不清残留 loop，探针自己建的 loop 自己拔掉。新增测试接缝 `SUNSETLINUX_LOOP_DEV_OK=1`
-（CI 容器没有 loop 设备，用它强制走探针）。回归 **62 → 63 条**（bash + mksh 各 63/0）。
+不清残留 loop，探针自己建的 loop 自己拔掉。新增两个测试接缝：`SUNSETLINUX_LOOP_DEV_OK=1`（CI 容器没有 loop 设备，用它强制走探针）
+与 `SUNSETLINUX_MOUNT/UMOUNT`（doctor 默认用 `/system/bin/mount` 绝对路径，桩必须能替进来）。
+回归 **62 → 64 条**（bash + mksh 各 64/0；含反例：**读写也挂不上时必须仍然 fail**，
+不能为了"不误报"把检查做成永远通过）。
 
 > 同一轮真机的另外两项 fail（`dsh 层内没有 /root/.dsh/profiles/**`、`rc=78`）是**同一个真问题**：
 > 层是设备侧自建的那份（`dsh-0.1.5-rc.1.erofs`，缺 web profile）。修法是装官方层的 dsh

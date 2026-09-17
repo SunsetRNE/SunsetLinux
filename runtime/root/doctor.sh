@@ -26,8 +26,11 @@ RUN_DIR="$LH/run"
 UPPER_IMG="$LH/upper.img"
 ROOTFS_DIR="$LH/rootfs"
 
-UMOUNT=/system/bin/umount
-MOUNT=/system/bin/mount
+# ★ 测试接缝（**只在测试里设**，设备侧永远不设）：CI 容器里没有 /system/bin/mount，
+#   而 §3 的探针要能用桩复现"只读挂不上、读写正常"（真机第四起假警报）。
+#   与 SUNSETLINUX_KCONFIG_FILE 同一套做法：只开一个明确的接缝，不改默认行为。
+UMOUNT="${SUNSETLINUX_UMOUNT:-/system/bin/umount}"
+MOUNT="${SUNSETLINUX_MOUNT:-/system/bin/mount}"
 
 FAILS=0
 WARNS=0

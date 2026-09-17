@@ -528,21 +528,33 @@ mkdir -p "$UL/run" "$UL/etc" "$UL/layers"
 # 假镜像：doctor 只看文件存在与大小，不解析内容（ext4 校验走 e2fsck，CI 上通常没有）
 dd if=/dev/zero of="$UL/upper.img" bs=1024 count=4 2>/dev/null
 UB="$TMP/fakebin-upper"; mkdir -p "$UB"
+# 桩：只对 `-o loop,ro` 报错（真机就是"只读挂不上、读写正常"）
 printf '%s\n' '#!/bin/sh' \
     'case "$*" in *loop,ro*) echo "mount: Invalid argument" >&2; exit 1 ;; esac' \
     'exit 0' > "$UB/mount"
 printf '%s\n' '#!/bin/sh' 'exit 0' > "$UB/umount"
 chmod +x "$UB/mount" "$UB/umount"
-# SUNSETLINUX_LOOP_DEV_OK=1：CI 容器里没有 loop 设备，用它强制走一遍探针（测试接缝）
-ujson="$(PATH="$UB:$PATH" SUNSETLINUX_LOOP_DEV_OK=1 LINUX_HOME="$UL" "$SH_BIN" "$SELF_DIR/doctor.sh" 2>/dev/null | tail -n1 || true)"
+# 接缝：doctor 默认用 /system/bin/mount（设备侧权威），容器里没有 → 用桩；
+# SUNSETLINUX_LOOP_DEV_OK=1 再强制走一遍探针（CI 没有 loop 设备）
+ujson="$(SUNSETLINUX_MOUNT="$UB/mount" SUNSETLINUX_UMOUNT="$UB/umount" SUNSETLINUX_LOOP_DEV_OK=1 \
+         LINUX_HOME="$UL" "$SH_BIN" "$SELF_DIR/doctor.sh" 2>/dev/null | tail -n1 || true)"
 case "$ujson" in
-    *'"level":"fail","id":"upper_mountable'*)
-        bad "只读探针失败被当成 fail（真机第四起假警报）：$(printf '%s' "$ujson" | grep -o '"id":"upper_mountable[^}]*}' | head -1)" ;;
+    *'"level":"fail","id":"upper_mountable"'*)
+        bad "只读探针的失败被当成了 fail（真机第四起假警报）：$(printf '%s' "$ujson" | grep -o '"id":"upper_mountable"[^}]*}' | head -1)" ;;
     *'"level":"ok","id":"upper_mountable_rw"'*)
         ok "只读挂不上、读写正常时不再报 fail（§3 只认与 start.sh 同口径的读写探针）" ;;
     *'"schema":1'*)
         bad "doctor 没有给出 upper_mountable_rw 结论（探针被跳过了？接缝没生效）" ;;
     *) bad "doctor 没有输出可解析的 JSON：$(printf '%s' "$ujson" | head -c 120)" ;;
+esac
+# 反例（同一组桩的另一个方向）：**读写也挂不上**时必须仍然 fail —— 不能为了"不误报"把检查做成永远通过
+printf '%s\n' '#!/bin/sh' 'echo "mount: I/O error" >&2; exit 1' > "$UB/mount"
+chmod +x "$UB/mount"
+ujson2="$(SUNSETLINUX_MOUNT="$UB/mount" SUNSETLINUX_UMOUNT="$UB/umount" SUNSETLINUX_LOOP_DEV_OK=1 \
+          LINUX_HOME="$UL" "$SH_BIN" "$SELF_DIR/doctor.sh" 2>/dev/null | tail -n1 || true)"
+case "$ujson2" in
+    *'"level":"fail","id":"upper_mountable_rw"'*) ok "读写真的挂不上时仍报 fail（检查没被"修"成永远通过）" ;;
+    *) bad "反例不对：读写挂不上时应当 fail，实际：$(printf '%s' "$ujson2" | grep -o '"id":"upper_mountable[^}]*}' | head -1)" ;;
 esac
 
 # 反例：路径真的不在时，必须仍然是 fail（不能为了"不误报"把检查做成永远通过）
