@@ -503,6 +503,67 @@ su -c '/data/sunsetlinux/bin/linuxctl doctor'
 | 已装状态读不到时 | —— | **不给刷入按钮**，先让用户修 root 授权（与"读不到 ≠ 没装"一致） |
 | 重启 | —— | 只报告"重启后生效"（KernelSU 落 `modules_update/`），**App 不替用户重启**，脚本里有单测断言不许出现 `reboot` |
 
+### 3.10.43 「脚本似乎在尝试重复挂载？」—— 建树期间**没有"正在启动"这个中间态**，第二次 start 各建一棵树（模块 1.0.34）
+
+用户看完 §3.10.42 的修复后继续追问（原话）：
+
+> 「很奇怪，挂载不是正常状态吗？脚本似乎在尝试重复挂载？」
+> 「启动的时候，默认重建挂载？已经有挂载了呀……挂载判定也没有接上？挂载上来就直接启动环境啊？
+> 为什么在重新启动环境的时候重新挂载呢？」
+
+#### 一、正常设计确实是"有就不重建"，判定链只有一条
+
+| 判据 | 位置 | 含义 |
+|---|---|---|
+| `running_ns_pid` | `start.sh:434` | `supervisor.pid` 里的 pid 活着 + `/proc/<pid>/ns/mnt` 可读 |
+| `ready` | `run/ready` | 守护进程已把挂载树建完、交给 `entry.sh` |
+| 结果 | `start.sh` 默认分支 | 两者都在 → 打印「环境已在运行（ns_pid=…），无需重复启动」并 `exit 0`，**一个 mount 都不做** |
+
+所以"有挂载就重建"不是设计。**但这条判据只认识"已就绪"**，见下。
+
+#### 二、真机那两棵树是怎么来的（03:39 现场）
+
+```
+03:37:33  模块 service.sh 开机自启（full，pid 4190，DSH 都起来了）—— 这条 start 已能按时返回（§3.10.42 的修复生效）
+03:39:02  一次 stop.sh：停止完成，但 loop 49~57 残留（日志自己写了 WARN）
+03:39:16  start --no-dsh → inner pid=31547 开始建树 …… 到 03:40:08 才 ready（≈50 秒）
+03:39:36  又一次 start --no-dsh → inner pid=4672：此刻 31547 还没写 supervisor.pid/ready
+          ⇒ running_ns_pid 返假、status 报 stopped ⇒ **又完整建了一棵树**
+          ⇒ run/mounts 13 → 26 条；两条守护链同时活着；dsh start 报"进不去环境"
+```
+
+结论：**缺的不是"挂载判定"，是"正在启动"这个中间态**。建树要 30~50 秒（loop + erofs +
+overlay + chroot），这期间 `supervisor.pid`／`ready` 都还不存在，而 `gather_status` 的
+`starting` 也要求 `ns_pid_alive`（同一个 pid 文件）⇒ 状态被报成 `stopped` ⇒ App 的启动卡
+看着"没在跑"（`transitional` 置灰没生效），用户再点一次就各建一棵树。
+
+#### 三、修法：一把启动锁 + 让 `starting` 真的可见（模块 1.0.34，App 不用改）
+
+| 位置 | 改动 |
+|---|---|
+| `start.sh` | 新增 `run/start.lock`（内容 `<pid> <epoch>`，`set -C`/noclobber **原子**占有）：`start_lock_acquire/start_lock_holder/start_lock_release`。拿不到锁时：持锁进程活着 → **只等它就绪（≤90s，`START_WAIT`），绝不重复建树**；锁陈旧（进程已死）→ 接管。占有后挂 `EXIT/INT/TERM/HUP` trap 释放 |
+| `start.sh`（inner） | 写完 `supervisor.pid` + `ready` 后立刻删锁 —— 之后由 `running_ns_pid` 正常挡住重复启动（也盖住"外层已超时退出、建树还在继续"） |
+| `linuxctl.sh` | `gather_status` 新增 `start_lock_holder`：没就绪但**有人正在建树** → `state=starting`。App 按 `transitional` 把启动卡置灰，点不动 = 不会再触发第二个 daemon |
+| `stop.sh` | 两条清理路径都删 `run/start.lock`（"停止"必须是那个能解开的出口） |
+| `selftest.sh` | 原语做**行为**断言（锁被占时第二次拿不到 / holder 指向真正的持锁进程 / 持锁进程死后 holder 失效 / 释放后可重新占有）+ 真跑 `status` 验"只有锁时 `state=starting`" + 4 条静态接线断言。**88 → 101/0**（bash 与 mksh） |
+
+#### 四、仍然存在、且是"看着像已有挂载"来源的一件事（未修，需你定优先级）
+
+设备日志里那句 `make-rprivate 未成功（toybox 无此选项）` 是**真的没生效**：
+这台机 `/` 或 `/data` 是 `shared:`，而 toybox 没有 `--make-rprivate`，base 层那份 util-linux
+`mount` 那次回退也没成功 ⇒ **守护进程的挂载会回流宿主 ns**。后果：
+
+- `stop` 之后宿主这边仍能看到 loop/挂载残留（日志里的 WARN 与"跳过 detach"就是这么来的），
+  看上去像"已经有挂载了"；
+- 但那棵树**已经不可用**：它属于已死守护进程的私有 mount ns，而 `dsh start` 需要的是
+  "活的 ns + ready" ⇒ 下次 start 重建是**必要**的，不是浪费。
+
+要真正消掉这种观感，得做（按性价比排序，**下一轮候选**）：
+1. 修 `make-rprivate`（查 base 层 util-linux `mount` 为什么没接上；不行就显式
+   `mount --make-rprivate /data` 兜底）——宿主残留的根；
+2. `stop` 时对宿主侧残留挂载/loop 做一次显式清理（现在只 WARN + 让人手动 `losetup -d`）；
+3. `start` 前若发现**宿主 ns 里有本项目残留挂载**，先清干净再建（防叠加）。
+
 ### 3.10.42 「点了启动环境，然后就没了，点不了启动 DSH」：**命令卡住把整个启动区锁死** + 让路端口不落盘（模块 1.0.33 / App 0.3.12）
 
 **真机现场**（2026-09-18 02:49，App 0.3.11 + 模块 1.0.32）：按「分步启动 → 仅启动环境」之后，

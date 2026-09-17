@@ -294,6 +294,23 @@ env_ready() {
     [ -f "$READY_FILE" ] && ns_pid_alive >/dev/null 2>&1
 }
 
+# 「正在启动」的持有进程 PID（run/start.lock + 进程活着）。
+#
+# 为什么需要它（真机 2026-09-18 03:39 的两棵挂载树）：建树要 30~50 秒（loop/erofs/
+# overlay/chroot），这期间 `supervisor.pid` 还没写 ⇒ [ns_pid_alive] 返假 ⇒ 状态报
+# `stopped` ⇒ App 上"启动"看着像没在跑，用户再点一次就**各建一棵挂载树**
+# （run/mounts 从 13 条变 26 条、三条守护链同时活着）。锁是 start.sh 在开工前原子写下的，
+# 这里的判据只有两条：文件在 + 里面的 pid 还活着。
+start_lock_holder() {
+    local pid=""
+    [ -f "$RUN_DIR/start.lock" ] || return 1
+    pid="$(head -n1 "$RUN_DIR/start.lock" 2>/dev/null | awk '{print $1}' | tr -dc '0-9' || true)"
+    [ -n "$pid" ] || return 1
+    [ -d "/proc/$pid" ] || return 1
+    kill -0 "$pid" 2>/dev/null || return 1
+    printf '%s' "$pid"
+}
+
 # 取 dsh 进程 PID（run/dsh.pid 且进程活着）
 dsh_pid_alive() {
     local pid=""
@@ -454,7 +471,12 @@ gather_status() {
         fi
         if pid="$(dsh_pid_alive)"; then :; else pid="$ns_pid"; fi
     else
-        if [ -s "$ERROR_FILE" ] && [ -f "$RUN_DIR/started" ]; then
+        # ★ 环境还没就绪，但**有人正在建树**（run/start.lock 且持锁进程活着）⇒ starting。
+        #   以前这里只看 supervisor.pid，于是 30~50 秒的建树窗口被报成 stopped，
+        #   App 的启动卡看起来"没在跑"，用户再点一次 → 两棵挂载树叠在一起。
+        if start_lock_holder >/dev/null 2>&1; then
+            state="starting"
+        elif [ -s "$ERROR_FILE" ] && [ -f "$RUN_DIR/started" ]; then
             state="error"
         else
             state="stopped"

@@ -74,6 +74,9 @@ MOUNTS_FILE="$RUN_DIR/mounts"
 MOUNTED_JSON="$RUN_DIR/mounted.json"
 ERROR_FILE="$RUN_DIR/last-error"
 DAEMON_LOG="$RUN_DIR/start.log"
+# 「正在启动」的互斥锁（内容 `<pid> <epoch>`，`set -C` 原子写）—— 覆盖"建树中"这段窗口，
+# 详见 start_lock_acquire 的注释（真机 2026-09-18 03:39 那两棵叠起来的挂载树）。
+START_LOCK="$RUN_DIR/start.lock"
 
 
 # 层格式：空 = 自动探测；也可用 LINUX_LAYER_EXT=.squashfs 强制
@@ -436,6 +439,63 @@ running_ns_pid() {
     [ -d "/proc/$pid" ] || return 1
     [ -r "/proc/$pid/ns/mnt" ] || return 1
     printf '%s' "$pid"
+}
+
+# ---------------------------------------------------------------------------
+# 启动锁：挡住"第二次 start 又建一棵挂载树"
+#
+# ### 真机事故（2026-09-18 03:39，用户问「脚本似乎在尝试重复挂载？」）
+#
+# `running_ns_pid` 只看**已就绪**（`supervisor.pid` + `ready`），而建树要 **30~50 秒**
+# （loop + erofs + overlay + chroot）。这段窗口里它返假，`linuxctl status` 也就报 `stopped`,
+# 于是第二次 `start`（用户在界面上再点一次）会**各建一棵挂载树**：
+#
+#     03:39:16  start --no-dsh → inner pid=31547 开始建树（到 03:40:08 才 ready）
+#     03:39:36  又一次 start --no-dsh → inner pid=4672（此时 31547 还没写 supervisor.pid/ready）
+#     ⇒ run/mounts 13 → 26 条，两条守护链同时活着，最后 dsh start 报"进不去环境"
+#
+# 判据只有两条：**锁文件在 + 里面的 pid 还活着**。写法用 `set -C`（noclobber）保证
+# "创建即占有"的原子性（mksh 支持；比 mkdir 锁少一个目录，且能顺手记下 pid 与时间）。
+# 锁的生命周期：start.sh 开工前占有 → inner 写完 `supervisor.pid`+`ready` 时释放
+# （脚本 EXIT trap 也释放一次）→ stop.sh 也清。持有者死掉留下的陈旧锁会被下一次 start 接管。
+# ---------------------------------------------------------------------------
+start_lock_acquire() {   # 0 = 本次占有；1 = 已有人持有
+    if ( set -C; printf '%s %s\n' "$$" "$(date +%s)" > "$START_LOCK" ) 2>/dev/null; then
+        return 0
+    fi
+    return 1
+}
+
+start_lock_holder() {    # 打印持锁且仍活着的 pid；否则返回 1
+    local pid=""
+    [ -f "$START_LOCK" ] || return 1
+    pid="$(head -n1 "$START_LOCK" 2>/dev/null | awk '{print $1}' | tr -dc '0-9' || true)"
+    [ -n "$pid" ] || return 1
+    [ -d "/proc/$pid" ] || return 1
+    kill -0 "$pid" 2>/dev/null || return 1
+    printf '%s' "$pid"
+}
+
+start_lock_release() {
+    rm -f "$START_LOCK" 2>/dev/null || true
+}
+
+# 锁的持有者要**跟着活着的那个进程走**：
+#   外层 start.sh 只在 `wait_ready`（默认 45s）之内有意义，而建树实测可以到 50s
+#   （03:39 那次就是）。若外层超时退出时把锁一起放掉，第二次 start 又会各建一棵树 ——
+#   正是我们要修的那个竞态在更慢的机器上重演。所以：
+#     · 守护进程（inner）一开工就把锁改写成自己的 pid（它活到环境结束）；
+#     · 外层退出时**只释放属于自己 pid 的锁**，绝不碰别人的。
+start_lock_rewrite_self() {   # 由 inner 调用
+    printf '%s %s\n' "$$" "$(date +%s)" > "$START_LOCK" 2>/dev/null || true
+}
+
+start_lock_release_own() {    # 只释放"我自己的"锁
+    local pid=""
+    [ -f "$START_LOCK" ] || return 0
+    pid="$(head -n1 "$START_LOCK" 2>/dev/null | awk '{print $1}' | tr -dc '0-9' || true)"
+    [ "$pid" = "$$" ] || return 0
+    rm -f "$START_LOCK" 2>/dev/null || true
 }
 
 # ---------------------------------------------------------------------------
@@ -1388,6 +1448,9 @@ main() {
         exec >>"$DAEMON_LOG" 2>&1
         trap cleanup_on_fail EXIT
         log "=== inner 启动（pid=$$，LINUX_HOME=$LH）==="
+        # 锁的持有者换成**守护进程自己**：外层可能先超时退出（建树实测可到 50s，
+        # 而外层 wait_ready 默认 45s），锁跟着它走才不会在窗口里被放掉。
+        start_lock_rewrite_self
         # 如果外层 unshare 不支持 --propagation，就在这里把整个 ns 设为私有
         #   （--make-rprivate /：一条命令覆盖 ns 内所有挂载点）
         # ★ 真机事实（2026-09-17）：**toybox 的 mount 根本没有 --make-rprivate**，
@@ -1419,6 +1482,10 @@ main() {
         printf '%s\n' "$$" > "$SUPERVISOR_PID_FILE"
         rm -f "$ERROR_FILE"
         : > "$READY_FILE"
+        # 「正在启动」的锁到这里完成使命：`supervisor.pid` + `ready` 都在了，之后由
+        # running_ns_pid 正常挡住重复启动。这里由**守护进程**自己释放，是为了盖住
+        # "外层 start.sh 已经超时退出、建树还在继续"的那种时间线（外层 EXIT trap 也会释放一次）。
+        rm -f "$START_LOCK" 2>/dev/null || true
         # ★ run/env-mode：本次是「一键启动」(full) 还是「仅启动环境」(env-only)。
         #   这是**宿主侧**（App / `linuxctl dsh start|stop`）判定互斥的唯一依据，
         #   所以写在共享的 run/ 里（环境内 /run 与宿主 $LINUX_HOME/run 是同一批 inode）。
@@ -1477,6 +1544,35 @@ main() {
         kill -KILL "$ns_pid" 2>/dev/null || true
         rm -f "$SUPERVISOR_PID_FILE" "$READY_FILE"
     fi
+
+    # ---- 启动锁：挡住"第二次 start 又建一棵挂载树"（理由见 start_lock_acquire）----
+    # 注意顺序：上面的"已就绪"判定在前（真的在跑就直接返回，不碰锁）。
+    if ! start_lock_acquire; then
+        local holder=""
+        if holder="$(start_lock_holder)"; then
+            # 有人正在建树：**不重复建**，只等他就绪（这是真正要修的行为）
+            log "另一次启动正在进行（pid=$holder）—— 不重复建挂载树，等它就绪"
+            if wait_ready "${START_WAIT:-90}"; then
+                ns_pid="$(running_ns_pid)"
+                log "另一次启动已完成（ns_pid=$ns_pid）"
+                exit 0
+            fi
+            printf '另一次启动仍在进行（pid=%s）：等它完成，或先「停止环境」再重试\n' "$holder" > "$ERROR_FILE"
+            log "ERROR: 另一次启动仍在进行（pid=$holder），本次不重复建挂载树"
+            exit 1
+        fi
+        # 陈旧锁（持锁进程已死）：接管，别让一次崩溃把以后所有启动都堵住
+        log "WARN: 发现陈旧的启动锁（持锁进程已不在），接管"
+        start_lock_release
+        if ! start_lock_acquire; then
+            printf '启动锁被另一个进程抢走（run/start.lock）：请稍后重试\n' > "$ERROR_FILE"
+            log "ERROR: 接管启动锁失败（另一次启动刚好开始）"
+            exit 1
+        fi
+    fi
+    # 成功/失败/超时都要释放：脚本退出后要么 ready 已在（由 running_ns_pid 挡住重复启动），
+    # 要么这条启动已经失败（不该继续挡着）。守护进程自己还会在写完 ready 时再释放一次。
+    trap 'start_lock_release_own' EXIT INT TERM HUP
 
     # 前置检查放在起守护进程之前，失败能立刻给 App 可读原因
     local l

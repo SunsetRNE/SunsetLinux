@@ -358,7 +358,11 @@ function foregroundSpawnInText(text) {
   for (const { line, text: whole } of logicalLines(text)) {
     if (/^\s*#/.test(whole)) continue;                        // 整行注释
     const code = whole.replace(/(^|\s)#.*$/, '');              // 行尾注释（本仓注释里到处提 spawn_detached）
-    if (!/\bspawn_detached\b/.test(code)) continue;
+    // 只判"看起来像**调用**的"：名字后面跟空白 + 一个不是 `(` 的东西（参数）。
+    // 这样 `spawn_detached() {`（定义）、`spawn_""detached`（拼接探针）、
+    // `spawn_daemon/spawn_detached（函数改名了？）`（诊断消息里的提及）都不会误报 ——
+    // 这三种在真实代码里都出现过（前两个是本轮踩的）。
+    if (!/\bspawn_detached\s+[^\s(]/.test(code)) continue;
     if (/spawn_detached\s*\(\s*\)/.test(code)) continue;       // 函数定义
     if (/&\s*\)?\s*$/.test(code)) continue;                    // 已后台：( … & ) 或 … &
     hits.push({
@@ -392,6 +396,10 @@ const FOREGROUND_SPAWN_FIXTURES = [
     text: '# 以前这里是 `if spawn_detached …; then uc_ok=1; fi` —— 前台执行，父 shell 必须等' },
   { bad: false, why: '直接用 & 后台（父也不等）',
     text: 'spawn_detached 1 "$UNSHARE" -m -u "$SELF_DIR/start.sh" --inner >>"$DAEMON_LOG" 2>&1 &' },
+  { bad: false, why: '诊断消息里提到函数名（本轮真实误报）',
+    text: 'bad "没能从 start.sh 抽出 spawn_daemon/spawn_detached（函数改名了？闸门要跟着改）"' },
+  { bad: false, why: '函数名走拼接的探针（本轮真实误报）',
+    text: '_fg_probe="spawn_""detached"\n"$_fg_probe" 0 /bin/sh -c \'sleep 3\'' },
 ];
 
 function foregroundSpawnSelfCheck() {

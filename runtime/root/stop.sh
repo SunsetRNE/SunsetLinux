@@ -254,7 +254,8 @@ unmount_upper() {
 cleanup_run_files() {
     rm -f "$READY_FILE" "$DSH_PID_FILE" "$SUPERVISOR_PID_FILE" "$ENV_MODE_FILE" \
           "$RUN_DIR/dsh.url" "$RUN_DIR/dsh.port" "$RUN_DIR/mounted.json" \
-          "$RUN_DIR/started" 2>/dev/null || true
+          "$RUN_DIR/started" \
+          "$RUN_DIR/start.lock" 2>/dev/null || true
     : > "$MOUNTS_FILE" 2>/dev/null || true
     # 若 rootfs 里还留着上次的挂载点空目录，保留（overlay upper 里本来就该有）
     return 0
@@ -350,7 +351,8 @@ main() {
     fi
     # 有残留：清掉进程相关文件但保留 mounts 记录，方便下一次 stop 继续清
     rm -f "$READY_FILE" "$DSH_PID_FILE" "$SUPERVISOR_PID_FILE" "$ENV_MODE_FILE" \
-          "$RUN_DIR/dsh.url" "$RUN_DIR/dsh.port" 2>/dev/null || true
+          "$RUN_DIR/dsh.url" "$RUN_DIR/dsh.port" \
+          "$RUN_DIR/start.lock" 2>/dev/null || true
     log "停止完成（有挂载残留，见上面的 WARN）"
     exit 0
 }

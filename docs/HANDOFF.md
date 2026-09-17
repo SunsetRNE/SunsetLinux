@@ -1045,5 +1045,47 @@ e: java.nio.file.InvalidPathException: Malformed input or input contains unmappa
 cd app && LANG=C.UTF-8 LC_ALL=C.UTF-8 ./gradlew --offline :app:testRootFullDebugUnitTest
 ```
 
+## 第 44 轮再补（同日 03:5x · 用户追问「脚本似乎在尝试重复挂载？」）
+
+完整归因见 `docs/STATUS.md` §3.10.43，这里只留结论与下一轮入口。
+
+### 1. 用户四个疑问的答案（一句话版）
+
+| 疑问 | 答案 |
+|---|---|
+| 「挂载不是正常状态吗？」 | 建树是正常动作，但**同一个环境建两棵树不正常**：`run/mounts` 13 → 26 条 |
+| 「已经有挂载了呀，为什么会重建？」 | 你看得见的那些"已有挂载"多半是**回流到宿主 ns 的残留**（`make-rprivate` 在这台机没生效），它们属于**已经死掉的守护进程的私有 ns**，不可复用；`start` 复用环境的判据是"**活着的守护进程 + ready**"，不是"宿主里有没有挂载" |
+| 「挂载判定也没有接上？」 | 接上了，但它**只认识"已就绪"**：建树那 30~50 秒里 `supervisor.pid`/`ready` 都还没写，于是被判成 `stopped` ⇒ 第二次 start 又完整建一棵 |
+| 「挂载上来就直接启动环境啊？为什么重启环境时重新挂载？」 | 正常路径就是这样（树在就直接 `exit 0` 不 mount）。这次是**两次并发 start**，两条链各自"建树 → 起环境" |
+
+### 2. 本轮改动（模块 **1.0.34** / App **0.3.13**）
+
+- `start.sh`：`run/start.lock`（`set -C` 原子占有；拿不到锁就等它就绪 ≤90s，绝不重复建树；
+  陈旧锁自动接管；EXIT trap 释放）；inner 写完 `supervisor.pid`+`ready` 时释放。
+- `linuxctl.sh`：`gather_status` 把"有人正在建树"报成 `state=starting`（App 的启动卡据此置灰）。
+- `stop.sh`：两条清理路径都删 `run/start.lock`。
+- App **只升版本**（0.3.13 / code 29），代码无改动 —— 升它是因为内嵌的模块包换成了 1.0.34。
+
+回归：`runtime/root/selftest.sh` **88 → 101/0**（bash + mksh）；`shell-compat-check.mjs` 的前台
+spawn 闸门收紧（新增两组**真实误报**样本：诊断消息里提到函数名、函数名走拼接的探针），
+变异测试仍会红。
+
+### 3. 手机上怎么收拾现在这堆（**装 1.0.34 之前**）
+
+现在设备上是"两棵树 + 三条守护链"的状态（03:39 那次并发），`dsh start` 会报"进不去环境"。
+最干净的顺序：
+
+1. App 里点「停止环境」（若还报 loop 残留，再点一次）——`stop` 现在会清掉启动锁；
+2. 装 `/sdcard/Download/sunsetlinux-module-1.0.34.zip` → **重启一次**（`bin/` 开机同步）；
+3. 重启后**只点一次**启动；建树期间界面应显示"正在启动"（`state=starting`），启动卡置灰；
+4. 卡住的话看 `run/start.lock` 是否存在、里面的 pid 是谁 —— 有它就说明有人在建树，别重复点。
+
+### 4. 下一轮第一件事（我认为优先级最高）
+
+**`make-rprivate` 为什么没生效**：这台机 `/` 或 `/data` 是 `shared:`，toybox 没有
+`--make-rprivate`，base 层 util-linux `mount` 的回退也没成功 ⇒ 环境挂载回流宿主 ⇒
+`stop` 之后宿主里留挂载/loop 残留（用户"看着像已经有挂载"的根源）。修好它，"重复挂载"
+这个话题才会真正结束。其次：`stop` 时显式清理宿主侧残留；`start` 前先清残留再建树。
+
 （`org.gradle.jvmargs` 里已经有 `-Dfile.encoding=UTF-8`，但 `sun.jnu.encoding` 是 JVM 启动时
 按 locale 定的，`-D` 覆盖不了 —— 所以必须给 `LANG`。下一轮可以把它写进 CI/构建脚本的注释里。）

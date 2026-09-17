@@ -1188,6 +1188,113 @@ done
 # 计时；再配一个前台 spawn 的对照样本，证明这个计时确实能区分两种写法。
 # 静态闸门（变异测试）见 tools/shell-compat-check.mjs 的 foregroundSpawnSelfCheck。
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# 启动锁：第二次 start 不许再建一棵挂载树
+#
+# 真机事故（2026-09-18 03:39，用户："脚本似乎在尝试重复挂载？"）：
+# `running_ns_pid` 只看**已就绪**，而建树要 30~50 秒 ⇒ 这段窗口里状态报 stopped，
+# 第二次 start 又建一棵树：run/mounts 13 → 26 条、两条守护链同时活着、
+# 最后 dsh start 报"进不去环境"。锁的判据：文件在 + 里面的 pid 还活着。
+#
+# 原语（acquire/holder/release）做**行为断言**；"接管陈旧锁""不重复建树"这两条接线
+# 在 main() 里、无法单独抽出执行，用静态断言钉住它们的存在与顺序。
+# ---------------------------------------------------------------------------
+head_ "启动锁：第二次 start 不许再建一棵挂载树"
+if [ -f "$SELF_DIR/start.sh" ]; then
+    _LK="$TMP/startlock"
+    mkdir -p "$_LK/run"
+    {
+        printf "RUN_DIR='%s'\n" "$_LK/run"
+        printf 'START_LOCK="$RUN_DIR/start.lock"\n'
+        sed -n '/^start_lock_acquire()/,/^}/p' "$SELF_DIR/start.sh"
+        sed -n '/^start_lock_holder()/,/^}/p'  "$SELF_DIR/start.sh"
+        sed -n '/^start_lock_release()/,/^}/p' "$SELF_DIR/start.sh"
+        sed -n '/^start_lock_release_own()/,/^}/p' "$SELF_DIR/start.sh"
+    } > "$_LK/lock.sh"
+    if grep -q '^start_lock_acquire()' "$_LK/lock.sh" && grep -q '^start_lock_holder()' "$_LK/lock.sh"; then
+        # 一个"持锁不放"的后台进程（它的 pid 会被写进锁文件）
+        cat > "$_LK/hold.sh" <<EOF
+. '$_LK/lock.sh'
+start_lock_acquire || exit 3
+sleep 8
+EOF
+        "$SH_BIN" "$_LK/hold.sh" >/dev/null 2>&1 &
+        _hold=$!
+        _i=0
+        while [ "$_i" -lt 30 ] && [ ! -f "$_LK/run/start.lock" ]; do sleep 0.1; _i=$((_i+1)); done
+        _got="$("$SH_BIN" -c ". '$_LK/lock.sh'; start_lock_acquire && echo ACQUIRED || echo BUSY")"
+        case "$_got" in
+            *BUSY*) ok "锁被占时第二次 start 拿不到锁（⇒ 不会又建一棵树）" ;;
+            *) bad "第二次 start 竟然拿到了锁（$_got）—— 重复挂载会重现" ;;
+        esac
+        _h="$("$SH_BIN" -c ". '$_LK/lock.sh'; start_lock_holder || echo none")"
+        if [ "$_h" = "$_hold" ]; then
+            ok "start_lock_holder 指向真正持锁的进程（pid=$_h）"
+        else
+            bad "start_lock_holder 没指向持锁进程：期望 $_hold、得到 $_h"
+        fi
+        # 陈旧锁：持锁进程死掉后，holder 必须失效（否则一次崩溃会把以后所有启动都堵死）
+        kill -9 "$_hold" 2>/dev/null || true
+        wait "$_hold" 2>/dev/null || true
+        _h2="$("$SH_BIN" -c ". '$_LK/lock.sh'; start_lock_holder || echo none")"
+        if [ "$_h2" = "none" ]; then
+            ok "持锁进程死后 holder 失效（陈旧锁可被接管）"
+        else
+            bad "持锁进程已死但 holder 仍报 $_h2 —— 陈旧锁会永久堵住启动"
+        fi
+        _got2="$("$SH_BIN" -c ". '$_LK/lock.sh'; start_lock_release; start_lock_acquire && echo ACQUIRED || echo BUSY")"
+        case "$_got2" in
+            *ACQUIRED*) ok "释放/接管后可以重新占有（启动不会被永久堵住）" ;;
+            *) bad "陈旧锁没有被接管（$_got2）" ;;
+        esac
+        # 外层超时退出时**不许**放掉守护进程的锁（那会让第二次 start 又建一棵树）
+        printf '1 1\n' > "$_LK/run/start.lock"
+        "$SH_BIN" -c ". '$_LK/lock.sh'; start_lock_release_own"
+        if [ -f "$_LK/run/start.lock" ]; then
+            ok "start_lock_release_own 不碰别人的锁（外层超时退出也留得住）"
+        else
+            bad "别人的锁被删掉了 —— 外层一超时，第二次 start 就会再建一棵树"
+        fi
+        # 自己的锁必须放掉。用 `( … )` 子壳而不是 `$SH_BIN -c`：POSIX 下子壳里的 $$
+        # 仍是**父进程**的 pid，所以"写锁用的 $$"和"函数看到的 $$"是同一个。
+        printf '%s 1\n' "$$" > "$_LK/run/start.lock"
+        ( . "$_LK/lock.sh"; start_lock_release_own )
+        if [ -f "$_LK/run/start.lock" ]; then
+            bad "自己的锁没被释放 —— 一次失败启动会把以后所有启动都堵住"
+        else
+            ok "start_lock_release_own 释放自己的锁"
+        fi
+    else
+        bad "没能从 start.sh 抽出 start_lock_*（函数改名了？闸门要跟着改）"
+    fi
+    # 静态：main() 里的两条接线（接管陈旧锁 / 有人在建树时不重复建）
+    for _pat in 'start_lock_acquire' '陈旧的启动锁' '另一次启动正在进行' 'start_lock_rewrite_self' "trap 'start_lock_release_own'"; do
+        if grep -qF "$_pat" "$SELF_DIR/start.sh"; then
+            ok "start.sh 里有「$_pat」"
+        else
+            bad "start.sh 缺「$_pat」—— 并发启动会重新变成各建一棵树"
+        fi
+    done
+    # 静态：status 把"启动锁还在 + 持锁进程活着"报成 starting（App 靠它把启动卡置灰）
+    if grep -qF 'start_lock_holder' "$SELF_DIR/linuxctl.sh"; then
+        ok "linuxctl.sh 的 status 认识启动锁（建树中会报 starting）"
+    else
+        bad "linuxctl.sh 不认识启动锁 —— 建树中会报 stopped，用户会再点一次启动"
+    fi
+    # 行为：真跑 status，伪造一个"正在启动"的现场（锁 + 活着的 pid，但没有 supervisor.pid）
+    _LS="$TMP/lockstatus"
+    mkdir -p "$_LS/run" "$_LS/etc" "$_LS/layers"
+    printf '%s %s\n' "$$" "$(date +%s)" > "$_LS/run/start.lock"
+    _ls_j="$(LINUX_HOME="$_LS" "$SH_BIN" "$SELF_DIR/linuxctl.sh" status 2>/dev/null | tr -d ' \n\t')"
+    case "$_ls_j" in
+        *'"state":"starting"'*) ok "status：建树中（只有启动锁）报 state=starting" ;;
+        *) bad "status 没把「建树中」报成 starting：$_ls_j" ;;
+    esac
+else
+    skip_ "找不到 $SELF_DIR/start.sh"
+fi
+
+
 head_ "守护进程脱离：父脚本不许等它"
 if [ -f "$SELF_DIR/start.sh" ]; then
     _sp="$TMP/spawn-funcs.sh"
@@ -1211,10 +1318,14 @@ EOF
         else
             bad "spawn_daemon 等了 ${_dt}s —— 前台 spawn 又回来了：App 会永久 busy、启动区全灰"
         fi
-        # 对照样本：前台调用必须**真的会等**，否则上面那条断言可能是"测不到东西"
+        # 对照样本：前台调用必须**真的会等**，否则上面那条断言可能是"测不到东西"。
+        # ⚠ 函数名走**拼接**而不是字面量：这一行是**故意复刻错误写法**的探针，
+        #   不该被 tools/shell-compat-check.mjs 的前台 spawn 闸门当成生产调用
+        #   （与上面 nsenter 探针用 `_NS=` 变量是同一个套路）。
         cat > "$TMP/spawn-fg.sh" <<EOF
 . '$_sp'
-spawn_detached 0 /bin/sh -c 'sleep 3'
+_fg_probe="spawn_""detached"
+"\$_fg_probe" 0 /bin/sh -c 'sleep 3'
 EOF
         _t0="$(date +%s)"
         "$SH_BIN" "$TMP/spawn-fg.sh" >/dev/null 2>&1 || true
