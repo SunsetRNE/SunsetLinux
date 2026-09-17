@@ -665,6 +665,23 @@ jobs:
             # shellcheck disable=SC2086
             gh release create "$TAG" --title "$TITLE" --notes-file dist/_release-notes.md $ASSETS
           fi
+
+          # ★ 撤掉**旧版本**的模块 zip：只升模块版本时 Release 是同一个 tag（幂等覆盖），
+          #   而模块资产名里带版本 → 1.0.23 与 1.0.24 会同时躺在 Release 页上。
+          #   下载页只列当前版本（它读 dist/_publish），但人在 Release 页会看到全部资产，
+          #   很容易下到上一版模块（模块必须与当前运行时对齐，下错会得到一份"看起来能装"的旧包）。
+          #   只删 `sunsetlinux-module-*` 且版本不是当前版本的那些，其他资产一律不碰。
+          if [ -n "${MODULE_VERSION:-}" ]; then
+            for a in $(gh release view "$TAG" --json assets -q '.assets[].name' 2>/dev/null \
+                       | grep '^sunsetlinux-module-' || true); do
+              case "$a" in
+                *"-${MODULE_VERSION}.zip"|*"-${MODULE_VERSION}-bare.zip"|*"-${MODULE_VERSION}.zip.sha256"|*"-${MODULE_VERSION}-bare.zip.sha256")
+                  continue ;;
+              esac
+              echo "撤掉旧模块资产：$a"
+              gh release delete-asset "$TAG" "$a" --yes >/dev/null 2>&1 || true
+            done
+          fi
           echo "- Release：https://github.com/$REPO/releases/tag/$TAG" >> "$GITHUB_STEP_SUMMARY"
 
       # 失败时把"最后跑的那一步 + 它输出里的报错行"带成注释。

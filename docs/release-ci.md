@@ -96,6 +96,11 @@ pipeline.yml（**只有推 main 或手动触发时跑**）           ← 2026-09
   channel.yml（channel 分支 / 手动）           私钥签名 + 公钥独立验签 + 发 /channel/
 ```
 
+> ⚠️ 只升**模块版本**时 Release 是同一个 tag（幂等覆盖），而模块资产名带版本 →
+> 旧版本的 `sunsetlinux-module-*.zip` 会留在 Release 页上（1.0.23 与 1.0.24 同时可见），
+> 人会下错。所以 ⑤ publish 在上传后会把**版本不等于当前 `MODULE_VERSION`** 的模块资产撤掉
+> （只碰 `sunsetlinux-module-*`，其它资产一律不动）。
+
 > **模块两变体与"谁内嵌哪一个"**：见 [`module-variants.md`](module-variants.md) §2.6。
 > 一句话：**APK 内嵌 bare**（APK 的 base/full 档已有 dsh 层，别塞两遍）；
 > **Release 上的默认名 `sunsetlinux-module-<版本>.zip` 只给 full**（自带 DSH）；
