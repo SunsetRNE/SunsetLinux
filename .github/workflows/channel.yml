@@ -149,6 +149,12 @@ jobs:
             git push
           fi
 
+      # ★ 这是**手动/独立入口**的推送：本工作流只在 `channel` 分支的 channel.json 变化时
+      #   （或人工 dispatch）才跑，"改清单 → 重新签名 → 立刻上线"这条路径仍然需要它。
+      #   日常发布路径（推 main → pipeline.yml → publish.yml）**不再**由这里服务：
+      #   /channel/ 已经由 publish 与 /stable|beta/、站点根页合成**一次** gh-pages 推送，
+      #   免得同一轮发布推两次 gh-pages、起两条 Pages 构建、后者把前者取代。
+      #   （一次推送 = 一条 Pages 构建；详见 publish.yml 顶部与 pipeline.yml ⑥ 的注释。）
       - name: 发布到 gh-pages 的 /channel/
         uses: peaceiris/actions-gh-pages@v4
         with:

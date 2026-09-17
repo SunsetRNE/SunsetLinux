@@ -503,6 +503,22 @@ su -c '/data/sunsetlinux/bin/linuxctl doctor'
 | 已装状态读不到时 | —— | **不给刷入按钮**，先让用户修 root 授权（与"读不到 ≠ 没装"一致） |
 | 重启 | —— | 只报告"重启后生效"（KernelSU 落 `modules_update/`），**App 不替用户重启**，脚本里有单测断言不许出现 `reboot` |
 
+### 3.10.35 源独立成页（npm 默认修成官方 + Python 源）+ 设置页拆分 + gh-pages 合成一次提交（App 0.3.9）
+
+真机批注三条：「把这个 NPM 源默认成官方的」/「顺便多一个 Python 源」/「源独立页，然后设置内但是侧边栏有相应标签的内容
+统一拆成单独页面。设置页实在是太长了」。
+
+| 项 | 之前 | 现在 |
+|---|---|---|
+| npm 源默认 | `prefs.npmRegistry` 为空时落到 `CUSTOM_ID` → **全新安装打开就是「自定义」被选中**（真机截图） | 默认 `NpmRegistry.OFFICIAL_ID`（`registry.npmjs.org`） |
+| Python 源 | 没有 | 新 `core/PypiRegistry.kt` + 源页里的 Python 卡（官方 / 清华 TUNA / 阿里云 / 腾讯云 / 华为云 / 自定义 + 校验），落盘 `/root/.config/pip/pip.conf` + `<环境根>/etc/pip.conf`；生效方式与 npm 同口径（**重启环境**后新进程才读到） |
+| 页面 | 源卡片挤在「插件」页底部；设置页 986 行一条长滚动 | 源独立成 `ui/SourcesPane.kt`（侧边栏入口）；设置页按主题拆出独立页面（如 `ui/ChannelsPane.kt`）；插件页只留插件列表 |
+| gh-pages | 一轮发布推 **2~3 次**（`<通道>/`、站点根页、`/channel/`）→ GitHub 起 2~3 条 `pages build and deployment`，相邻两条互相取代（`#114 取消/#115 成功`、`#126 失败/#127 成功`） | **1 次推送**：`publish.yml` 本地拼出站点根那一层（`<stable\|beta>/` + `channel/` + 仅 stable 的 `index.html`）后一次 `peaceiris` 推送；`pipeline.yml` ⑥ 改成**只验签不推送**、⑦ 加频道门禁。验签硬约束不变（未签名/签坏的清单绝不发出去），手动路径 `channel.yml` / `layers.yml` 仍各自推（注释已点明） |
+
+> ⚠️ 一处必须记住的约束：`/channel/channel.json` 在**站点根**，消费方是硬编码的（`Prefs.kt`、`OfficialChannelContractTest`、
+> `ci.yml`、`offline-bundle.yml`、下载页）——合并推送时**不能**用 `destination_dir` 把它塞进 `<通道>/channel/`。
+> 回归：App 单测 **229 → 252/0 × 2 变体**；9 个 workflow 全部 `yaml.safe_load` 通过。
+
 ### 3.10.34 按真机批注改 UI：启动页操作置顶 + 一键/分步二选一；终端紧凑化与"自动切换"的身份行（App 0.3.8）
 
 **批注原文**（真机截图，红字）：

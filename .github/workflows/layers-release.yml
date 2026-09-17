@@ -8,6 +8,12 @@
 #     **层 → Release 资产**；**清单 / APK / 模块 → 仍走 gh-pages 的 /stable/ 与 /beta/**
 #   （清单里的 `url` 本来就是绝对地址，可以跨域名，App 与 CLI 都跟 302 重定向。）
 #
+#   ★ 本工作流**不碰 gh-pages**（只创建/更新 Release 并上传层文件）。gh-pages 那侧：
+#     日常发布路径里 /channel/ 与 /stable|beta/ 是 publish.yml 的**一次**推送
+#     （一次推送 = 一条 Pages 构建）；仍会独立推 gh-pages 的是**手动/独立入口**
+#     channel.yml（清单变化时签名并发布）与 layers.yml（可选发 /channel/），
+#     各自一次运行对应一条 Pages 构建 —— 这是它们自己的事。
+#
 # ## 为什么中间要一个分支
 #   构建层需要 arm64 + 真 chroot，通常是**你自己的机器**；那台机器上不一定想放 GitHub token。
 #   所以分工：本机 `build-layers` → 把分发产物推到 staging 分支 → **本工作流收集并上传到 Release**。

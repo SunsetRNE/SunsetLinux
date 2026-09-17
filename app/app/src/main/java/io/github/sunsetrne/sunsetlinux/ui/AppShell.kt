@@ -115,6 +115,18 @@ enum class ShellTab(val label: String, val icon: ImageVector?, val inCapsule: Bo
     TERMINAL("终端", null, true),
     UPDATE("更新", Icons.Filled.Refresh, false),
     DSH("DSH", Icons.Filled.Home, false),
+
+    // ── 侧边栏独立页（2026-09 从「设置」页拆出来）────────────────────────────
+    //
+    // 为什么是 ShellTab 而不是新开 Activity：这三页本来在侧边栏就有入口，只是原先
+    // "打开设置 Activity 再滚到中段"。做成外壳里的 tab 之后，入口与页面一对一，
+    // 而且直接继承外壳已有的两件事：顶栏标题 + PredictiveBackHandler 的跟手返回
+    // （新 Activity 要自己再写一遍 inset / adjustResize / 返回，见 UiInsetsContractTest）。
+    //
+    // inCapsule 一律 false：底栏只留启动/插件/终端，多一个就会把标签挤到换行。
+    SOURCES("源与镜像", Icons.Filled.Refresh, false),
+    CHANNELS("频道管理", Icons.AutoMirrored.Filled.List, false),
+    POWER("冻结与省电", Icons.Filled.Lock, false),
 }
 
 /**
@@ -130,7 +142,7 @@ enum class ShellTab(val label: String, val icon: ImageVector?, val inCapsule: Bo
 fun AppShell(
     vm: LauncherViewModel,
     initialTab: ShellTab = ShellTab.START,
-    onOpenSettings: (String?) -> Unit,
+    onOpenSettings: () -> Unit,
     onOpenProvision: () -> Unit,
     onOpenDiagnostics: () -> Unit,
     onOpenWelcome: () -> Unit,
@@ -189,6 +201,11 @@ fun AppShell(
                         action()
                     },
                     onOpenUpdates = { tab = ShellTab.UPDATE },
+                    // 侧边栏的「源与镜像 / 频道管理 / 冻结与省电」现在是外壳里的独立页，
+                    // 不再深链进设置 Activity 再滚动定位。
+                    onOpenSources = { tab = ShellTab.SOURCES },
+                    onOpenChannels = { tab = ShellTab.CHANNELS },
+                    onOpenPower = { tab = ShellTab.POWER },
                     onOpenSettings = onOpenSettings,
                     onOpenProvision = onOpenProvision,
                     onOpenDiagnostics = onOpenDiagnostics,
@@ -237,6 +254,9 @@ fun AppShell(
                                 ShellTab.PLUGINS -> "插件"
                                 ShellTab.TERMINAL -> "终端"
                                 ShellTab.DSH -> "DSH Web"
+                                ShellTab.SOURCES -> "源与镜像"
+                                ShellTab.CHANNELS -> "频道管理"
+                                ShellTab.POWER -> "冻结与省电"
                             },
                             style = MaterialTheme.typography.titleLarge,
                         )
@@ -309,7 +329,9 @@ fun AppShell(
                             onOpenProvision = onOpenProvision,
                             onOpenUpdates = { tab = ShellTab.UPDATE },
                             onOpenDiagnostics = onOpenDiagnostics,
-                            onOpenSettings = { onOpenSettings(null) },
+                            onOpenSettings = onOpenSettings,
+                            // 省电/通知提示现在归「冻结与省电」页
+                            onOpenPower = { tab = ShellTab.POWER },
                             onExportReport = vm::exportReport,
                         )
 
@@ -319,7 +341,8 @@ fun AppShell(
                             UpdatePane(
                                 state = updateState,
                                 modifier = Modifier.fillMaxSize(),
-                                onOpenSettings = { onOpenSettings("channels") },
+                                // 「频道管理」是独立页了：这里直接切 tab，不再进设置页找它
+                                onOpenSettings = { tab = ShellTab.CHANNELS },
                                 showHeader = false,
                             )
                         }
@@ -329,6 +352,16 @@ fun AppShell(
                             androidx.compose.runtime.LaunchedEffect(Unit) { pluginsState.refresh() }
                             PluginsPane(state = pluginsState, modifier = Modifier.fillMaxSize())
                         }
+
+                        // 三张独立页（原「设置」页拆出来的部分）
+                        ShellTab.SOURCES -> SourcesPane(modifier = Modifier.fillMaxSize())
+
+                        ShellTab.CHANNELS -> ChannelsPane(modifier = Modifier.fillMaxSize())
+
+                        ShellTab.POWER -> PowerPane(
+                            refreshKey = ui.lastSyncedAt,
+                            modifier = Modifier.fillMaxSize(),
+                        )
 
                         ShellTab.TERMINAL -> TerminalPane(
                             state = terminalState,
@@ -451,7 +484,10 @@ private fun DrawerBody(
     ui: LauncherViewModel.UiState,
     onNavigate: (() -> Unit) -> Unit,
     onOpenUpdates: () -> Unit,
-    onOpenSettings: (String?) -> Unit,
+    onOpenSources: () -> Unit,
+    onOpenChannels: () -> Unit,
+    onOpenPower: () -> Unit,
+    onOpenSettings: () -> Unit,
     onOpenProvision: () -> Unit,
     onOpenDiagnostics: () -> Unit,
     onOpenWelcome: () -> Unit,
@@ -516,17 +552,19 @@ private fun DrawerBody(
         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
         Spacer(Modifier.height(8.dp))
 
-        DrawerItem(Icons.Filled.Settings, "设置", "端口 / 自启 / 通知") {
-            onNavigate { onOpenSettings(null) }
+        DrawerItem(Icons.Filled.Settings, "设置", "运行模式 / 端口 / 自启") {
+            onNavigate { onOpenSettings() }
         }
+        // ── 以下三条原先深链进设置页的中段（section = channels/power/npm），
+        //    现在是外壳里的独立页：入口与页面一对一，设置页也就不再被撑长。
         DrawerItem(Icons.AutoMirrored.Filled.List, "频道管理", "URL + ed25519 公钥，可增删改") {
-            onNavigate { onOpenSettings("channels") }
+            onNavigate { onOpenChannels() }
         }
         DrawerItem(Icons.Filled.Lock, "冻结与省电豁免", "墓碑模块豁免 + 电池白名单") {
-            onNavigate { onOpenSettings("power") }
+            onNavigate { onOpenPower() }
         }
-        DrawerItem(Icons.Filled.Refresh, "npm 源（registry）", "官方 / 国内镜像 / 自定义") {
-            onNavigate { onOpenSettings("npm") }
+        DrawerItem(Icons.Filled.Refresh, "源与镜像", "npm registry / Python（pip）源") {
+            onNavigate { onOpenSources() }
         }
 
         Spacer(Modifier.height(8.dp))

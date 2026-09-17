@@ -181,6 +181,10 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
+      # ★ 手动入口专用（默认 false）：本工作流只在自建 arm64 runner 上手动跑，
+      #   **不在**日常发布路径上。流水线路径里 /channel/ 与 /stable|beta/ 是 publish.yml
+      #   的**一次** gh-pages 推送（一次推送 = 一条 Pages 构建，见 publish.yml 顶部）。
+      #   这里保留独立推送，是为了"只想更新频道清单、不想跑整条流水线"时还有一条路。
       - name: 可选：把清单与签名发到 gh-pages /channel/
         if: ${{ inputs.publish_gh_pages == 'true' }}
         uses: peaceiris/actions-gh-pages@v4

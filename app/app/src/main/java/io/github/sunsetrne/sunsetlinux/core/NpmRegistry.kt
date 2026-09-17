@@ -30,7 +30,13 @@ object NpmRegistry {
         Preset("huawei", "华为云", "https://repo.huaweicloud.com/repository/npm/", "国内镜像"),
     )
 
+    /** 官方预设的 id。**默认档必须落在它上面**，理由见 [selectedPresetId]。 */
+    const val OFFICIAL_ID = "npmjs"
+
     const val CUSTOM_ID = "custom"
+
+    /** 官方预设（默认值 / 回退值的唯一来源，不要在 UI 里再写一遍 URL）。 */
+    val official: Preset get() = presets.first { it.id == OFFICIAL_ID }
 
     /** 环境内的 npmrc 路径（可写层）。 */
     const val USER_NPMRC = "/root/.npmrc"
@@ -49,7 +55,7 @@ object NpmRegistry {
     /** 生成 .npmrc 内容（只写 registry 一行：其它字段交给 npm/pnpm 自己的默认值）。 */
     fun npmrcContent(registryUrl: String): String =
         buildString {
-            append("# 由 SunsetLinux 写入（可写层）。修改请走 App 的「设置 → npm 源」。\n")
+            append("# 由 SunsetLinux 写入（可写层）。修改请走 App 的「源与镜像 → npm 源」。\n")
             append("registry=").append(registryUrl.trim().trimEnd('/')).append('\n')
         }
 
@@ -139,8 +145,36 @@ object NpmRegistry {
     /** 判断一个 registry URL 命中哪套预设。 */
     fun presetOf(url: String?): Preset? {
         val u = url?.trim()?.trimEnd('/') ?: return null
+        if (u.isEmpty()) return null
         return presets.firstOrNull { it.url.trimEnd('/') == u }
     }
+
+    /**
+     * 界面**该选中哪一档**（纯函数，单测在 `SourceDefaultsTest`）。
+     *
+     * 真机缺陷：这里原来是 `presetOf(prefs.npmRegistry)?.id ?: CUSTOM_ID` ——
+     * 「反查不出预设」把**两件完全不同的事**混成了一档：
+     *   ① 用户从没选过（prefs 为空）→ 反查必然 null；
+     *   ② 用户填了一个自定义地址 → 反查也是 null。
+     * 于是第一类被画成「自定义」被选中，而输入框是空的 —— 用户看到"我的源是自定义"
+     * 却没有任何地址。默认档必须由**代码里的官方预设**兜底，而不是让"没选过"落进自定义。
+     */
+    fun selectedPresetId(stored: String?): String {
+        if (stored.isNullOrBlank()) return OFFICIAL_ID
+        return presetOf(stored)?.id ?: CUSTOM_ID
+    }
+
+    /**
+     * **当前实际会生效的 registry**：用户选过就用他选的，没选过就是官方源。
+     *
+     * 与 [selectedPresetId] 配套：界面选中官方时，"应用"写出去的就是这个值 ——
+     * 不需要用户先点一次官方才能得到官方。
+     */
+    fun effectiveUrl(stored: String?): String = stored?.trim()?.takeIf { it.isNotEmpty() } ?: official.url
+
+    /** 自定义输入框的初始值：只有存着的是**自定义地址**时才回填（空/预设都不填）。 */
+    fun customSeed(stored: String?): String =
+        if (!stored.isNullOrBlank() && presetOf(stored) == null) stored.trim() else ""
 }
 
 /**

@@ -23,7 +23,15 @@ class OfficialChannelContractTest {
 
     private val repo = TestPaths.repoRoot
     private val prefs = File(repo, "app/app/src/main/java/io/github/sunsetrne/sunsetlinux/core/Prefs.kt")
-    private val settings = File(repo, "app/app/src/main/java/io/github/sunsetrne/sunsetlinux/SettingsActivity.kt")
+
+    /**
+     * 频道列表 UI 的落点。
+     *
+     * ⚠️ 2026-09 从 `SettingsActivity.kt` 搬到了 `ui/ChannelsPane.kt`（侧边栏
+     * 「频道管理」独立页，见 `ui/PageSplitContractTest`）。契约跟着搬，而不是留一条
+     * "因为重构就假失败"的旧断言 —— 假失败最后总会被删掉，契约也就没了。
+     */
+    private val settings = File(repo, "app/app/src/main/java/io/github/sunsetrne/sunsetlinux/ui/ChannelsPane.kt")
     private val handoff = File(repo, "docs/HANDOFF.md")
 
     private fun read(f: File): String {
@@ -62,7 +70,7 @@ class OfficialChannelContractTest {
     }
 
     @Test
-    fun `内置频道在设置页不给删除键与改键`() {
+    fun `内置频道在频道管理页不给删除键与改键`() {
         val text = read(settings)
         assertTrue("ChannelRow 要能识别内置频道", text.contains("Channel.isBuiltin(ch.id)"))
         assertTrue("内置频道不应显示「改」与「删除」", text.contains("if (!builtin) {"))

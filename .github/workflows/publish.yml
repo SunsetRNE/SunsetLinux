@@ -5,14 +5,36 @@
 #   · pipeline.yml   —— 每次推 main/beta 的**唯一**发布路径（prep → 矩阵编译 → 门禁 → 本文件）
 #   · release.yml    —— 手动兜底（workflow_dispatch），出问题时可以单独重发一次
 #
-# 它做四件事（都在一个 job 里，写 gh-pages 的操作必须串行 —— 见 concurrency）：
+# 它做五件事（都在一个 job 里，写 gh-pages 的操作必须串行 —— 见 concurrency）：
 #   ① 收集本轮构建产物（APK / 模块 zip / 内嵌离线包 .bin）到 dist/_publish/
 #   ② 生成 index.json（App 的「更新」页与下载页都读它）
-#   ③ 推 gh-pages 的 /stable/ 或 /beta/（+ 站点根页，仅 stable）
-#   ④ 建/更新 GitHub Release（仅 stable；beta 只更新 gh-pages 目录）
+#   ③ 取 channel 分支上**已签名**的频道清单，用公钥**独立验签**（不过就不带 /channel/）
+#   ④ **一次**推 gh-pages：/<stable|beta>/ + /channel/ + 站点根页（仅 stable）
+#   ⑤ 建/更新 GitHub Release（仅 stable；beta 只更新 gh-pages 目录）
 #
 # 输入：
 #   channel: auto | stable | beta   —— auto 时按调用方分支判断（main→stable、beta→beta）
+#
+# ── gh-pages 推送次数：**为什么必须一次推**（2026-09-17 改）────────────────────
+#   GitHub Pages 是「分支推送驱动」的：**每推一次** gh-pages 都会起一次
+#   `pages build and deployment`。同一轮发布推两次，就会出现**两条** Pages 构建，
+#   后一条把前一条取代 —— 历史记录里成对出现：`#114 取消/#115 成功`、
+#   `#118 取消/#119 成功`、`#120 取消/#121 成功`、`#126 失败/#127 成功`。
+#   前一条是纯噪声，而且会把"最近一次构建失败"的记录留在 Pages 页面上。
+#
+#   改之前，一轮 stable 发布实际推了**三次** gh-pages（= 三条 Pages 构建）：
+#     ① `/stable/`       —— 本文件"发布到 gh-pages 的对应目录"
+#     ② 站点根 `/index.html` —— 本文件"发布站点根页（仅 stable）"
+#     ③ `/channel/`      —— pipeline.yml 的 ⑥ channel job 同步 channel 分支的签名清单
+#   现在合成**一次提交**：下面"合成站点根那棵树"那步把这三种内容拼进 dist/_site/，
+#   再由**一个** peaceiris 步骤整棵推上去 —— **一轮发布 = 一次推送 = 一条 Pages 构建**。
+#   ⑥ 因此改成只验签、不推送（校验价值留在那条独立门禁里）。
+#
+#   仍然**各自独立推 gh-pages** 的入口（都不是日常流水线路径，保持原样）：
+#     · channel.yml        —— channel 分支的 channel.json 变化时：签名 + 验签 + 发 /channel/
+#     · layers.yml         —— 手动跑（自建 arm64 runner）：可选发 /channel/
+#     · layers-release.yml —— 只往 Release 上传层文件，**完全不碰 gh-pages**
+#   往后再加"发布时要同步到站点"的东西，请拼进 dist/_site/，**不要**再加第二次推送。
 #
 # ⚠️ 本文件是从 release.yml 的 publish job **原样搬过来的**（注释与踩坑记录都保留）。
 #    搬动的原因见 docs/release-ci.md：以前"门禁在 ci.yml、发布在 release.yml、
@@ -522,29 +544,90 @@ jobs:
           print("已生成 dist/_publish/index.html" + (" 与 dist/_root/index.html" if ch == "stable" else ""))
           PY
 
-      - name: 发布到 gh-pages 的对应目录
+      # ── 频道清单：从 channel 分支取回 → 公钥独立验签 → 与通道产物合并成**一次**推送 ──
+      #   这三步原来在 pipeline.yml 的 ⑥ channel job 里（它现在已经不推 gh-pages 了）。
+      - name: 取回 channel 分支（签名清单 + 签名 + 公钥）
+        # ★ 刻意 continue-on-error：channel 分支拿不到**不该**挡住其它产物
+        #   （APK / 模块 zip / index.json / Release）。缺了就由下一步报"验签不通过"，
+        #   再由本 job 末尾那步把整轮变红 —— 与改动前"⑥ 红了、但 /stable/ 已经发出去"
+        #   的结果一致。
+        continue-on-error: true
+        uses: actions/checkout@v4
+        with:
+          ref: channel
+          path: .channel
+
+      - name: 用公钥独立验签频道清单（不过就不带 /channel/）
+        id: chan
+        run: |
+          # ★ 故意**不加 -e**（只 `set -uo pipefail`）：验签失败不在这里把 job 掐掉 ——
+          #   其它产物该发的还是要发，由本 job 末尾那个步骤统一报红。
+          #   硬约束不变：**未签名 / 签坏的清单绝不发出去**。
+          set -uo pipefail
+          CH=.channel/channel
+          ok=1
+          for f in channel.json channel.json.sig channel.pub; do
+            [ -f "$CH/$f" ] || { echo "::error::channel 分支缺 $CH/$f（清单/签名/公钥三样都要）"; ok=0; }
+          done
+          if [ "$ok" -eq 1 ]; then
+            # 与改动前 ⑥ 跑的**完全同一条命令**：工具来自当前分支（main），
+            # 公钥来自 channel 分支；--no-layers = 不校验层文件（层挂在 Release 上，这里没有）
+            node tools/channel/verify.mjs --pub "$CH/channel.pub" --in "$CH/channel.json" \
+                 --sig "$CH/channel.json.sig" --no-layers || ok=0
+          fi
+          if [ "$ok" -eq 1 ]; then
+            echo "include=1" >> "$GITHUB_OUTPUT"
+            echo "频道清单验签通过 → 本次推送带 /channel/"
+          else
+            echo "include=0" >> "$GITHUB_OUTPUT"
+            echo "::error title=频道清单未通过验签::本轮 gh-pages 推送**不带** /channel/（绝不发出未签名/签坏的清单）；本 job 末尾会因此报红"
+          fi
+
+      # 把"要发到 gh-pages 站点的全部内容"在本地拼成**站点根那一层**，一次推上去。
+      # ★ 为什么不再用 destination_dir：它会把整棵发布树压进 /stable/，而频道清单必须在
+      #   **站点根**的 /channel/ —— App 内置频道、offline-bundle.yml、下载页都读这个绝对地址。
+      #   所以改成"本地拼出站点根那一层"，publish_dir 指向它、不带 destination_dir。
+      - name: 合成站点根那棵树（通道目录 + /channel/ + 站点根页）
+        run: |
+          set -euo pipefail
+          SITE=dist/_site
+          DIR="${{ steps.ch.outputs.dir }}"
+          rm -rf "$SITE"; mkdir -p "$SITE/$DIR"
+          # 通道目录：除 APK 之外全拷（APK 只挂 Release，见下面 exclude_assets 的注释）
+          find dist/_publish -maxdepth 1 -type f -not -name '*.apk' -exec cp -v {} "$SITE/$DIR/" \;
+          # 频道清单：**站点根**的 /channel/（不是 <通道>/channel/），验签不过就不带；
+          # 不带 = gh-pages 上旧的频道目录原样保留（keep_files 只增不删），不会被清成空目录。
+          if [ "${{ steps.chan.outputs.include }}" = "1" ]; then
+            mkdir -p "$SITE/channel"
+            cp -v .channel/channel/channel.json .channel/channel/channel.json.sig \
+                  .channel/channel/channel.pub "$SITE/channel/"
+          else
+            echo "::warning::本次不带 /channel/（验签未通过或频道文件缺失）：gh-pages 上旧的频道目录保持原样"
+          fi
+          # 站点根页只在 stable 生成（beta 发布不碰它，免得把"当前推荐版本"覆盖成 beta 的）
+          if [ "$DIR" = "stable" ]; then cp -v dist/_root/index.html "$SITE/index.html"; fi
+          echo "---- 本次 gh-pages 会更新这些文件 ----"
+          find "$SITE" -type f | sort
+
+      # ★★ 整个发布**只推这一次** gh-pages：一次推送 = 一条 Pages 构建（见文件顶部说明）。
+      #    推上去的是上面那棵树的**内容**：/<通道>/ + /channel/ + （仅 stable）根页 index.html。
+      - name: 发布到 gh-pages（通道目录 + 频道清单 + 站点根页，一次提交）
         uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: dist/_publish
-          destination_dir: ${{ steps.ch.outputs.dir }}
-          keep_files: true          # ★ 关键：不要抹掉另一个通道的目录
+          publish_dir: dist/_site
+          # ★ 没有 destination_dir：publish_dir 的**内容**直接落在 gh-pages 根。
+          #   keep_files: true 只增不删 —— 另一个通道（/beta/ 或 /stable/）与站点根页
+          #   都保持原样；验签没过时不带 /channel/，旧频道目录也因此原封不动。
+          keep_files: true
           # ★ APK **不走 gh-pages**，只挂 Release：内嵌离线包之后
           #   ubuntu-proot-dsh 那份有 114 MB —— 超过 git 单文件 100 MB 硬限，
           #   往 gh-pages 分支推会直接失败（而且 Pages 站点还有 1 GB 上限）。
           #   Release 资产没有这些限制，下载地址也能跨域名（App/CLI 都跟 302）。
-          exclude_assets: '*.apk'
-
-      # 站点根页：destination_dir 留空 = gh-pages 根目录。keep_files: true 只增不删，
-      # 所以 /stable/ 与 /beta/ 不受影响（发布通道那一步已经在用同一个机制）。
-      # 只在 stable 跑，避免 beta 发布把根页的"当前推荐版本"覆盖成 beta 的。
-      - name: 发布站点根页（仅 stable）
-        if: steps.ch.outputs.dir == 'stable'
-        uses: peaceiris/actions-gh-pages@v4
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: dist/_root
-          keep_files: true
+          #   ⚠️ 真正"不发 APK"靠上一步不把它们拷进 dist/_site；这里是第二道保险 ——
+          #      注意 @actions/glob 的 `*` **不跨 `/`**，所以单写 `*.apk` 只管推的根那一层，
+          #      嵌套目录（<通道>/*.apk）要另加 `**/*.apk`。
+          exclude_assets: '*.apk,**/*.apk'
 
       # ── GitHub Releases：给"人看的发布页"（与 gh-pages 双发布，产物是同一份）────
       #   ★ 两类 tag 分工不同，别混：
@@ -706,7 +789,23 @@ jobs:
             echo "- 目录：\`$DIR/\`"
             echo "- 索引：$SITE/$DIR/index.json"
             echo "- 模块版本：\`$MODULE_VERSION\`"
+            if [ "${{ steps.chan.outputs.include }}" = "1" ]; then
+              echo "- 频道清单：$SITE/channel/channel.json（本轮与上面这些**一次推送**同时更新）"
+            else
+              echo "- 频道清单：⚠️ 本轮**没有**更新（验签未通过）—— $SITE/channel/channel.json 仍是上一版"
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
+
+      # ★ 验签没过：这一轮**必须红**（硬约束：绝不发未签名 / 签坏的清单），
+      #   但其它产物已经发出去了（这与改动前"⑤ 成功发 /stable/、⑥ 因验签失败而红"一致）——
+      #   所以把"红"放在**最后一步**：通道目录与 Release 照常完成，这里再明确报错。
+      #   写成 `steps.chan.outcome == 'success'` 是有意的：如果 job 更早就因为别的原因硬失败、
+      #   这一步根本没跑（outcome = skipped），就不要在这里再报一条误导性的"验签失败"。
+      - name: 频道清单未通过验签 → 本轮报红
+        if: always() && steps.chan.outcome == 'success' && steps.chan.outputs.include != '1'
+        run: |
+          echo "::error title=频道清单未通过验签::gh-pages 上 /channel/ **保持旧内容未更新**（这是刻意的：绝不发出未签名/签坏的清单）。修好 channel 分支的 channel.json / channel.json.sig / channel.pub 后重跑本工作流（或单独跑 channel.yml 重新签名）"
+          exit 1
 
 # ---------------------------------------------------------------------------
 # 三层镜像 / 签名频道：**不在本工作流里**
@@ -719,4 +818,10 @@ jobs:
 # 再 `sunsetlinux-channel gen-manifest → sign`，把 channel.json / .sig 与层文件
 # 手动放到 gh-pages 的同一目录下即可。签名私钥只应存在于你的离线备份与
 # 仓库 Secret `CHANNEL_SIGNING_KEY`，**绝不提交**。
+#
+# ★ 但**发布频道清单本身**是本工作流的事（③ 验签 + ④ 与通道产物一次推）。
+#   推荐路径仍然是：把清单提交到 channel 分支 → channel.yml 签名并提交 .sig →
+#   下一轮流水线发布时，本工作流从 channel 分支取"已签名"的三件套一起推上去。
+#   手工直接往 gh-pages 放清单只用于"层还没上、临时救急"，注意那会多出一次推送
+#   （多一条 Pages 构建），而且绕过了验签门禁。
 # ---------------------------------------------------------------------------

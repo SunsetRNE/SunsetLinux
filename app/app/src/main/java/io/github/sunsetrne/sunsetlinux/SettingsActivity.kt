@@ -1,20 +1,11 @@
 package io.github.sunsetrne.sunsetlinux
 
-import android.Manifest
 import android.content.Intent
-import android.content.pm.PackageManager
-import android.net.Uri
-import android.os.Build
 import android.os.Bundle
-import android.os.PowerManager
-import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import io.github.sunsetrne.sunsetlinux.ui.theme.applyDshSystemBars
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -22,20 +13,15 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -46,59 +32,55 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.layout.onGloballyPositioned
-import androidx.compose.ui.layout.positionInParent
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
-import io.github.sunsetrne.sunsetlinux.core.Channel
 import io.github.sunsetrne.sunsetlinux.core.DshRuntime
 import io.github.sunsetrne.sunsetlinux.core.DshStatus
-import io.github.sunsetrne.sunsetlinux.core.EnvFiles
 import io.github.sunsetrne.sunsetlinux.core.Edition
 import io.github.sunsetrne.sunsetlinux.core.EnvMode
 import io.github.sunsetrne.sunsetlinux.core.Prefs
 import io.github.sunsetrne.sunsetlinux.ui.components.DshCard
 import io.github.sunsetrne.sunsetlinux.ui.components.Pill
 import io.github.sunsetrne.sunsetlinux.ui.components.SectionLabel
-import io.github.sunsetrne.sunsetlinux.ui.copyToClipboard
-import io.github.sunsetrne.sunsetlinux.ui.theme.WarnTone
-import io.github.sunsetrne.sunsetlinux.ui.theme.SunsetLinuxTheme
-import io.github.sunsetrne.sunsetlinux.ui.theme.MonoFamily
-import io.github.sunsetrne.sunsetlinux.ui.theme.Danger
-import io.github.sunsetrne.sunsetlinux.ui.theme.StateRunning
-import io.github.sunsetrne.sunsetlinux.ui.NpmSourceCard
 import io.github.sunsetrne.sunsetlinux.ui.theme.Accent
+import io.github.sunsetrne.sunsetlinux.ui.theme.MonoFamily
+import io.github.sunsetrne.sunsetlinux.ui.theme.StateRunning
+import io.github.sunsetrne.sunsetlinux.ui.theme.SunsetLinuxTheme
 import io.github.sunsetrne.sunsetlinux.ui.theme.TextMuted
 import io.github.sunsetrne.sunsetlinux.ui.theme.TextSecondary
+import io.github.sunsetrne.sunsetlinux.ui.theme.WarnTone
+import io.github.sunsetrne.sunsetlinux.ui.theme.applyDshSystemBars
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 
 /**
- * 设置页：运行模式、端口、开机自启、电池优化、冻结模块豁免提示、频道管理、关于。
+ * 设置页 —— **只装"没有独立入口"的通用项**。
  *
- * 频道（URL + ed25519 公钥）是"可插拔分发"的核心（§5.1），因此这里的增删改都落在
- * App 侧存储，并可一键**同步到环境**的 `etc/channels.json`。
+ * ## 2026-09 拆分（真机反馈："设置页实在是太长了"）
+ *
+ * 判据是用户给的那条：**侧边栏里已经有对应标签的内容，一律抽成独立页**。
+ * 于是下面三块搬去了外壳里各自的页（侧边栏入口 → `ShellTab`）：
+ *
+ * | 原位置 | 现页面 | 为什么 |
+ * |---|---|---|
+ * | 更新频道（列表/增删改/同步） | `ui/ChannelsPane.kt`（ShellTab.CHANNELS） | 侧边栏本来就有「频道管理」入口 |
+ * | 省电与通知 + 墓碑冻结豁免 | `ui/PowerPane.kt`（ShellTab.POWER） | 侧边栏本来就有「冻结与省电豁免」入口 |
+ * | npm 源 | `ui/SourcesPane.kt`（ShellTab.SOURCES） | 侧边栏本来就有「npm 源」入口；顺手加了 Python 源 |
+ *
+ * 留在本页的是真的没有独立入口、且彼此构成一条"运行与启动"阅读流的项：
+ * 运行模式（本版固定）、免 root 运行时、层模式、服务端口、服务与自启，
+ * 外加「快捷入口」（从设置这一页直接跳到别的页）与「关于」。
+ * 它们**不拆**的理由写在 [SettingsScreen] 上方。
+ *
+ * 原先的 `section` 深链（channels/power/npm + animateScrollTo）随三块内容一起删掉了：
+ * 现在那三页是一对一的入口，不再需要"进设置页再滚到中段"。
  */
 class SettingsActivity : ComponentActivity() {
 
-    /** 从侧边栏直接跳到某个分区：null=顶部，channels=频道管理，power=省电与冻结豁免 */
-    private var section: String? = null
-
     private lateinit var prefs: Prefs
-
-    private val modeOverride = mutableStateOf<EnvMode?>(null)
 
     /** 免 root 运行时偏好：null = auto（优先 proroot），也可固定 proroot / proot。 */
     private val rootlessRuntime = mutableStateOf<String?>(null)
@@ -110,40 +92,23 @@ class SettingsActivity : ComponentActivity() {
     private val port = mutableStateOf("3080")
     private val bootStart = mutableStateOf(false)
     private val autoStart = mutableStateOf(false)
-    private val channels = mutableStateListOf<Channel>()
     private val notice = mutableStateOf<String?>(null)
-    private val batteryExempt = mutableStateOf(false)
-    private val notifGranted = mutableStateOf(true)
     private val status = mutableStateOf<DshStatus?>(null)
-
-    private val notifPermission =
-        registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-            notifGranted.value = granted
-        }
-
-    // 频道编辑对话框状态
-    private val editing = mutableStateOf<Channel?>(null)
-    private val creating = mutableStateOf(false)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         applyDshSystemBars()
         prefs = Prefs(this)
-        section = intent?.getStringExtra(EXTRA_SETTINGS_SECTION)
 
-        modeOverride.value = prefs.modeOverride
         rootlessRuntime.value = prefs.rootlessRuntime
         layerMode.value = prefs.layerMode
         port.value = prefs.port.toString()
         bootStart.value = prefs.bootStartService
         autoStart.value = prefs.autoStartEnv
-        channels.addAll(prefs.channels)
 
         setContent {
             SunsetLinuxTheme {
                 SettingsScreen(
-                    section = section,
-                    modeOverride = modeOverride.value,
                     rootlessRuntime = rootlessRuntime.value,
                     layerMode = layerMode.value,
                     onPickLayerMode = { picked ->
@@ -168,88 +133,24 @@ class SettingsActivity : ComponentActivity() {
                     port = port.value,
                     bootStart = bootStart.value,
                     autoStart = autoStart.value,
-                    channels = channels,
                     notice = notice.value,
-                    batteryExempt = batteryExempt.value,
-                    notifGranted = notifGranted.value,
                     status = status.value,
                     onBack = { finish() },
-                    onPickMode = { picked ->
-                        modeOverride.value = picked
-                        prefs.modeOverride = picked
-                        refreshProbe()
-                    },
                     onPortChange = {
                         port.value = it.filter { c -> c.isDigit() }.take(5)
                         port.value.toIntOrNull()?.let { p -> prefs.port = p }
                     },
                     onBootStart = { bootStart.value = it; prefs.bootStartService = it },
                     onAutoStart = { autoStart.value = it; prefs.autoStartEnv = it },
-                    onRequestBattery = ::requestBatteryExemption,
-                    onRequestNotif = ::requestNotificationPermission,
                     onDismissNotice = { notice.value = null },
-                    onCopyPackage = { copyToClipboard(this, "包名", packageName) },
-                    onAddChannel = { creating.value = true },
-                    onEditChannel = { editing.value = it },
-                    onToggleChannel = { ch, enabled ->
-                        replaceChannel(ch.copy(enabled = enabled))
-                    },
-                    onDeleteChannel = { ch ->
-                        // 内置频道删不掉：它的 URL/公钥是代码里的信任根（UI 上也不显示删除键）。
-                        // 这里再兜一层，防止以后有人在别处直接调这个回调。
-                        if (Channel.isBuiltin(ch.id)) {
-                            notice.value = "「${ch.name}」是内置频道，不能删除（可停用）。"
-                        } else {
-                            channels.removeAll { it.id == ch.id }
-                            persistChannels()
-                            notice.value = "已删除频道「${ch.name}」"
-                        }
-                    },
-                    onSyncChannels = ::syncChannelsToEnv,
                     onOpenLogs = { startActivity(Intent(this, LogActivity::class.java)) },
                     onOpenUpdate = { startActivity(Intent(this, UpdateActivity::class.java)) },
                     onOpenProvision = { startActivity(Intent(this, ProvisionActivity::class.java)) },
-                    onOpenBatterySettings = ::openBatterySettings,
                 )
-
-                if (creating.value || editing.value != null) {
-                    ChannelDialog(
-                        initial = editing.value,
-                        onDismiss = { creating.value = false; editing.value = null },
-                        onSave = { ch ->
-                            if (editing.value == null) {
-                                channels.add(ch)
-                                notice.value = "已添加频道「${ch.name}」"
-                            } else {
-                                replaceChannel(ch)
-                                notice.value = "已保存频道「${ch.name}」"
-                            }
-                            creating.value = false
-                            editing.value = null
-                            persistChannels()
-                        },
-                    )
-                }
             }
         }
 
         refreshProbe()
-        refreshSystemState()
-    }
-
-    override fun onResume() {
-        super.onResume()
-        refreshSystemState()
-    }
-
-    private fun replaceChannel(ch: Channel) {
-        val idx = channels.indexOfFirst { it.id == ch.id }
-        if (idx >= 0) channels[idx] = ch else channels.add(ch)
-        persistChannels()
-    }
-
-    private fun persistChannels() {
-        prefs.channels = channels.toList()
     }
 
     private fun refreshProbe() {
@@ -265,63 +166,27 @@ class SettingsActivity : ComponentActivity() {
         }
     }
 
-    private fun refreshSystemState() {
-        val pm = getSystemService(PowerManager::class.java)
-        batteryExempt.value = pm?.isIgnoringBatteryOptimizations(packageName) == true
-        notifGranted.value = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) ==
-                PackageManager.PERMISSION_GRANTED
-        } else {
-            true
-        }
-    }
-
-    private fun requestBatteryExemption() {
-        val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
-            .setData(Uri.parse("package:$packageName"))
-        runCatching { startActivity(intent) }
-            .onFailure { openBatterySettings() }
-    }
-
-    private fun openBatterySettings() {
-        runCatching {
-            startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
-        }.onFailure {
-            notice.value = "无法打开电池优化设置，请手动到「系统设置 → 电池 → 应用」中放行 SunsetLinux。"
-        }
-    }
-
-    private fun requestNotificationPermission() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            notifPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
-        }
-    }
-
-    /** 把频道列表写进 `$LINUX_HOME/etc/channels.json`（§5.1 的文件格式）。 */
-    private fun syncChannelsToEnv() {
-        lifecycleScope.launch(Dispatchers.IO) {
-            val mode = DshRuntime.resolveMode(this@SettingsActivity, prefs).mode
-            val json = Channel.toChannelsFile(channels.toList())
-            val result = EnvFiles.writeText(this@SettingsActivity, mode, "etc/channels.json", json)
-            withMain {
-                notice.value = if (result.ok) {
-                    "已同步 ${channels.size} 个频道到 ${EnvFiles.home(this@SettingsActivity, mode)}/etc/channels.json"
-                } else {
-                    "同步失败：${result.message}"
-                }
-            }
-        }
-    }
-
     private fun withMain(block: () -> Unit) = runOnUiThread(block)
 }
 
 // ─────────────────────────────────────────────────────────────── Compose 层
 
+/**
+ * 设置页的剩余内容。
+ *
+ * ## 为什么这几块**不**再拆（写给下一个想动手的人）
+ *
+ * 1. 它们没有独立入口：端口、自启、层模式、免 root 运行时都只在这里出现，
+ *    按"侧边栏已有入口就抽走"的判据，它们本来就不该动；
+ * 2. 拆完三块之后本页只剩 5 张卡 + 关于，一屏到两屏，已经不是"太长"的那个问题
+ *    （原来的长度大半来自频道列表、省电/冻结说明和源卡片）；
+ * 3. 这几项是一条**同一条阅读流**："这个环境怎么跑起来" —— 模式 → 运行时 → 层 →
+ *    端口 → 自启。拆成 5 个页面会让"想确认自己环境怎么配的"变成点 5 次。
+ *
+ * 反过来说：**不要**为了凑数把「关于」也拆出去 —— 它短、且没有需要独立成页的信息量。
+ */
 @Composable
 private fun SettingsScreen(
-    section: String?,
-    modeOverride: EnvMode?,
     rootlessRuntime: String?,
     onPickRootless: (String?) -> Unit,
     layerMode: String?,
@@ -331,29 +196,16 @@ private fun SettingsScreen(
     port: String,
     bootStart: Boolean,
     autoStart: Boolean,
-    channels: List<Channel>,
     notice: String?,
-    batteryExempt: Boolean,
-    notifGranted: Boolean,
     status: DshStatus?,
     onBack: () -> Unit,
-    onPickMode: (EnvMode?) -> Unit,
     onPortChange: (String) -> Unit,
     onBootStart: (Boolean) -> Unit,
     onAutoStart: (Boolean) -> Unit,
-    onRequestBattery: () -> Unit,
-    onRequestNotif: () -> Unit,
     onDismissNotice: () -> Unit,
-    onCopyPackage: () -> Unit,
-    onAddChannel: () -> Unit,
-    onEditChannel: (Channel) -> Unit,
-    onToggleChannel: (Channel, Boolean) -> Unit,
-    onDeleteChannel: (Channel) -> Unit,
-    onSyncChannels: () -> Unit,
     onOpenLogs: () -> Unit,
     onOpenUpdate: () -> Unit,
     onOpenProvision: () -> Unit,
-    onOpenBatterySettings: () -> Unit,
 ) {
     Box(
         Modifier
@@ -373,25 +225,10 @@ private fun SettingsScreen(
                 Text("设置", style = MaterialTheme.typography.titleLarge)
             }
 
-            // 侧边栏深链：滚到指定分区
-            val scrollState = rememberScrollState()
-            var powerY by remember { mutableIntStateOf(0) }
-            var channelsY by remember { mutableIntStateOf(0) }
-            var npmY by remember { mutableIntStateOf(0) }
-            LaunchedEffect(section, powerY, channelsY, npmY) {
-                val target = when (section) {
-                    "power" -> powerY
-                    "channels" -> channelsY
-                    "npm" -> npmY
-                    else -> -1
-                }
-                if (target > 0) scrollState.animateScrollTo((target - 24).coerceAtLeast(0))
-            }
-
             Column(
                 Modifier
                     .weight(1f)
-                    .verticalScroll(scrollState)
+                    .verticalScroll(rememberScrollState())
                     .padding(horizontal = 16.dp),
             ) {
                 // 运行模式：**单模式版**（0.3.0 起两个 App 各自锁死一条路）
@@ -465,7 +302,7 @@ private fun SettingsScreen(
                                 Spacer(Modifier.height(6.dp))
                                 Text(
                                     text = "本次运行实际使用：$kind" +
-                                        (status?.rootlessVersion?.let { " $it" } ?: ""),
+                                        (status.rootlessVersion?.let { " $it" } ?: ""),
                                     style = MaterialTheme.typography.labelSmall,
                                     color = Accent,
                                 )
@@ -563,107 +400,10 @@ private fun SettingsScreen(
 
                 Spacer(Modifier.height(12.dp))
 
-                // 电池与通知
-                DshCard(
-                    Modifier
-                        .fillMaxWidth()
-                        .onGloballyPositioned { powerY = it.positionInParent().y.toInt() },
-                ) {
-                    Column(Modifier.fillMaxWidth()) {
-                        SectionLabel("省电与通知")
-                        Spacer(Modifier.height(10.dp))
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Pill(
-                                text = if (batteryExempt) "已加入电池优化白名单" else "未加入白名单",
-                                color = if (batteryExempt) StateRunning else WarnTone,
-                                filled = true,
-                            )
-                        }
-                        Spacer(Modifier.height(8.dp))
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            TextButton(onClick = onRequestBattery, enabled = !batteryExempt) {
-                                Text("申请白名单")
-                            }
-                            TextButton(onClick = onOpenBatterySettings) { Text("打开系统设置") }
-                        }
-                        Spacer(Modifier.height(4.dp))
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Pill(
-                                text = if (notifGranted) "通知权限已授予" else "通知权限被拒绝",
-                                color = if (notifGranted) StateRunning else Danger,
-                                filled = true,
-                            )
-                            Spacer(Modifier.width(8.dp))
-                            if (!notifGranted) TextButton(onClick = onRequestNotif) { Text("去授权") }
-                        }
-                    }
-                }
-
-                Spacer(Modifier.height(12.dp))
-
-                // 冻结豁免提示卡
-                FreezeExemptionCard(onCopyPackage = onCopyPackage)
-
-                Spacer(Modifier.height(12.dp))
-
-                // npm 源（功能 B）
-                NpmSourceCard(
-                    Modifier
-                        .fillMaxWidth()
-                        .onGloballyPositioned { npmY = it.positionInParent().y.toInt() },
-                )
-
-                Spacer(Modifier.height(12.dp))
-
-                // 频道管理
-                DshCard(
-                    Modifier
-                        .fillMaxWidth()
-                        .onGloballyPositioned { channelsY = it.positionInParent().y.toInt() },
-                ) {
-                    Column(Modifier.fillMaxWidth()) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            SectionLabel("更新频道")
-                            Spacer(Modifier.weight(1f))
-                            IconButton(onClick = onAddChannel) {
-                                Icon(Icons.Filled.Add, contentDescription = "新增频道", tint = MaterialTheme.colorScheme.primary)
-                            }
-                        }
-                        Text(
-                            text = "频道 = 一个清单 URL + 一个 ed25519 公钥。第三方可自签自建，无需审核。",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = TextMuted,
-                        )
-                        Spacer(Modifier.height(10.dp))
-
-                        if (channels.isEmpty()) {
-                            Text("暂无频道。", style = MaterialTheme.typography.bodySmall, color = TextSecondary)
-                        } else {
-                            channels.forEach { ch ->
-                                ChannelRow(
-                                    channel = ch,
-                                    builtin = Channel.isBuiltin(ch.id),
-                                    onToggle = { onToggleChannel(ch, it) },
-                                    onEdit = { onEditChannel(ch) },
-                                    onDelete = { onDeleteChannel(ch) },
-                                )
-                            }
-                        }
-
-                        Spacer(Modifier.height(10.dp))
-                        Button(
-                            onClick = onSyncChannels,
-                            enabled = channels.isNotEmpty(),
-                            modifier = Modifier.fillMaxWidth(),
-                        ) {
-                            Text("同步到环境 (etc/channels.json)")
-                        }
-                    }
-                }
-
-                Spacer(Modifier.height(12.dp))
-
                 // 快捷入口
+                // ★ 保留而不是删掉：设置是一个**独立 Activity**，没有侧边栏抽屉，
+                //   要跳去日志/更新/部署向导只能从别处退出再进 —— 这几个按钮是唯一出口。
+                //   它不是"内容"（不承载任何设置项），所以不在"抽成独立页"的范围里。
                 DshCard(Modifier.fillMaxWidth()) {
                     Column(Modifier.fillMaxWidth()) {
                         SectionLabel("快捷入口")
@@ -756,113 +496,6 @@ private fun SwitchRow(
     }
 }
 
-/**
- * 墓碑 / 冻结类模块的豁免提示。
- *
- * 这不是可选的"最佳实践"：设备上这类模块会按 per-app 策略用 cgroup freezer
- * 冻结后台应用，被冻结后 App 的状态轮询与通知都会停摆。
- *
- * 措辞刻意**不点名任何具体模块/作者**：这类模块很多，点名既无必要，
- * 也容易让人误以为我们在评价某个第三方实现。只描述「行为」与「怎么豁免」。
- */
-@Composable
-private fun FreezeExemptionCard(onCopyPackage: () -> Unit) {
-    Surface(
-        shape = RoundedCornerShape(22.dp),
-        color = WarnTone.copy(alpha = 0.10f),
-        modifier = Modifier.fillMaxWidth(),
-    ) {
-        Column(Modifier.padding(18.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("⚠️", style = MaterialTheme.typography.titleMedium)
-                Spacer(Modifier.width(8.dp))
-                Text(
-                    text = "请把本应用加入墓碑/冻结模块豁免",
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.SemiBold,
-                )
-            }
-            Spacer(Modifier.height(10.dp))
-            Text(
-                text = "部分后台管理类模块（墓碑调度 / 按应用分级冻结）会用 cgroup freezer 冻结后台应用。" +
-                    "被冻结后，SunsetLinux 无法轮询环境状态，通知栏的启动/停止/重启也会失效。",
-                style = MaterialTheme.typography.bodySmall,
-                color = TextSecondary,
-            )
-            Spacer(Modifier.height(8.dp))
-            Text(
-                // ★ 操作指引按 edition 分岔：免 root 版的机器上没有 KernelSU/Magisk，
-                //   "打开 KernelSU 管理器 → 模块"是一条走不通的路（而且这句话本身就是模块痕迹）。
-                //   免 root 版该说的是"在这类模块自己的 App/配置里加白名单"。
-                text = if (Edition.showsModuleUi) {
-                    "操作指引：\n" +
-                        "1. 打开 KernelSU / Magisk 管理器 → 模块，找到你安装的后台冻结类模块的设置；\n" +
-                        "2. 在「应用策略 / 白名单」里找到 SunsetLinux（包名 io.github.sunsetrne.sunsetlinux）；\n" +
-                        "3. 策略设为「不冻结 / 白名单」并保存。\n" +
-                        "root 模式下环境本体不依赖 App 进程 —— 即使 App 被冻结，DSH 仍在运行，" +
-                        "只是你看不到状态与通知。"
-                } else {
-                    "操作指引：\n" +
-                        "1. 打开你安装的后台冻结类模块自己的 App / 配置页（这类模块通常带一个管理器）；\n" +
-                        "2. 在「应用策略 / 白名单」里找到 SunsetLinux（包名 io.github.sunsetrne.sunsetlinux）；\n" +
-                        "3. 策略设为「不冻结 / 白名单」并保存。\n" +
-                        "免 root 模式下环境随 App 进程存活 —— App 被冻结，环境就跟着停，所以这一步更要紧。"
-                },
-                style = MaterialTheme.typography.bodySmall,
-                color = TextSecondary,
-            )
-            Spacer(Modifier.height(10.dp))
-            TextButton(onClick = onCopyPackage) { Text("复制应用包名") }
-        }
-    }
-}
-
-@Composable
-private fun ChannelRow(
-    channel: Channel,
-    builtin: Boolean = false,
-    onToggle: (Boolean) -> Unit,
-    onEdit: () -> Unit,
-    onDelete: () -> Unit,
-) {
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .padding(vertical = 6.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Column(Modifier.weight(1f)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(channel.name, style = MaterialTheme.typography.bodyMedium)
-                Spacer(Modifier.width(6.dp))
-                // 内置频道：URL 与公钥来自代码（信任根），只允许启用/停用
-                if (builtin) {
-                    Pill("内置", color = StateRunning)
-                }
-                if (channel.pubkey.isBlank()) {
-                    Pill("无公钥·不验签", color = WarnTone)
-                } else {
-                    Pill("已签名", color = StateRunning)
-                }
-            }
-            Text(
-                text = channel.shortUrl,
-                style = MaterialTheme.typography.labelSmall.copy(fontFamily = MonoFamily),
-                color = TextMuted,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-        }
-        Switch(checked = channel.enabled, onCheckedChange = onToggle)
-        if (!builtin) {
-            IconButton(onClick = onEdit) { Text("改", style = MaterialTheme.typography.labelMedium) }
-            IconButton(onClick = onDelete) {
-                Icon(Icons.Filled.Delete, contentDescription = "删除", tint = Danger, modifier = Modifier.size(18.dp))
-            }
-        }
-    }
-}
-
 @Composable
 private fun AboutRow(label: String, value: String) {
     Row(Modifier.fillMaxWidth().padding(vertical = 3.dp)) {
@@ -876,111 +509,6 @@ private fun AboutRow(label: String, value: String) {
     }
 }
 
-/** 新增/编辑频道。公钥留空表示「不验签」——UI 上会明确标注风险。 */
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun ChannelDialog(
-    initial: Channel?,
-    onDismiss: () -> Unit,
-    onSave: (Channel) -> Unit,
-) {
-    var id by mutableStateOf(initial?.id ?: "")
-    var name by mutableStateOf(initial?.name ?: "")
-    var url by mutableStateOf(initial?.url ?: "")
-    var pubkey by mutableStateOf(initial?.pubkey ?: "")
-    var enabled by mutableStateOf(initial?.enabled ?: true)
-    var priority by mutableStateOf((initial?.priority ?: 100).toString())
-    var error by mutableStateOf<String?>(null)
-
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        confirmButton = {
-            TextButton(onClick = {
-                val cleanId = id.trim().ifBlank { name.trim().lowercase().replace(' ', '-') }
-                val cleanUrl = url.trim()
-                when {
-                    cleanId.isBlank() -> error = "请填写频道 ID"
-                    !cleanUrl.startsWith("http") -> error = "清单 URL 必须以 http(s):// 开头"
-                    else -> onSave(
-                        Channel(
-                            id = cleanId,
-                            name = name.trim().ifBlank { cleanId },
-                            url = cleanUrl,
-                            pubkey = pubkey.trim().replace("\n", "").replace(" ", ""),
-                            enabled = enabled,
-                            priority = priority.toIntOrNull() ?: 100,
-                        ),
-                    )
-                }
-            }) { Text("保存") }
-        },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
-        title = { Text(if (initial == null) "新增频道" else "编辑频道") },
-        text = {
-            Column {
-                OutlinedTextField(
-                    value = id,
-                    onValueChange = { id = it },
-                    label = { Text("ID（唯一）") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                Spacer(Modifier.height(8.dp))
-                OutlinedTextField(
-                    value = name,
-                    onValueChange = { name = it },
-                    label = { Text("显示名称") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                Spacer(Modifier.height(8.dp))
-                OutlinedTextField(
-                    value = url,
-                    onValueChange = { url = it },
-                    label = { Text("channel.json URL") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                Spacer(Modifier.height(8.dp))
-                OutlinedTextField(
-                    value = pubkey,
-                    onValueChange = { pubkey = it },
-                    label = { Text("ed25519 公钥（base64，可留空）") },
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                Spacer(Modifier.height(8.dp))
-                OutlinedTextField(
-                    value = priority,
-                    onValueChange = { priority = it.filter { c -> c.isDigit() }.take(4) },
-                    label = { Text("优先级（大者优先）") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                Spacer(Modifier.height(8.dp))
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Switch(checked = enabled, onCheckedChange = { enabled = it })
-                    Spacer(Modifier.width(8.dp))
-                    Text("启用该频道", style = MaterialTheme.typography.bodySmall)
-                }
-                Text(
-                    text = "留空公钥 = 不验签，等于放弃来源校验（契约要求验签失败必须拒绝，留空属于用户显式豁免）。",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = WarnTone,
-                )
-                error?.let {
-                    Spacer(Modifier.height(8.dp))
-                    Text(it, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error)
-                }
-            }
-        },
-    )
-}
-
-
-/** 侧边栏深链用的 extra key。 */
-const val EXTRA_SETTINGS_SECTION = "io.github.sunsetrne.sunsetlinux.extra.SETTINGS_SECTION"
-
-/** 打开设置页；[section] 为 null / "channels" / "power"。 */
-fun settingsIntent(context: android.content.Context, section: String? = null): android.content.Intent =
-    android.content.Intent(context, SettingsActivity::class.java)
-        .putExtra(EXTRA_SETTINGS_SECTION, section)
+/** 打开设置页。设置页现在只有通用项，不再需要分区参数（见文件头的拆分说明）。 */
+fun settingsIntent(context: android.content.Context): Intent =
+    Intent(context, SettingsActivity::class.java)

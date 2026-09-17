@@ -163,7 +163,9 @@ class LauncherActivity : ComponentActivity() {
                     AppShell(
                         vm = vm,
                         initialTab = startTab,
-                        onOpenSettings = { section -> startActivity(settingsIntent(this, section)) },
+                        // 设置页现在只装"没有独立入口"的通用项（运行模式 / 端口 / 自启 / 关于）；
+                        // 频道、省电与源都在外壳里有各自的 tab，不再经设置页深链。
+                        onOpenSettings = { startActivity(settingsIntent(this)) },
                         onOpenProvision = { startActivity(Intent(this, ProvisionActivity::class.java)) },
                         onOpenDiagnostics = { startActivity(Intent(this, DiagnosticsActivity::class.java)) },
                         onOpenWelcome = { startActivity(Intent(this, WelcomeActivity::class.java)) },

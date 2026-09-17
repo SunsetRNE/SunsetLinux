@@ -268,6 +268,34 @@ class LinuxCtl(private val context: Context, val mode: EnvMode) {
     }
 
     /**
+     * **原子写入**环境内的一个文件：先写同目录的临时文件，再 `mv -f` 覆盖。
+     *
+     * 为什么不直接 `cat > <path>`（npm 那份配置的写法）：写到一半被打断（用户杀进程、
+     * su 超时、磁盘满）会在目标位置留下**半截配置**。对 pip.conf 来说，半截配置有两种
+     * 坏结果 —— ① ConfigParser 直接报错；② 更糟：index-url 行还没写进去，pip 静默回落到
+     * 官方源，而界面上显示的却是"已应用清华源"。临时文件 + 同目录 rename 是原子的，
+     * 读到的要么是旧内容、要么是新内容。
+     *
+     * `umask 077` 与 npm 那份一致：配置里可能有内网源地址，不必让其它应用读到。
+     */
+    suspend fun writeFileInEnvAtomic(
+        path: String,
+        content: ByteArray,
+        timeoutMs: Long = TIMEOUT_START_STOP,
+    ): CtlResult = withContext(Dispatchers.IO) {
+        val script = buildString {
+            append("umask 077; ")
+            append("dir=\$(dirname ").append(shQuote(path)).append("); ")
+            append("mkdir -p \"\$dir\" || exit 1; ")
+            append("tmp=\$dir/.sunsetlinux.tmp.\$\$; ")
+            // 临时文件与目标同目录：跨文件系统 rename 不是原子的（甚至会是 copy）
+            append("cat > \"\$tmp\" || { rm -f \"\$tmp\"; exit 1; }; ")
+            append("mv -f \"\$tmp\" ").append(shQuote(path))
+        }
+        execInEnvWithStdin(listOf("sh", "-c", script), content, timeoutMs)
+    }
+
+    /**
      * **终端**（原生 PTY）的启动规格。
      *
      * 统一用 `/system/bin/sh -c "exec …"` 启动，原因有两条：

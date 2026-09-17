@@ -104,6 +104,8 @@ fun LauncherHomePane(
     onOpenUpdates: () -> Unit,
     onOpenDiagnostics: () -> Unit,
     onOpenSettings: () -> Unit,
+    /** 「省电与通知」已经拆成独立页（ShellTab.POWER），提示指向它而不是设置页。 */
+    onOpenPower: () -> Unit,
     onExportReport: () -> Unit,
 ) {
     val ui by vm.ui.collectAsState()
@@ -258,7 +260,9 @@ fun LauncherHomePane(
                                 when (target) {
                                     HintTarget.PROVISION, HintTarget.ROOT_GRANT -> onOpenProvision()
                                     HintTarget.DOCTOR -> onOpenDiagnostics()
-                                    HintTarget.SETTINGS_PORT, HintTarget.SETTINGS_POWER -> onOpenSettings()
+                                    HintTarget.SETTINGS_PORT -> onOpenSettings()
+                                    // 电池白名单那类建议现在归「冻结与省电」独立页（原来跟着进设置页）
+                                    HintTarget.SETTINGS_POWER -> onOpenPower()
                                     HintTarget.UPDATES -> onOpenUpdates()
                                     HintTarget.START -> vm.start()
                                     HintTarget.LOGS -> onExportReport()

@@ -9,8 +9,8 @@
 #   ② bundles 环境准备：内嵌离线包（六个变体各一份 .bin）+ 默认模块（full，自带 DSH）
 #   ③ build   编译矩阵：**一个组合一个节点**（并行；单组合失败不影响其它组合）
 #   ④ gates   回归门禁：shell(bash+mksh) / node / App 单测（与编译并行）
-#   ⑤ publish 合并产物 → index.json → 下载页 → gh-pages → GitHub Release
-#   ⑥ channel 频道发布：把 channel 分支上**已签名**的 channel.json/.sig 同步到 gh-pages
+#   ⑤ publish 合并产物 → index.json → 下载页 → **一次**推 gh-pages（/stable|beta/ + /channel/ + 根页）→ Release
+#   ⑥ channel 频道验签：用公钥独立验签 channel 分支上的签名清单（**只验签、不推 gh-pages**）
 #   ⑦ report  汇总（谁红谁绿一眼看到）
 #
 # 与以前（ci.yml + release.yml + offline-bundle.yml 三条线靠**时间**对齐）的区别：
@@ -18,6 +18,27 @@
 #   · 内嵌离线包只打一次（以前每个组合的构建都可能各拉一遍）；
 #   · 模块 zip 在**编译之前**产出（否则 APK 里没有 assets/module/，用户点
 #     「一键刷入内置模块」只会看到"未内嵌"——0.2.12 发布时真发生过）。
+#
+# ── gh-pages 推送次数：**为什么必须一次推**（2026-09-17 改）────────────────────
+#   GitHub Pages 是「分支推送驱动」的：**每推一次** gh-pages 就起一次
+#   `pages build and deployment`。同一轮发布推两次，就会出现两条 Pages 构建，
+#   后一条把前一条取代，前一条只是噪声（历史记录成对出现：`#114 取消/#115 成功`、
+#   `#118 取消/#119 成功`、`#120 取消/#121 成功`、`#126 失败/#127 成功`）。
+#
+#   改之前，一轮 stable 发布实际推了**三次** gh-pages（= 三条 Pages 构建）：
+#     · ⑤ publish 的 `/stable/`
+#     · ⑤ publish 的站点根页 `/index.html`（仅 stable）
+#     · ⑥ channel 的 `/channel/`（同步 channel 分支上的签名清单）
+#   现在 ⑥ 不再推送，`/channel/` 由 ⑤ 与上面那些内容合成**一次提交**一起推
+#   （见 publish.yml 顶部与其中"合成站点根那棵树"那一步）：
+#   **一轮发布 = 一次推送 = 一条 Pages 构建**。
+#
+#   仍然**各自独立推 gh-pages** 的手动/独立入口（保持原样，都不在流水线路径上；
+#   它们各自一次运行 = 一条 Pages 构建，这是它们自己的事）：
+#     · channel.yml        —— channel 分支的 channel.json 变化时：签名 + 验签 + 发 /channel/
+#     · layers.yml         —— 手动跑（自建 arm64 runner）：可选发 /channel/
+#     · layers-release.yml —— 只往 Releases 传层文件，**完全不碰 gh-pages**
+#   ⚠️ 往后再往站点加东西：拼进 publish.yml 的 dist/_site/，**不要**在流水线里加第二次推送。
 #
 # 手动兜底：release.yml（workflow_dispatch）走的还是同一批可复用工作流。
 # 层镜像（base/runtime/dsh）**不在这里**：需要 arm64 + 真 chroot，见 layers.yml。
@@ -199,16 +220,31 @@ jobs:
       channel: ${{ inputs.channel || 'auto' }}
     secrets: inherit
 
-  # ─────────────────────────────────────────────── ⑥ 频道发布
+  # ─────────────────────────────────────────────── ⑥ 频道验签（**不再推送**）
+  #
+  # ★ 这里以前是"频道发布"：把 channel 分支上已签名的 channel.json/.sig/.pub 同步到
+  #   gh-pages 的 /channel/。那会**再推一次 gh-pages** → 同一轮发布两条 Pages 构建，
+  #   后一条取代前一条（`#114 取消/#115 成功`、`#118 取消/#119 成功`、`#126 失败/#127 成功`）。
+  #   现在 /channel/ 由 ⑤ publish 与 /stable|beta/、站点根页合成**一次提交**一起推
+  #   （publish.yml 顶部有完整说明），本 job 只保留"用公钥独立验签"这一半价值：
+  #   换一个 job、重新 checkout 再验一遍 —— 清单没签 / 签坏照样让这一轮变红。
+  #
+  #   仍会**各自独立推 gh-pages** 的手动入口（都不是日常流水线路径，保持原样）：
+  #     · channel.yml —— channel 分支的 channel.json 变化时：签名 + 验签 + 发 /channel/
+  #     · layers.yml  —— 手动跑（自建 arm64 runner）：可选发 /channel/
+  #   （layers-release.yml 只往 Releases 传层文件，不碰 gh-pages。）
   channel:
-    name: ⑥ 频道发布（gh-pages /channel/）
-    needs: publish
+    name: ⑥ 频道验签（只验签，不推 gh-pages）
+    # ★ 刻意**不写 needs**（尤其不写 `needs: publish`）：这是**独立**的第二条验签路径 ——
+    #   ⑤ 里那次验签是"发之前自己核一遍"，这里换 job、换 checkout 再核一遍。
+    #   若写成 needs: publish，则在"清单签坏了"的场景里 ⑤ 已经先红、本 job 反而被跳过，
+    #   这道门禁就形同虚设。
     runs-on: ubuntu-latest
+    # 只读：本 job 不再写 gh-pages（写操作全在 ⑤ publish 的 job 级 concurrency 里串行）。
+    # 这里也**不再挂 concurrency: group: gh-pages** —— 不写就没必要占那个组，占了只会
+    # 让 ⑤ 的推送白等一次排队。
     permissions:
-      contents: write          # 需要推 gh-pages
-    concurrency:
-      group: gh-pages          # 与 publish.yml 同一个组：两者都写 gh-pages，必须串行
-      cancel-in-progress: false
+      contents: read
     steps:
       # 当前分支：要工具（tools/channel/verify.mjs）来独立验签
       - uses: actions/checkout@v4
@@ -219,7 +255,7 @@ jobs:
           ref: channel
           path: .channel
 
-      - name: 用公钥独立验签（没签或签坏就明确失败，不把坏清单发出去）
+      - name: 用公钥独立验签（没签或签坏就明确失败）
         run: |
           set -euo pipefail
           CH=.channel/channel
@@ -228,29 +264,14 @@ jobs:
           done
           node tools/channel/verify.mjs --pub "$CH/channel.pub" --in "$CH/channel.json" \
                --sig "$CH/channel.json.sig" --no-layers
-
-      - name: 推送到 gh-pages 的 /channel/
-        run: |
-          set -euo pipefail
-          CH=.channel/channel
-          git config --global user.name  "sunsetlinux-ci"
-          git config --global user.email "ci@sunsetlinux.local"
-          git clone --depth 1 --branch gh-pages \
-            "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" site
-          mkdir -p site/channel
-          cp -v "$CH/channel.json" "$CH/channel.json.sig" "$CH/channel.pub" site/channel/
-          cd site
-          if git diff --quiet && git diff --cached --quiet; then
-            echo "频道目录没有变化，跳过推送（幂等）"
-            exit 0
-          fi
-          git add -A channel
-          git commit -m "channel: 同步签名清单（pipeline run #${{ github.run_number }}）"
-          git push origin gh-pages
+          echo "验签通过。/channel/ 的内容由 ⑤ publish 与通道产物合成**一次** gh-pages 推送，本 job 不再推送。"
 
   # ─────────────────────────────────────────────── ⑦ 汇总
   report:
     name: ⑦ 汇总
+    # ★ ⑥ 的 job id **刻意保留为 `channel`**（只改了 name）：它的职责从"发布"变成"验签"，
+    #   但 id 一改，这里的 needs 与下面 `needs.channel.result` 就得一起改 —— 没必要为
+    #   一个显示名去动全流水线的依赖图。
     needs: [prep, bundles, build, gates, publish, channel]
     if: always()
     runs-on: ubuntu-latest
@@ -267,7 +288,7 @@ jobs:
             echo "| ③ build | ${{ needs.build.result }} |"
             echo "| ④ gates | ${{ needs.gates.result }} |"
             echo "| ⑤ publish | ${{ needs.publish.result }} |"
-            echo "| ⑥ channel | ${{ needs.channel.result }} |"
+            echo "| ⑥ channel（验签） | ${{ needs.channel.result }} |"
           } >> "$GITHUB_STEP_SUMMARY"
           case "${{ needs.build.result }}" in
             success) ;;
@@ -280,4 +301,11 @@ jobs:
           case "${{ needs.publish.result }}" in
             success) ;;
             *) echo "::error title=发布失败::看 ⑤ 的注释（publish.yml 里那个 if: failure() 步骤会把日志尾部带出来）"; exit 1 ;;
+          esac
+          # ★ ⑥ 现在只验签（不再推 gh-pages），它是"清单有没有签/签坏"的唯一独立门禁：
+          #   它红了这一轮就必须红 —— ⑤ 里那次验签失败时也只会"不带 /channel/"并报红，
+          #   不会有别的节点替它把结果顶出来。
+          case "${{ needs.channel.result }}" in
+            success) ;;
+            *) echo "::error title=频道验签未通过::channel 分支上的 channel.json / channel.json.sig / channel.pub 三样要齐、且能用公钥验过（重签见 channel.yml；发布时 /channel/ 的同步已合并到 ⑤ 里）"; exit 1 ;;
           esac

@@ -214,10 +214,21 @@ class Prefs(context: Context) {
         get() = sp.getString(KEY_DSH_DIST_TAG, null)
         set(value) = sp.edit { putString(KEY_DSH_DIST_TAG, value) }
 
-    /** 最近一次使用的 npm 源（registry）。 */
+    /** 最近一次使用的 npm 源（registry）。为空 = 没选过 = **官方源**（见 [NpmRegistry.selectedPresetId]）。 */
     var npmRegistry: String?
         get() = sp.getString(KEY_NPM_REGISTRY, null)
         set(value) = sp.edit { putString(KEY_NPM_REGISTRY, value) }
+
+    /**
+     * 最近一次使用的 Python 源（pip index-url）。
+     *
+     * 与 [npmRegistry] 同一口径：**为空 = 没选过 = 官方 PyPI**。
+     * 为什么不落一个"默认值字符串"进 SharedPreferences：那样就分不清"用户主动选了官方"
+     * 和"从没选过"，以后想改默认值（例如换成某个国内源）会被陈旧数据挡住。
+     */
+    var pypiIndex: String?
+        get() = sp.getString(KEY_PYPI_INDEX, null)
+        set(value) = sp.edit { putString(KEY_PYPI_INDEX, value) }
 
     /**
      * 层模式（root 模式用）：null/`loop` = losetup+erofs+upper.img（省磁盘，默认）；
@@ -259,6 +270,7 @@ class Prefs(context: Context) {
         const val KEY_SEED_DIR = "seed_dir"
         const val KEY_DSH_DIST_TAG = "dsh_dist_tag"
         const val KEY_NPM_REGISTRY = "npm_registry"
+        const val KEY_PYPI_INDEX = "pypi_index"
         const val KEY_LOG_FOLLOW = "log_auto_follow"
         const val KEY_START_MODE = "start_mode"
         const val KEY_ONBOARDED = "onboarded"

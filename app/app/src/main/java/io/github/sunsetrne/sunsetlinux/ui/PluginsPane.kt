@@ -283,7 +283,7 @@ fun PluginsPane(
                 )
                 Spacer(Modifier.height(4.dp))
                 Text(
-                    text = "包的下载走 npm 源；源慢/装不上时到「设置 → npm 源」换一个镜像。",
+                    text = "包的下载走 npm 源；源慢/装不上时到侧边栏「源与镜像」换一个镜像。",
                     style = MaterialTheme.typography.labelSmall,
                     color = TextMuted,
                 )
