@@ -427,7 +427,9 @@ jobs:
                   # ★ 必须是 **bare 变体**（docs/module-variants.md §2.6）：full 自带 DSH 层
                   #   （约 48 MB），而 base/full 档 APK 的离线包里已经有 DSH 了 ——
                   #   内嵌 full 等于同一份内容塞两遍，且会让"换组合=覆盖安装"莫名变大。
-                  mj="$(unzip -p "$apk" assets/module/module.json 2>/dev/null | tr -d '\n' || true)"
+                  # ⚠️ 去掉空白再匹配：Gradle 写的是 `"variant": "bare"`（冒号后带空格），
+                  #    按 `"variant":"bare"` 逐字匹配会把正确的包判成错（0.3.6 首跑就是这么假红的）。
+                  mj="$(unzip -p "$apk" assets/module/module.json 2>/dev/null | tr -d ' \n\t' || true)"
                   case "$mj" in
                     *'"variant":"bare"'*) echo "✓ $name：内嵌模块是 bare 变体" ;;
                     *) echo "::error title=APK 内嵌的模块不是 bare 变体::$name 的 module.json=${mj:-（读不到）} —— full 自带 DSH 层，不该进 APK"; fail=1 ;;

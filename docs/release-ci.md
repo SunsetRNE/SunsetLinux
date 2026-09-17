@@ -248,6 +248,12 @@ pipeline.yml（**只有推 main 或手动触发时跑**）           ← 2026-09
 - 另外 **APK 内嵌的必须是 `bare` 变体**：`ci.yml` 的独立门禁与 `build-apk.yml` 每个编译
   节点都会读 `assets/module/module.json` 断言 `"variant":"bare"`（full 自带 48 MB 的 DSH
   层，而 base/full 档 APK 的离线包里已经有了 —— 内嵌 full 等于塞两遍）。
+  ⚠️ **匹配前必须去掉空白**：Gradle 写出的 JSON 是 `"variant": "bare"`（冒号后带空格），
+  按 `"variant":"bare"` 逐字匹配会把**正确**的包判成错 —— 0.3.6 首跑就是这么红的
+  （三个 root 变体全红、三个 proot 变体全绿，报的却是"内嵌的模块不是 bare 变体"，
+  而那句报错里印出来的 module.json 明明写着 `"variant": "bare"`）。
+  现在 `tr -d ' \n\t'` 之后再匹配，并且 `tools/module-variant-selftest.mjs` 有一条第②b 断言
+  钉住"这道闸门必须先去掉空白"，防止以后有人"顺手简化"回去。
 - 接在 `ci.yml` 的 `shell` 节点（`node tools/module-variant-selftest.mjs`）。
 
 ---

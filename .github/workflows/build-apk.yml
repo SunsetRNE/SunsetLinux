@@ -171,7 +171,9 @@ jobs:
                 echo "::error title=Root 版不该带 proot 脚本::$apk 里有 assets/proot-runtime/（root 模式用不到，白占体积）"; exit 1; }
               # ★ 内嵌的必须是 **bare 变体**（docs/module-variants.md §2.6）：full 自带 DSH 层
               #   （约 48 MB），而 base/full 档 APK 的离线包里已经有 DSH —— 内嵌 full = 塞两遍。
-              mj="$(unzip -p "$apk" assets/module/module.json 2>/dev/null | tr -d '\n' || true)"
+              # ⚠️ 先把空白全去掉再匹配：Gradle 写的 JSON 是 `"variant": "bare"`（冒号后有空格），
+              #    按 `"variant":"bare"` 逐字匹配会把**正确**的包判成错（0.3.6 首跑就是这么假红的）。
+              mj="$(unzip -p "$apk" assets/module/module.json 2>/dev/null | tr -d ' \n\t' || true)"
               case "$mj" in
                 *'"variant":"bare"'*) ;;
                 *) echo "::error title=APK 内嵌的模块不是 bare 变体::module.json=${mj:-（读不到）} —— full 自带 DSH 层，不该进 APK"; exit 1 ;;

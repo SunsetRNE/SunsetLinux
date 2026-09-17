@@ -233,9 +233,26 @@ r = sh([ctl, 'dsh', 'builtin', '--module-dir', brokenMod], {
 if (r.status !== 0 && /sha256/.test(r.stdout)) ok('负例：载荷被改坏 → sha256 不符，拒绝落地');
 else bad(`负例没拦住：rc=${r.status} stdout=${r.stdout}`);
 
+// ── ②b CI 侧那道「APK 内嵌的必须是 bare」闸门：必须先去掉空白再匹配 ──────────
+// 【真事故，0.3.6 首跑】三个 root 变体全红，报"APK 内嵌的模块不是 bare 变体"，
+// 而 module.json 明明是 `"variant": "bare"`。原因：Gradle 写出的 JSON 冒号后**有空格**，
+// 而闸门按 `"variant":"bare"` 逐字匹配 —— 把**正确**的包判成了错。
+// 这类假红最贵：它红在"最像真问题"的那条断言上，会让人去改对的东西。
+{
+  const problems = [];
+  for (const f of ['.github/workflows/build-apk.yml', '.github/workflows/ci.yml']) {
+    const t = readFileSync(join(REPO, f), 'utf8');
+    // 必须同时具备：去掉空白（tr -d ' \n\t'）+ 去掉空白后的匹配串
+    const stripsWs = /tr -d ' \\n\\t'/.test(t);
+    const matches = /'"variant":"bare"'/.test(t);
+    if (!(stripsWs && matches)) problems.push(`${f}（去空白=${stripsWs} 匹配串=${matches}）`);
+  }
+  if (problems.length === 0) ok('CI 的 bare 变体闸门会先去空白再匹配（Gradle 写的是 "variant": "bare"）');
+  else for (const p of problems) bad(`bare 变体闸门没有去空白：${p} —— 会把正确的包判成假红`);
+}
+
 // ── ③ 一条指令：从（验签过的）频道装 DSH ────────────────────────────────────
 console.log('\n③ 一条指令（linuxctl dsh install / update.sh install dsh）');
-
 // 造一个**真的**频道：临时密钥对 + 真签名 + file:// URL
 const chanDir = join(root, 'channel');
 mkdirSync(chanDir, { recursive: true });
