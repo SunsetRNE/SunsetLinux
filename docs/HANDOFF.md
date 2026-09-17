@@ -822,6 +822,17 @@ provision 83/0；oneshot 29/0；shell-compat / contract / cmp-consistency / webr
   `sha256(公钥)` 前 8 字节，我第一版写成"公钥前 8 字节"（会算成 `ed25519:61:7a:00:73:…`）——
   这种"看起来像证据、其实指错方向"的输出比不给证据更糟。
 
+### 四、顺带修掉发布路径的真坑（发布 0.3.10 时当场撞上）
+
+第一次流水线 ①~④ 全绿、卡在 ⑤「发布到 GitHub Releases」。日志原文：`新建 Release v0.3.10` →（17 分钟后）
+`HTTP 422 … name=SunsetLinux-0.3.10-proot-base.bin` → `ReleaseAsset.name already exists` ——
+即 `gh release create` 一次带 15 个资产时**自己重传了同一个**（首次已在服务端成功、客户端超时后重试）⇒ 撞名。
+文件没问题（同一次 `index.json` 里它 69,205,422 B、sha256 正常）。三个问题都修了：
+① 改成"先建草稿条目 → **逐个上传 + 4 次退避重试** → 仍不吞错"；
+② gh 传资产是"先建草稿、最后才发布"，而重跑路径从不 `--draft=false` ⇒ 失败会把 Release **永远留在草稿**
+（gh-pages 已挂 0.3.10 链接 ⇒ APK 当场 404，且重跑也修不好）→ 资产齐了显式发布（幂等）；
+③ 上传前比对 `--json assets` 的 name/size/digest，**一致的跳过**（重跑少传 ~660 MB）。
+
 ### 本轮数字
 
 模块 **1.0.30**（versionCode 10030）/ App **0.3.10**（versionCode 26）。门禁：root selftest **83/0 × bash+mksh**、

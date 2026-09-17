@@ -731,23 +731,75 @@ jobs:
           done
           if [ -z "${ASSETS# }" ]; then echo "::error::没有可发布的资产（dist/_publish 是空的？）"; exit 1; fi
 
+          # ① 先把 Release **确保存在**（草稿即可），别把"建条目 + 传 15 个资产"塞进一次调用。
+          #    为什么拆开（2026-09-17 真实事故）：15 个资产一次性交给 `gh release create`，
+          #    其中一个（`SunsetLinux-0.3.10-proot-base.bin`，69 MB、文件本身没问题 —— 同一次
+          #    生成的 index.json 里它在、大小与 sha256 都正常）返回 `HTTP 422 Validation Failed`，
+          #    于是**整条发布红掉**；而 gh 在有资产时的行为是"**先建草稿 → 传资产 → 最后才发布**"，
+          #    所以 Release 被留在**草稿**态：用户看不到它，而 gh-pages 上（上一步已成功）
+          #    已经挂着 0.3.10 的下载链接 ⇒ 那些 APK/.bin 链接当场 404。
           if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "Release $TAG 已存在 → 覆盖资产 + 刷新说明（幂等，不新建条目）"
-            # shellcheck disable=SC2086
-            gh release upload "$TAG" $ASSETS --clobber
-            gh release edit "$TAG" --title "$TITLE" --notes-file dist/_release-notes.md
-            # 清历史遗留资产名（换命名后它们不该继续出现在 Release 上，否则用户会下错）
-            for legacy in index.html sunsetlinux-launcher-debug.apk \
-                          minimal.bin minimal.json ubuntu.bin ubuntu.json \
-                          ubuntu-proot.bin ubuntu-proot.json \
-                          ubuntu-proot-dsh.bin ubuntu-proot-dsh.json; do
-              gh release delete-asset "$TAG" "$legacy" --yes >/dev/null 2>&1 || true
-            done
+            DRAFT_STATE="$([ "$(gh release view "$TAG" --json isDraft -q .isDraft 2>/dev/null)" = true ] && echo 草稿 || echo 已发布)"
+            echo "Release $TAG 已存在（$DRAFT_STATE）→ 覆盖资产 + 刷新说明（幂等，不新建条目）"
           else
-            echo "新建 Release $TAG"
-            # shellcheck disable=SC2086
-            gh release create "$TAG" --title "$TITLE" --notes-file dist/_release-notes.md $ASSETS
+            echo "新建 Release $TAG（先建草稿，资产传完再发布）"
+            gh release create "$TAG" --draft --title "$TITLE" --notes-file dist/_release-notes.md
           fi
+
+          # ② 资产**逐个上传 + 重试**，已在 Release 上且**内容一致**的直接跳过。
+          #    真因（0.3.10 那次 CI 日志原文）：
+          #      `新建 Release v0.3.10` →（17 分钟后）`HTTP 422 … name=…proot-base.bin`
+          #      → `ReleaseAsset.name already exists`
+          #    也就是 gh 在"一次 create 带 15 个资产"时**自己重传了同一个资产**（第一次其实
+          #    已在服务端成功、客户端超时后重试）⇒ 撞名 422 ⇒ 整条发布红掉。
+          #    所以：① 逐个传、失败重试；② `--clobber` 让"重传撞名"变成覆盖而不是报错；
+          #    ③ 已经有且一致的跳过（重跑少传 ~660 MB，也少一次踩同一个坑的机会）。
+          #    ⚠️ 不吞错误：四次都失败仍然报红，并把 gh 的原文打出来。
+          ERR="$(mktemp)"
+          FAILED=""
+          SKIPPED=0
+          HAVE="$(gh release view "$TAG" --json assets \
+                  -q '.assets[] | "\(.name)\t\(.size)\t\(.digest // "")"' 2>/dev/null || true)"
+          # shellcheck disable=SC2086
+          for f in $ASSETS; do
+            n="${f##*/}"
+            sz="$(stat -c '%s' "$f" 2>/dev/null || echo '?')"
+            # gh 报的 digest 形如 `sha256:…`；拿不到 digest 的资产一律重传（不比大小就跳过）
+            dig="sha256:$(sha256sum "$f" | awk '{print $1}')"
+            if [ -n "$HAVE" ] && printf '%s\n' "$HAVE" | grep -qxF "$(printf '%s\t%s\t%s' "$n" "$sz" "$dig")"; then
+              echo "  已在 Release 上且内容一致，跳过 $n（$sz B）"
+              SKIPPED=$((SKIPPED + 1))
+              continue
+            fi
+            ok=""
+            for try in 1 2 3 4; do
+              if gh release upload "$TAG" "$f" --clobber 2>"$ERR"; then ok=1; break; fi
+              echo "::warning::上传 $n 第 $try 次失败：$(tail -n1 "$ERR" 2>/dev/null)"
+              sleep $((try * 10))
+            done
+            if [ -n "$ok" ]; then
+              echo "  已上传 $n（$sz B）"
+            else
+              echo "::error::资产上传失败（已重试 4 次）：$n —— $(tail -n1 "$ERR" 2>/dev/null)"
+              FAILED="$FAILED $n"
+            fi
+          done
+          rm -f "$ERR"
+          echo "资产处理完成：跳过 $SKIPPED 个（已在且一致）"
+          [ -z "$FAILED" ] || { echo "::error::以下资产没能上传：$FAILED"; exit 1; }
+
+          # ③ 资产齐了才**发布**（`--draft=false` 幂等）。
+          #    这一步同时负责修复"上一次失败把 Release 留在草稿态"的历史 ——
+          #    没有它，重跑只会给一个草稿反复覆盖资产，用户永远看不到这个版本。
+          gh release edit "$TAG" --draft=false --title "$TITLE" --notes-file dist/_release-notes.md
+
+          # 清历史遗留资产名（换命名后它们不该继续出现在 Release 上，否则用户会下错）
+          for legacy in index.html sunsetlinux-launcher-debug.apk \
+                        minimal.bin minimal.json ubuntu.bin ubuntu.json \
+                        ubuntu-proot.bin ubuntu-proot.json \
+                        ubuntu-proot-dsh.bin ubuntu-proot-dsh.json; do
+            gh release delete-asset "$TAG" "$legacy" --yes >/dev/null 2>&1 || true
+          done
 
           # ★ 撤掉**旧版本**的模块 zip：只升模块版本时 Release 是同一个 tag（幂等覆盖），
           #   而模块资产名里带版本 → 1.0.23 与 1.0.24 会同时躺在 Release 页上。
