@@ -1411,9 +1411,22 @@ main() {
         #   ⇒ 真机 2026-09-17 实测：`/usr/bin/env: 'bash': No such file or directory` → rc=127；
         #   挂载树全建好了却起不来（日志停在"挂载树就绪，交给 entry.sh"）。
         #   entry.sh/supervise.sh 的 shebang 也一并从 `env bash` 改成 `/bin/bash`（双保险）。
+        # 端口让路：一键启动这条路上，DSH 的端口是**这里**定死的（entry.sh → supervise.sh --port）。
+        #   真机现场：免 root 的 DSHA 占着 3080，照原端口起只会 bind 失败、环境被判"启动失败"。
+        #   让路后真实端口由 supervise.sh 写进 run/dsh.port，登录 URL 里也带它 ⇒ App 侧透明。
+        local _want_port _port
+        _want_port="$(config_port)"
+        if command -v port_pick_free >/dev/null 2>&1; then
+            _port="$(port_pick_free "$_want_port")"
+        else
+            _port="$_want_port"
+        fi
+        if [ "$_port" != "$_want_port" ]; then
+            log "提示：端口 $_want_port 被占用 → 本次 DSH 用 $_port（登录地址里会带真实端口）"
+        fi
         PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
         HOME=/root TERM="${TERM:-xterm-256color}" \
-            chroot "$ROOTFS_DIR" /opt/sunsetlinux/entry.sh "$(config_port)" $dsh_flag || rc=$?
+            chroot "$ROOTFS_DIR" /opt/sunsetlinux/entry.sh "$_port" $dsh_flag || rc=$?
         finish_environment "$rc"
         trap - EXIT
         exit "$rc"
@@ -1522,32 +1535,19 @@ main() {
 #   三层回退（与 runtime/proot/{start,linuxctl}.sh 保持同一套逻辑与顺序）：
 #     1) /proc/net/tcp[6] 找 LISTEN（st=0A）——纯 awk，Android 上一定有
 #     2) nc -z   3) ss -ltn
-tcp_listen_local() { # /proc/net/tcp[6] 里有没有该端口的 LISTEN
-    local hex=""
-    hex=$(printf '%04X' "${1-}" 2>/dev/null || true)
-    [ -n "$hex" ] || return 1
-    awk -v want=":${hex}" '
-        NR > 1 && $4 == "0A" && substr($2, length($2) - length(want) + 1) == want { f = 1; exit }
-        END { exit(f ? 0 : 1) }
-    ' /proc/net/tcp /proc/net/tcp6 2>/dev/null
-}
-
-port_busy() {
-    local p="${1-}"
-    case $p in ''|*[!0-9]*) return 1 ;; esac
-    # 去掉前导 0：`printf '%04X' 03080` 会按**八进制**解释 → 算出错误的端口号
-    while :; do case $p in 0?*) p=${p#0} ;; *) break ;; esac; done
-    tcp_listen_local "$p" && return 0
-    if command -v nc >/dev/null 2>&1; then
-        nc -z -w 2 127.0.0.1 "$p" >/dev/null 2>&1 && return 0
-    fi
-    if command -v ss >/dev/null 2>&1; then
-        ss -ltn 2>/dev/null | awk -v want=":${p}" '
-            NR > 1 && substr($4, length($4) - length(want) + 1) == want { f = 1; exit }
-            END { exit(f ? 0 : 1) }
-        ' && return 0
-    fi
-    return 1
-}
+# 端口探测（tcp_listen_local / port_busy）已抽到 runtime/common/port-probe.sh：
+# 与 linuxctl 的 `dsh start` 让路逻辑共用一份判据（两处各写一遍必然漂移）。
+# 缺了它就不再"猜"端口是否被占 —— 直接报出来（否则会静默退回"判空闲"）。
+_PORT_PROBE=""
+for _cand in "$SELF_DIR/common/port-probe.sh" "$SELF_DIR/../common/port-probe.sh" \
+             "$SELF_DIR/../../runtime/common/port-probe.sh"; do
+    [ -f "$_cand" ] && { _PORT_PROBE="$_cand"; break; }
+done
+if [ -n "$_PORT_PROBE" ]; then
+    # shellcheck source=/dev/null
+    SUNSETLINUX_SOURCED=1 . "$_PORT_PROBE"
+else
+    die "缺 port-probe.sh（应与 start.sh 同目录的 common/ 或 ../common/）：端口占用判定无法进行"
+fi
 
 main "$@"

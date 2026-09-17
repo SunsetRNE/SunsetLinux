@@ -256,6 +256,7 @@ function nsenterOptionsInText(text) {
       // （这个洞真出现过：真实代码里全部写成 `"$NSENTER"`，闸门于是空转、变异测试变绿）。
       rest = rest.replace(/^["'](?=\s)/, '');
       let hasTarget = false;
+      let sawDashDash = false;   // 是否已经遇到 `--`（toybox 认它：之后才是命令）
       for (let guard = 0; guard < 32; guard++) {
         // 一个 token 可以是"好几段拼起来的"（`--mount="/proc/…/ns/mnt"`）—— 引号内必须继续吃，
         // 否则 token 在 `--mount=` 处被引号截断，同一行后面的 `--wd=` 永远扫不到
@@ -264,7 +265,27 @@ function nsenterOptionsInText(text) {
         if (!tm) break;
         rest = rest.slice(tm[0].length);
         const bare = tm[1].replace(/^["']|["']$/g, '');
-        if (!bare.startsWith('-')) break;                 // 非选项 = 要被执行的命令，nsenter 参数到此为止
+        if (bare === '--') { sawDashDash = true; continue; }   // `--` 是终止符：之后交给命令
+        if (!bare.startsWith('-')) {
+          // 命令开始了。**toybox 的 nsenter 会把命令之后带 `-` 的字面量参数也当成自己的选项**
+          // （同二进制实测：`… /bin/echo -l` → `Unknown option 'l'`、
+          //  `… /bin/echo --port 3080` → `Unknown option 'port'`）⇒ 整条命令不执行。
+          // 2026-09-18 真机因此连坏三处：`dsh start`（尾部 `--port`）、终端 attach/exec、
+          // stop 里的 `umount -l/-f`（卸载根本没执行 → "残留挂载"反复出现）。
+          // 判据只认**字面量**的 `-x`/`--xx`：`"$@"` 这种不透明参数判不了，也不该猜。
+          const looksLikeCommand = /^["']?[A-Za-z0-9_./$@{}-]+["']?$/.test(bare);
+          if (!sawDashDash && looksLikeCommand && /(^|\s)["']?--?[A-Za-z]/.test(rest)) {
+            hits.push({
+              line,
+              text: whole.trim().slice(0, 160),
+              why: 'nsenter 的命令前必须写 `--`：设备上 nsenter 是 toybox（0.8.12-android 实测），' +
+                   '它会把命令之后的字面量选项也当成自己的（`… /bin/echo -l` → `Unknown option \'l\'`）' +
+                   '⇒ **整条命令不执行**。正确写法：`nsenter --mount=… --uts=… -- chroot …`；' +
+                   'stop 里的 `umount -l/-f` 同理。',
+            });
+          }
+          break;                                          // nsenter 参数到此为止
+        }
         const eq = bare.indexOf('=');
         const name = eq === -1 ? bare : bare.slice(0, eq);
         const hasValue = eq !== -1;
@@ -289,7 +310,16 @@ function nsenterOptionsInText(text) {
           });
           break;
         }
-        if (name === '-t' || name === '--target') { hasTarget = true; continue; }
+        if (name === '-t' || name === '--target') {
+          hasTarget = true;
+          if (!hasValue) {
+            // `-t 1234`：空格形式的取值也要吃掉，否则 PID 会被当成"命令"，
+            // 后面 legit 的 `-m -u` 就会被误报成"命令后的选项"（闸门自检抓到过）。
+            const vm = /^\s+((?:"[^"]*"|'[^']*'|[^\s"'])+)/.exec(rest);
+            if (vm) rest = rest.slice(vm[0].length);
+          }
+          continue;
+        }
         if (NSENTER_PATH_OPTS.has(name) && !hasValue && !hasTarget) {
           hits.push({
             line,
@@ -325,10 +355,14 @@ const NSENTER_FIXTURES = [
     text: '"$NSENTER" --mount "/proc/1/ns/mnt" /bin/true' },
   { bad: true, why: '续行拆开的 --wd（逐行扫会漏）',
     text: '"$NSENTER" --mount="/proc/1/ns/mnt" \\\n    --wd=/data/x chroot /data/x /bin/true' },
-  { bad: false, why: '真实用法（linuxctl attach/exec）',
+  { bad: true, why: '命令前没有 `--`（旧写法：设备上必然 `Unknown option`）',
     text: '"$NSENTER" --mount="/proc/$nspid/ns/mnt" --uts="/proc/$nspid/ns/uts" \\\n     chroot "$ROOTFS_DIR" /usr/bin/env -i HOME=/root "$@"' },
-  { bad: false, why: '真实用法（stop.sh：后面跟 umount 的 -l，不能误报）',
+  { bad: true, why: 'stop 的 umount -l 少了 `--`（旧写法：卸载根本没执行）',
     text: '"$NSENTER" --mount="/proc/$NSPID/ns/mnt" "$UMOUNT" -l "$target" 2>/dev/null && return 0' },
+  { bad: false, why: '修好后的 attach/exec（命令前有 `--`）',
+    text: '"$NSENTER" --mount="/proc/$nspid/ns/mnt" --uts="/proc/$nspid/ns/uts" \\\n     -- chroot "$ROOTFS_DIR" /usr/bin/env -i HOME=/root "$@"' },
+  { bad: false, why: '修好后的 umount -l（命令前有 `--`）',
+    text: '"$NSENTER" --mount="/proc/$NSPID/ns/mnt" -- "$UMOUNT" -l "$target" 2>/dev/null && return 0' },
   { bad: false, why: '-t PID + 裸 ns 选项（toybox 认）', text: 'nsenter -t 1234 -m -u -i -p -n /bin/true' },
   { bad: false, why: '注释里提到 --wd', text: '# 修法：把 --wd="$ROOTFS_DIR" 删掉（toybox 没有 cwd 选项）' },
 ];

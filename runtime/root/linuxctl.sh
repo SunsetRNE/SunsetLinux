@@ -80,6 +80,11 @@ else
 fi
 # 环境内进程的识别/清理（判据是 /proc/<pid>/root）——`dsh start|stop` 与 stop.sh 共用一份。
 # 找不到时**不致命**：dsh stop 仍能按 run/dsh.pid 精确补刀，只是少了"pid 文件丢了"的兜底。
+# 端口探测（port_busy）：`dsh start` 在端口被占时要让路 —— 与 start.sh 共用一份实现。
+if [ -f "$COMMON_DIR/port-probe.sh" ]; then
+    # shellcheck source=/dev/null
+    SUNSETLINUX_SOURCED=1 . "$COMMON_DIR/port-probe.sh"
+fi
 if [ -f "$COMMON_DIR/env-procs.sh" ]; then
     # shellcheck source=/dev/null
     SUNSETLINUX_SOURCED=1 . "$COMMON_DIR/env-procs.sh"
@@ -163,6 +168,17 @@ LAYER_NAMES="base runtime dsh"
 UMOUNT=/system/bin/umount
 MOUNT=/system/bin/mount
 NSENTER=/system/bin/nsenter
+# ★★ toybox 的 nsenter 会**一路解析到命令之后的每一个选项**（2026-09-18 真机 + 同二进制实测）：
+#      nsenter --mount=X /bin/echo --port 3080   →  Unknown option 'port'
+#      nsenter --mount=X /bin/echo -l            →  Unknown option 'l'      ← 短选项同样中招
+#      nsenter --mount=X -- /bin/echo --port 3080 → ✅（`--` 之后才真正交给命令）
+#   后果不是降级、是**整条命令不执行**。真机上因此连坏三处：
+#      · `dsh start`（命令尾部是 `supervise.sh --port N`）→ DSH 永远起不来（用户报的正是这个）；
+#      · 终端 attach/exec（用户命令带 `-l`/`-c`/`--xx`）→ 任何带选项的命令都失败；
+#      · stop/清理里的 `umount -l` → 卸载根本没执行（于是"残留挂载"反复出现）。
+#   ⇒ **所有** nsenter 调用必须在命令前写一个 `--`。回归闸门：
+#      tools/shell-compat-check.mjs（静态：nsenter 后必须出现 `--`）+
+#      runtime/root/selftest.sh「nsenter 的选项面」（行为级：拿设备真二进制跑上面三条）。
 
 # ---------------------------------------------------------------------------
 # 日志：一律 stderr（stdout 留给 JSON）
@@ -321,6 +337,21 @@ resume_start_like_before() { # resume_start_like_before <旧 env-mode>
     esac
 }
 
+# 等 dsh.pid 出现（supervise.sh 后台起完 dsh 会立刻写它）。
+#   为什么需要："起不来"与"起来了但没打印 URL"是两件完全不同的事，报错也完全不同：
+#   前者要去看 nsenter/chroot（例如真机上 `nsenter: Unknown option 'port'` 就是整条没执行），
+#   后者才是 DSH 自己起不来（端口被占、profile 缺失…）。2026-09-18 真机上因为只有后者那句，
+#   用户看到的是"20s 内没有打印登录 URL"，而真相是命令压根没被执行。
+wait_dsh_pid() { # wait_dsh_pid <秒>
+    local i=0 n=$((${1:-6} * 5))
+    while [ "$i" -lt "$n" ]; do
+        [ -s "$DSH_PID_FILE" ] && dsh_pid_alive >/dev/null 2>&1 && return 0
+        sleep 0.2
+        i=$(( i + 1 ))
+    done
+    return 1
+}
+
 # 等带令牌的登录 URL（supervise.sh 抓到 `dsh web: ` 那一行后写 run/dsh.url）
 wait_dsh_url() { # wait_dsh_url <秒>
     local i=0 n=$((${1:-20} * 5))
@@ -351,15 +382,18 @@ spawn_dsh_in_env() { # spawn_dsh_in_env <port>
     done
     [ -n "$sid" ] || warnl "找不到 setsid：DSH 可能随这次 su 会话一起被挂断"
     if [ -n "$sid" ]; then
+        # ★ `--` 不能省：没有它，toybox nsenter 会把命令尾部的 `--port` 当成自己的选项
+        # （真机原话 `nsenter: Unknown option 'port'`），DSH 根本没被拉起来 —— 而报错
+        # 只落在 run/linux.log 里，用户看到的是"20s 内没有打印登录 URL"这种**误导性**结论。
         "$sid" "$NSENTER" --mount="/proc/$nspid/ns/mnt" --uts="/proc/$nspid/ns/uts" \
-            chroot "$ROOTFS_DIR" /usr/bin/env -i \
+            -- chroot "$ROOTFS_DIR" /usr/bin/env -i \
             HOME=/root DSH_HOME=/root/.dsh \
             PATH=/opt/node/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
             TERM="${TERM:-xterm-256color}" LANG="${LANG:-C.UTF-8}" \
             /opt/sunsetlinux/supervise.sh --port "$port" >>"$LOGFILE" 2>&1 </dev/null &
     else
         "$NSENTER" --mount="/proc/$nspid/ns/mnt" --uts="/proc/$nspid/ns/uts" \
-            chroot "$ROOTFS_DIR" /usr/bin/env -i \
+            -- chroot "$ROOTFS_DIR" /usr/bin/env -i \
             HOME=/root DSH_HOME=/root/.dsh \
             PATH=/opt/node/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
             TERM="${TERM:-xterm-256color}" LANG="${LANG:-C.UTF-8}" \
@@ -842,10 +876,12 @@ builtin_stop() {
         if [ -x "$NSENTER" ]; then
             local rel
             for rel in mnt/sdcard run tmp dev/shm dev/pts dev sys proc; do
-                "$NSENTER" --mount="/proc/$nspid/ns/mnt" "$UMOUNT" -l "$ROOTFS_DIR/$rel" 2>/dev/null || true
+                # `--` 之后才是 umount 与它的 `-l`：toybox nsenter 会把 `-l` 当成自己的选项，
+                # 没有 `--` 时**卸载根本没执行**（真机上"残留挂载"反复出现的根因之一）。
+                "$NSENTER" --mount="/proc/$nspid/ns/mnt" -- "$UMOUNT" -l "$ROOTFS_DIR/$rel" 2>/dev/null || true
             done
-            "$NSENTER" --mount="/proc/$nspid/ns/mnt" "$UMOUNT" -l "$ROOTFS_DIR" 2>/dev/null || true
-            "$NSENTER" --mount="/proc/$nspid/ns/mnt" "$UMOUNT" -l "$UPPER_DIR" 2>/dev/null || true
+            "$NSENTER" --mount="/proc/$nspid/ns/mnt" -- "$UMOUNT" -l "$ROOTFS_DIR" 2>/dev/null || true
+            "$NSENTER" --mount="/proc/$nspid/ns/mnt" -- "$UMOUNT" -l "$UPPER_DIR" 2>/dev/null || true
         fi
         for rel in layers-mnt/dsh layers-mnt/runtime layers-mnt/base; do
             "$UMOUNT" -l "$LH/$rel" 2>/dev/null || true
@@ -901,14 +937,14 @@ run_in_env() {
         # --mount/--uts 进入环境 ns；chroot 用宿主二进制（静态路径已在 ns 内可见）
         if [ "$interactive" = 1 ]; then
             exec "$NSENTER" --mount="/proc/$nspid/ns/mnt" --uts="/proc/$nspid/ns/uts" \
-                 chroot "$ROOTFS_DIR" /usr/bin/env -i \
+                 -- chroot "$ROOTFS_DIR" /usr/bin/env -i \
                  HOME=/root DSH_HOME=/root/.dsh \
                  PATH=/opt/node/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
                  TERM="${TERM:-xterm-256color}" LANG="${LANG:-C.UTF-8}" \
                  "$@"
         else
             "$NSENTER" --mount="/proc/$nspid/ns/mnt" --uts="/proc/$nspid/ns/uts" \
-                 chroot "$ROOTFS_DIR" /usr/bin/env -i \
+                 -- chroot "$ROOTFS_DIR" /usr/bin/env -i \
                  HOME=/root DSH_HOME=/root/.dsh \
                  PATH=/opt/node/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
                  TERM="${TERM:-xterm-256color}" LANG="${LANG:-C.UTF-8}" \
@@ -1831,10 +1867,30 @@ cmd_dsh_start() {
         return 0
     fi
 
+    # 端口被占就让路：真机上"另一个环境"（免 root 的 DSHA）会占着 3080，
+    #   此时若照原端口起，DSH 会 bind 失败 → 用户看到"起不来"却不知道为什么。
+    #   让路后实际端口由 supervise.sh 写进 run/dsh.port（登录 URL 里也带真实端口），
+    #   App 读的是 URL/端口文件，因此换端口对上层是透明的。
+    if command -v port_pick_free >/dev/null 2>&1; then
+        local _want="$port"
+        port="$(port_pick_free "$_want")"
+        [ "$port" != "$_want" ] && warnl "端口 $_want 被占用 → DSH 改用 $port（占用者可能是另一个环境）"
+    fi
+
     rm -f "$ERROR_FILE" "$DSH_PID_FILE" "$DSH_URL_FILE" "$DSH_PORT_FILE" 2>/dev/null || true
     log "在环境内启动 DSH（port=$port）"
     if ! spawn_dsh_in_env "$port"; then
         local msg="DSH 启动失败：进不去环境（nsenter/chroot 不可用）"
+        printf '%s\n' "$msg" > "$ERROR_FILE" 2>/dev/null || true
+        log "ERROR: $msg"
+        gather_status
+        DSH_ST_LAST_ERROR="$msg"
+        emit "$(dsh_status_json)"
+        return 1
+    fi
+    if ! wait_dsh_pid 6; then
+        # 连 pid 都没出现 = 那条 nsenter/chroot 命令没跑起来（或 supervise.sh 立刻退了）
+        local msg="DSH 没起来：进不去环境或 supervise.sh 立刻退出 —— 看 $LOGFILE 末尾（常见：nsenter 选项、DSH 层/profile 缺失、端口被占）"
         printf '%s\n' "$msg" > "$ERROR_FILE" 2>/dev/null || true
         log "ERROR: $msg"
         gather_status

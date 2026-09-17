@@ -1143,9 +1143,37 @@ if [ -x /system/bin/nsenter ]; then
             bad "设备 nsenter 不接受我们用的写法（--mount=/path --uts=/path）：$_ns_err" ;;
         *) ok "设备 nsenter 接受 --mount=/path --uts=/path（$(printf '%s' "$_ns_err" | head -n1)）" ;;
     esac
+    # ★ 2026-09-18 真机第三起：`dsh start` 永远失败，日志只有一句
+    #   `nsenter: Unknown option 'port'` —— 因为 toybox 会把**命令之后**的选项也当成自己的。
+    #   下面两条是**行为级**证据（拿设备真二进制跑），静态闸门见 shell-compat-check.mjs。
+    # 二进制走变量：本行是**故意复刻错误写法**的探针，不该被静态闸门当成生产调用
+    # （闸门扫的是字面量 `nsenter`/`$NSENTER`，这里两者都不出现）。
+    _NS=/system/bin/nsenter
+    _ns_after="$("$_NS" --mount="/proc/$$/ns/mnt" /system/bin/echo -l 2>&1 >/dev/null | grep -v "^WARNING: linker" || true)"
+    case "$_ns_after" in
+        *"Unknown option"*) ok "设备 nsenter 会吞掉命令后的选项（-l → $(printf '%s' "$_ns_after" | head -n1)）" ;;
+        *) bad "设备 nsenter 没吞命令后的 -l：本组判据要重写（$_ns_after）" ;;
+    esac
+    _ns_dash="$("$_NS" --mount="/proc/$$/ns/mnt" -- /system/bin/echo -l 2>&1 >/dev/null || true)"
+    case "$_ns_dash" in
+        *"Unknown option"*) bad "命令前写了 -- 仍报未知选项（解药失效）：$_ns_dash" ;;
+        *) ok "命令前写 -- 后不再报未知选项（这就是三处调用的修法）" ;;
+    esac
 else
     skip_ "本机没有 /system/bin/nsenter（CI/开发机正常）"
 fi
+
+# 静态：我们自己的 nsenter 调用必须在命令前写 `--`（判据：逻辑行里出现 `-- `）。
+# 为什么连这个也测：`--` 少一个，设备上不是降级而是**整条命令不执行**，
+# 而报错只有一行落在 run/linux.log 里 —— 真机上已经因此连坏三处（dsh start / 终端 / stop 的 umount）。
+for _f in "$SELF_DIR/linuxctl.sh" "$SELF_DIR/stop.sh"; do
+    _miss="$(awk '/NSENTER" --mount=/{ l=$0; while (l ~ /\\$/) { getline n; l = l " " n } if (l !~ /-- /) print NR }' "$_f" 2>/dev/null | tr '\n' ' ')"
+    if [ -z "$_miss" ]; then
+        ok "$(basename "$_f")：每处 nsenter 调用都在命令前写了 --"
+    else
+        bad "$(basename "$_f")：这些行的 nsenter 少了 --（第 $_miss 行）—— 设备上会整条不执行"
+    fi
+done
 
 printf '\n=========================================\n'
 printf '  通过 %d，失败 %d\n' "$pass" "$fail"

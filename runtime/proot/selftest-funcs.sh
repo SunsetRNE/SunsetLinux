@@ -153,7 +153,10 @@ head_ "端口探测 port_open_local / port_busy（原来是 bash 的 /dev/tcp）
 extract "$TMP/port.sh" "$LINUXCTL" is_uint tcp_listen_local port_open_local
 # shellcheck disable=SC1090
 . "$TMP/port.sh"
-extract "$TMP/port-root.sh" "$ROOT_START" tcp_listen_local port_busy
+# root 版这两个函数已抽到 runtime/common/port-probe.sh（与 linuxctl 共用）——
+# 抽取目标跟着搬，测的仍是**真正会跑的那份实现**。
+COMMON_PORT="$SELF_DIR/../common/port-probe.sh"
+extract "$TMP/port-root.sh" "$COMMON_PORT" tcp_listen_local port_busy port_pick_free
 
 # root 版的 port_busy 与这里同名，放到子 shell 里测，避免互相覆盖
 root_port_busy() { ( . "$TMP/port-root.sh" 2>/dev/null; port_busy "${1-}" ); }
@@ -196,6 +199,19 @@ else
     bad "端口 $PORT 起了监听，port_open_local 仍判为关闭（/proc/net/tcp 解析坏了？）"
   fi
   if root_port_busy "$PORT"; then ok "root 版 port_busy 同样判为占用"; else bad "root 版 port_busy 判为空闲"; fi
+
+  # port_pick_free：端口被占时让路（真机现场：免 root 的 DSHA 占着 3080）。
+  # 这里用**桩**替换 port_busy，判据与端口可见性无关 ⇒ CI/沙箱/真机结果一致。
+  pick() { ( . "$TMP/port-root.sh" 2>/dev/null; port_busy() { case "$1" in 3080|3081|3082) return 0 ;; *) return 1 ;; esac; }; port_pick_free "$1" ); }
+  got="$(pick 3080)"
+  if [ "$got" = "3083" ]; then ok "port_pick_free：3080~3082 全被占 → 让到 3083"
+  else bad "port_pick_free 让路结果不对：得到 $got（期望 3083）"; fi
+  got="$(pick 4000)"
+  if [ "$got" = "4000" ]; then ok "port_pick_free：端口空闲 → 原样返回"
+  else bad "port_pick_free 空闲时改了口：得到 $got（期望 4000）"; fi
+  got="$( ( . "$TMP/port-root.sh" 2>/dev/null; port_busy() { return 0; }; port_pick_free 3080 5 ) )"
+  if [ "$got" = "3080" ]; then ok "port_pick_free：找不到空闲端口 → 原样返回首选值（不编造）"
+  else bad "port_pick_free 兜底不对：得到 $got（期望 3080）"; fi
   # 前导 0：`printf '%04X' 03080` 会按八进制解释（→ 错误端口），所以要归一化后再算
   if port_open_local "0$PORT"; then ok "前导 0 的端口写法同样识别（不当成八进制）"; else bad "带前导 0 的端口没被识别"; fi
   kill "$LPID" 2>/dev/null

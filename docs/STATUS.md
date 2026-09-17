@@ -503,6 +503,61 @@ su -c '/data/sunsetlinux/bin/linuxctl doctor'
 | 已装状态读不到时 | —— | **不给刷入按钮**，先让用户修 root 授权（与"读不到 ≠ 没装"一致） |
 | 重启 | —— | 只报告"重启后生效"（KernelSU 落 `modules_update/`），**App 不替用户重启**，脚本里有单测断言不许出现 `reboot` |
 
+### 3.10.40 toybox nsenter 会吃掉**命令之后**的选项 ⇒ `dsh start` / 终端 / stop 的卸载全坏（模块 1.0.32）
+
+**真机（2026-09-18 02:00）**：环境按「仅环境」起来了、状态卡也承认"DSH 未启动"，但点「启动 DSH」永远起不来；
+`run/last-error` 是那句**误导性**的「DSH 进程已拉起，但 20s 内没有打印带令牌的登录 URL」，
+而 `run/linux.log` 末尾只有一行：
+
+```
+[entry.sh] entry.sh 就绪：--no-dsh（…要起 DSH 用 linuxctl dsh start）
+nsenter: Unknown option 'port' (see "nsenter --help")
+```
+
+**根因**（同二进制实测，不是推测）：设备上的 nsenter 是 **toybox 0.8.12-android**，它会把
+**命令之后的每一个选项也当成自己的**：
+
+| 写法（同一台机、同一个二进制） | 结果 |
+|---|---|
+| `nsenter --mount=X /bin/echo --port 3080` | `Unknown option 'port'` ← 真机那条 |
+| `nsenter --mount=X /bin/echo -l` | `Unknown option 'l'` ← **短选项同样中招** |
+| `nsenter --mount=X -- /bin/echo --port 3080` | ✅ 不再报选项错（`--` 是终止符） |
+
+所以这不是 DSH 的问题，而是**所有把选项写在命令后面**的调用都"整条不执行"。真机上连坏三处：
+
+| 受害点 | 症状 |
+|---|---|
+| `linuxctl dsh start` → `spawn_dsh_in_env` 的 `supervise.sh --port N` | DSH 从来没被拉起来，用户只看到"没 URL" |
+| 终端 `attach` / `exec`（`run_in_env`）里用户命令带 `-l`/`-c`/`--xx` | 第 41 轮删掉 `--wd=` 只是清了**我们自己的**选项；用户命令的选项照样被吞 |
+| `stop.sh` / `linuxctl` 清理里的 `umount -l` / `-f` | **卸载根本没执行**（于是"残留挂载"反复出现、loop 一直被占） |
+
+**修法**：
+
+- **8 处调用全部在命令前补 `--`**（`linuxctl` 的 spawn×2、`run_in_env`×2、ns 内卸载×3，`stop.sh` 的
+  `umount -l`/`-f`×2），并在 `NSENTER=` 附近写清 toybox 行为与实测表；`stop.sh` 里**教用户敲的那句**
+  `nsenter … umount -l` 也补上 `--`（原文案本身就是坏的）。
+- **端口被占自动让路**（真机现场：免 root 的 DSHA 占着 `127.0.0.1:3080`）：**两个入口**都让路 ——
+  一键启动在 `start.sh` 传给 `entry.sh` 之前选端口（这条路上端口是在那里定死的），
+  分步启动在 `linuxctl dsh start`；两者共用 `port_pick_free`（在 `port-probe.sh` 里，找不到空闲端口就
+  原样返回首选值，**不编造**）。实际端口由 `supervise.sh` 写进 `run/dsh.port`（登录 URL 里也带真实端口，
+  App 读 URL）⇒ 换端口对上层透明。**"端口被占"不再等于"起不来"**。
+- **失败文案分家**：新增 `wait_dsh_pid`（6s）——连 `dsh.pid` 都没出现 = "进不去环境/supervise 立刻退出"，
+  只有 pid 出现了才可能是"20s 没 URL"。以前两者共用后一句，把"命令压根没执行"报成了"DSH 启动慢"。
+- **端口判据抽成 `runtime/common/port-probe.sh`**（`tcp_listen_local` / `port_busy`）：`start.sh` 与
+  `linuxctl` 共用一份（原来只存在于 `start.sh`，`linuxctl` 里没有 → 又一次"同一判断两处各写一遍"的前夜）；
+  `module/mkmodule.sh` 的 `BIN_COMMON` 已带上它；proot 自测的抽取目标同步改指新库。
+
+**回归（两道闸门，都会红）**：
+
+- `tools/shell-compat-check.mjs`：新增"**命令前必须有 `--`**"规则（只认字面量选项，`"$@"` 这种不透明参数不猜；
+  `-t PID` 的取值不再被误当成命令）；**闸门自检夹具**里原来标着"真实用法（不能误报）"的两条
+  （`chroot … "$@"`、`"$UMOUNT" -l`）现在都是 `bad: true` —— 它们正是真机上必然失败的老写法，
+  另加两条修好后的形状做反例。
+- `runtime/root/selftest.sh`：设备上有 `/system/bin/nsenter` 时**行为级**跑实测三条（吞 `-l` / `--` 解药），
+  外加**静态**断言"`linuxctl.sh` 与 `stop.sh` 里每处 nsenter 调用都写了 `--`"。本机 86/0。
+- `runtime/proot/selftest-funcs.sh`：`port_pick_free` 三条**桩测**（3080~3082 全占 → 让到 3083；空闲 → 原样；
+  全占且次数用尽 → 原样返回首选值）—— 用桩替换 `port_busy`，判据与端口可见性无关，CI/沙箱/真机结果一致（81/0）。
+
 ### 3.10.39 流水线优化：把 40 分钟里那 35 分钟的"发布"压下来（1+2+3 + 参数校验 + 没改的不重发）
 
 **先实测，再动手**（用户要求"给选择 + 说清后果"，所以先把每一步的真实耗时拉出来）：

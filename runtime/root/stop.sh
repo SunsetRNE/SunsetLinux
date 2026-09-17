@@ -98,8 +98,10 @@ do_umount() {
     mountpoint -q "$target" 2>/dev/null || return 0
 
     if [ -n "${NSPID:-}" ] && [ -x "$NSENTER" ]; then
-        "$NSENTER" --mount="/proc/$NSPID/ns/mnt" "$UMOUNT" -l "$target" 2>/dev/null && return 0
-        "$NSENTER" --mount="/proc/$NSPID/ns/mnt" "$UMOUNT" -f "$target" 2>/dev/null && return 0
+        # `--` 不能省：toybox 的 nsenter 会把命令后的 `-l`/`-f` 当成自己的选项（真机实测
+            # `Unknown option 'l'`）⇒ 卸载根本没执行，于是"残留挂载"反复出现。
+            "$NSENTER" --mount="/proc/$NSPID/ns/mnt" -- "$UMOUNT" -l "$target" 2>/dev/null && return 0
+        "$NSENTER" --mount="/proc/$NSPID/ns/mnt" -- "$UMOUNT" -f "$target" 2>/dev/null && return 0
     fi
     # 退化：直接卸（对层挂载与 upper 有效，因为它们是在宿主 ns 里挂的）
     "$UMOUNT" -l "$target" 2>/dev/null && return 0
@@ -280,7 +282,7 @@ EOF
     mountpoint -q "$UPPER_DIR" 2>/dev/null && left="$left upper"
     if [ -n "$left" ]; then
         warn "仍有挂载残留：$left"
-        warn "可尝试手动清理：nsenter --mount=/proc/<pid>/ns/mnt umount -l <path>"
+        warn "可尝试手动清理：nsenter --mount=/proc/<pid>/ns/mnt -- umount -l <path>"
         check_loop_leak
         return 1
     fi
