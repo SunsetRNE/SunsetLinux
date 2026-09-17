@@ -15,6 +15,7 @@ import io.github.sunsetrne.sunsetlinux.core.LinuxCtl
 import io.github.sunsetrne.sunsetlinux.core.LogExport
 import io.github.sunsetrne.sunsetlinux.core.Prefs
 import io.github.sunsetrne.sunsetlinux.core.StartControls
+import io.github.sunsetrne.sunsetlinux.core.StartMode
 import io.github.sunsetrne.sunsetlinux.core.TransportSupport
 import io.github.sunsetrne.sunsetlinux.core.UpdateChecker
 import kotlinx.coroutines.Job
@@ -76,6 +77,14 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
         val logError: String? = null,
         val exporting: Boolean = false,
         val zstdReason: String? = null,
+        /**
+         * 用户持久化的启动方式偏好（一键启动 / 分步启动）。
+         *
+         * 这里只是"用户选的那一档"；**界面实际显示哪一组**由纯函数
+         * [io.github.sunsetrne.sunsetlinux.core.resolveStartMode] 结合 status 的
+         * `env_mode` 算出来（运行中会被强制锁定，理由见 `core/StartModeUi.kt`）。
+         */
+        val startMode: StartMode = StartMode.ONE_SHOT,
     ) {
         val state: EnvState get() = status?.state ?: EnvState.UNKNOWN
         val canOpenWeb: Boolean get() = status?.canOpenWeb == true
@@ -116,7 +125,7 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
     private var lastUpdateCheckAt = 0L
 
     init {
-        _ui.update { it.copy(logAutoFollow = prefs.logAutoFollow) }
+        _ui.update { it.copy(logAutoFollow = prefs.logAutoFollow, startMode = prefs.startMode) }
         // zstd 能力探测（磁盘 IO）放到 IO 线程，别占冷启动首帧
         viewModelScope.launch {
             val reason = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
@@ -267,6 +276,17 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
     fun setLogAutoFollow(enabled: Boolean) {
         prefs.logAutoFollow = enabled
         _ui.update { it.copy(logAutoFollow = enabled) }
+    }
+
+    /**
+     * 记住用户选的启动方式（一键 / 分步）。
+     *
+     * **不做锁定判断**：运行中"切换不可点"由界面按 [io.github.sunsetrne.sunsetlinux.core.isStartModeLocked]
+     * 置灰（那是纯函数、有单测）。这里再判一次就等于第二份判定 —— 只在调用点判，口径唯一。
+     */
+    fun setStartMode(mode: StartMode) {
+        prefs.startMode = mode
+        _ui.update { it.copy(startMode = mode) }
     }
 
     /** 手动刷新（下拉/按钮），会重新探测 su（免 root 版不探，见 [refresh]）。 */

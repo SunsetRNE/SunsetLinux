@@ -463,14 +463,18 @@ Node 服务）本来就是两层东西，但 `linuxctl start` 一直把它们绑
 - 技术：Kotlin + Jetpack Compose + Material 3（深色优先）。
 - 与 Linux 侧唯一接口：调用 `linuxctl`（root 模式经 `su -c`）并解析 §3.1 的 JSON。
 - 组件：
-  - `LauncherActivity`：Compose 首页 —— 状态卡（模式/状态/URL/运行时长/启动方式）、启动区
-    （**一键启动 / 仅启动环境 / 启动 DSH / 停止 DSH / 停止环境** 五个按钮，启用矩阵见 §3.4；
-    仅 Root 版显示后四个）、「打开 DSH」按钮（WebView）、更新角标。
-    ★ 按钮的启用判定是 `core/StartControls.kt` 里的**纯函数**（`state` × `env_mode` ×
-    `dsh.running`），界面只负责画：判定错一格在界面上完全看不出来，必须能被 JVM 单测穷举。
+  - `LauncherActivity`：Compose 首页 —— **操作卡置顶**（一键启动 / 分步启动 **二选一**：一键档 = 「一键启动
+    （环境 + DSH）」+「停止环境」；分步档 = 「仅启动环境 / 停止环境 / 启动 DSH / 停止 DSH」。运行中按
+    `env_mode` 锁定切换，判不了就不编造）、状态卡（模式/状态/URL/运行时长/启动方式）、「打开 DSH」按钮
+    （WebView）、更新角标。
+    ★ 显示哪一组由 `core/StartModeUi.kt` 的纯函数决定，而**每个按钮的亮/灰只来自
+    `core/StartControls.kt`** —— 判定错一格在界面上完全看不出来，必须能被 JVM 单测穷举。
   - `DshWebActivity`：WebView 加载 `status.dsh.url`；提供"在浏览器打开"。
   - 终端页：`linuxctl attach`（nsenter + chroot）进环境，**与 DSH 无关** ——
     `env_mode=env-only`（DSH 没起）时照常可用；环境没跑时页面给出「仅启动环境」入口。
+    底部留 `CapsuleReserve` 避让悬浮胶囊；**权限行/身份行随 mode 与连接态自动变**
+    （`core/TerminalStatusUi.kt`）：Root 版讲真 root + nsenter/chroot 路径，免 root 版讲
+    "proot 伪造的 root（没有真实权限）"；身份行**连上才出现**，未连接不显示、不编造。
   - `LinuxService`：前台服务（Android 14+ 用 `specialUse` 类型）+ `PARTIAL_WAKE_LOCK`；
     通知含 启动/停止/重启/打开 四个 action。
   - `ProvisionActivity`：首次部署向导（选模式、选频道、下载层、进度）。

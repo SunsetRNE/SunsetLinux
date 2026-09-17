@@ -118,9 +118,18 @@ class ShellLayoutContractTest {
         // 代码里必须留下"这是刻意的取舍"，避免后人把它当成 bug 去修一半。
         val session = read(terminalSession)
         assertTrue("TerminalSession.kt 要写明没有 PTY（行缓冲、无作业控制）", session.contains("PTY"))
+        // 文案本身后来搬到了 core/TerminalStatusUi.kt（为的是"跟着 mode/连接态自动变"
+        // 并且能单测）：断言跟着搬，而不是留一条"因为重构就假失败"的旧断言 ——
+        // 假失败最后总会被删掉，契约也就没了。
+        val statusUi = File(srcDir, "core/TerminalStatusUi.kt")
+        assertTrue("core/TerminalStatusUi.kt 不存在？", statusUi.isFile)
         assertTrue(
-            "界面上也要有这条提示（终端页的空状态里）",
-            read(terminalPane).contains("vim"),
+            "引擎行里要提 vim / htop 这类全屏程序（用户会理所当然以为能跑）",
+            statusUi.readText().contains("vim"),
+        )
+        assertTrue(
+            "光有文案不够：终端页的空态必须真的把它渲染出来",
+            read(terminalPane).contains("TerminalStatusUi.engineLine("),
         )
     }
 }

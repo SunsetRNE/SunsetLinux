@@ -1,6 +1,8 @@
 package io.github.sunsetrne.sunsetlinux.ui
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -38,9 +40,12 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import io.github.sunsetrne.sunsetlinux.ui.components.CapsuleReserve
@@ -50,7 +55,11 @@ import io.github.sunsetrne.sunsetlinux.core.EnvMode
 import io.github.sunsetrne.sunsetlinux.core.EnvState
 import io.github.sunsetrne.sunsetlinux.core.Hint
 import io.github.sunsetrne.sunsetlinux.core.HintTarget
+import io.github.sunsetrne.sunsetlinux.core.StartMode
 import io.github.sunsetrne.sunsetlinux.core.formatBytes
+import io.github.sunsetrne.sunsetlinux.core.isStartModeLocked
+import io.github.sunsetrne.sunsetlinux.core.resolveStartMode
+import io.github.sunsetrne.sunsetlinux.core.startModeLockNote
 import io.github.sunsetrne.sunsetlinux.ui.components.ActionTile
 import io.github.sunsetrne.sunsetlinux.ui.components.DshCard
 import io.github.sunsetrne.sunsetlinux.ui.components.InfoRow
@@ -66,6 +75,7 @@ import io.github.sunsetrne.sunsetlinux.ui.theme.Mono2
 import io.github.sunsetrne.sunsetlinux.ui.theme.OnAccent
 import io.github.sunsetrne.sunsetlinux.ui.theme.MonoFamily
 import io.github.sunsetrne.sunsetlinux.ui.theme.Danger
+import io.github.sunsetrne.sunsetlinux.ui.theme.Line
 import io.github.sunsetrne.sunsetlinux.ui.theme.TextSecondary
 import io.github.sunsetrne.sunsetlinux.ui.theme.StateRunning
 import io.github.sunsetrne.sunsetlinux.ui.theme.TextMuted
@@ -76,10 +86,14 @@ import io.github.sunsetrne.sunsetlinux.ui.theme.TextSecondary
 import io.github.sunsetrne.sunsetlinux.ui.theme.stateColor
 
 /**
- * 启动页：**四段式卡片**（状态 → 地址 → 日志 → 操作）。
+ * 启动页：**四段式卡片**（操作 → 状态 → 地址 → 日志）。
  *
  * 参考实现把功能塞进抽屉、把日志藏起来，结果"启动失败时用户无从下手"。
  * 这里反过来：状态与日志永远在首屏，失败时直接给出可点的下一步。
+ *
+ * ★ 2026-09 真机批注：**「操作」卡整块移到最顶部**。原先它在最下面（日志之后），
+ *   首屏要滚到底才能点「一键启动」，而"启动"是这个 App 最常做的一件事。
+ *   只换顺序，四段各自的内容不动；卡内新增"一键启动 / 分步启动"切换见下方注释。
  */
 @Composable
 fun LauncherHomePane(
@@ -107,7 +121,22 @@ fun LauncherHomePane(
     ) {
         Spacer(Modifier.height(8.dp))
 
-        // ── ① 状态卡 ──────────────────────────────────────────────
+        // ── ① 操作卡（★ 真机批注：整块移到最顶部）──────────────────
+        //
+        // "启动"是这个 App 最高频的动作，没有理由让人先滚过三段只读信息才够到它。
+        // 卡内仍然只有一份启用判定（core 的 StartControls 纯函数），这里只负责画。
+        OperationCard(
+            ui = ui,
+            vm = vm,
+            onOpenWeb = onOpenWeb,
+            onOpenProvision = onOpenProvision,
+            onOpenUpdates = onOpenUpdates,
+            onOpenDiagnostics = onOpenDiagnostics,
+        )
+
+        Spacer(Modifier.height(12.dp))
+
+        // ── ② 状态卡 ──────────────────────────────────────────────
         DshCard(
             modifier = Modifier.fillMaxWidth(),
             // 单色下没有红色抢注意力：错误/未知态改用**加亮的描边**把卡片顶出来
@@ -244,7 +273,7 @@ fun LauncherHomePane(
 
         Spacer(Modifier.height(12.dp))
 
-        // ── ② 地址卡 ──────────────────────────────────────────────
+        // ── ③ 地址卡 ──────────────────────────────────────────────
         DshCard(Modifier.fillMaxWidth()) {
             Column(Modifier.fillMaxWidth()) {
                 SectionLabel("访问地址")
@@ -323,7 +352,7 @@ fun LauncherHomePane(
 
         Spacer(Modifier.height(12.dp))
 
-        // ── ③ 日志卡（常显 220dp）──────────────────────────────────
+        // ── ④ 日志卡（常显 220dp）──────────────────────────────────
         DshCard(Modifier.fillMaxWidth()) {
             Column(Modifier.fillMaxWidth()) {
                 LogPanel(
@@ -342,164 +371,6 @@ fun LauncherHomePane(
             }
         }
 
-        Spacer(Modifier.height(12.dp))
-
-        // ── ④ 操作卡 ──────────────────────────────────────────────
-        DshCard(Modifier.fillMaxWidth()) {
-            Column(Modifier.fillMaxWidth()) {
-                SectionLabel("操作")
-                Spacer(Modifier.height(12.dp))
-
-                val running = ui.state == EnvState.RUNNING
-                val transitional = ui.state == EnvState.STARTING || ui.state == EnvState.STOPPING
-                val notProvisioned = ui.provisioned == false
-                // 启用矩阵来自 core 的纯函数（StartControls）：面板只画，判定不许有第二份。
-                // busy / 过渡态是"临时不可点"，属于界面这一层，所以单独叠加。
-                val controls = ui.controls
-                val busy = ui.busy || transitional
-
-                if (Edition.showsSplitStartUi) {
-                    // ── Root 版：一键启动 vs 拆开启动**互斥**（矩阵见 StartControls）
-                    //
-                    // 为什么"一键启动"在运行中也保持这个标签（而不是像免 root 版那样
-                    // 变成「停止环境」）：现在有两条起法，主按钮一变形用户就分不清
-                    // 当前生效的是哪条路。停止环境单独做一张卡片，语义才不会打架。
-                    PrimaryActionButton(
-                        text = if (notProvisioned) "尚未部署环境" else "一键启动（环境 + DSH）",
-                        stopping = false,
-                        brush = BrushStart,
-                        contentColor = OnAccent,
-                        enabled = controls.oneShotEnabled,
-                        busy = busy,
-                        onClick = { vm.start() },
-                    )
-
-                    Spacer(Modifier.height(12.dp))
-                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                        ActionTile(
-                            icon = Icons.Filled.PlayArrow,
-                            label = "仅启动环境",
-                            supporting = when {
-                                ui.state == EnvState.RUNNING -> "环境已在运行"
-                                else -> "不起 DSH，维护用"
-                            },
-                            enabled = controls.startEnvOnlyEnabled && !busy,
-                            onClick = { vm.startEnvOnly() },
-                            modifier = Modifier.weight(1f),
-                        )
-                        ActionTile(
-                            icon = Icons.Filled.Close,
-                            label = "停止环境",
-                            supporting = if (running) "连同 DSH 一起停" else "环境未运行",
-                            enabled = controls.envStopEnabled && !busy,
-                            onClick = { vm.stop() },
-                            modifier = Modifier.weight(1f),
-                        )
-                    }
-
-                    Spacer(Modifier.height(12.dp))
-                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                        ActionTile(
-                            icon = Icons.Filled.PlayArrow,
-                            label = "启动 DSH",
-                            supporting = when {
-                                ui.status?.dshRunning == true -> "DSH 已在运行"
-                                !running -> "先起环境"
-                                else -> "接上 DSH Web"
-                            },
-                            enabled = controls.dshStartEnabled && !busy,
-                            onClick = { vm.dshStart() },
-                            modifier = Modifier.weight(1f),
-                        )
-                        ActionTile(
-                            icon = Icons.Filled.Close,
-                            label = "停止 DSH",
-                            supporting = when {
-                                ui.status?.isEnvOnly != true -> "需「仅环境」方式"
-                                ui.status?.dshRunning == true -> "环境继续运行"
-                                else -> "DSH 未在运行"
-                            },
-                            enabled = controls.dshStopEnabled && !busy,
-                            onClick = { vm.dshStop() },
-                            modifier = Modifier.weight(1f),
-                        )
-                    }
-
-                    // 互斥判定的理由（为什么有的按钮是灰的、下一步该点哪个）直接印在按钮下面。
-                    // 只靠置灰，用户会以为是"还没加载好"而不是"这条路不能走"。
-                    controls.note?.let { note ->
-                        Spacer(Modifier.height(12.dp))
-                        NoticeBar(
-                            text = note,
-                            tone = if (controls.noteIsWarning) WarnTone else MaterialTheme.colorScheme.primary,
-                        )
-                    }
-                } else {
-                    // ── 免 root（proot）版保持原样：环境与 DSH 一体，只有一键启动/停止
-                    val stopping = running || ui.state == EnvState.STOPPING
-                    PrimaryActionButton(
-                        text = when {
-                            notProvisioned -> "尚未部署环境"
-                            stopping -> "停止环境"
-                            else -> "启动环境"
-                        },
-                        stopping = stopping,
-                        brush = if (stopping) BrushStop else BrushStart,
-                        // 启动＝白底黑字；停止＝深底白字
-                        contentColor = if (stopping) TextPrimary else OnAccent,
-                        enabled = !notProvisioned,
-                        busy = busy,
-                        onClick = { if (stopping) vm.stop() else vm.start() },
-                    )
-                }
-
-                Spacer(Modifier.height(12.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    ActionTile(
-                        icon = Icons.Filled.Home,
-                        label = "打开 DSH",
-                        supporting = when {
-                            ui.canOpenWeb -> ui.status?.displayUrl ?: "WebView"
-                            ui.state == EnvState.RUNNING -> "正在获取登录地址…"
-                            else -> "环境未运行"
-                        },
-                        enabled = ui.canOpenWeb,
-                        onClick = onOpenWeb,
-                        modifier = Modifier.weight(1f),
-                    )
-                    ActionTile(
-                        icon = Icons.Filled.Refresh,
-                        label = "更新",
-                        supporting = when {
-                            ui.updateCount > 0 -> "${ui.updateCount} 个层可更新"
-                            ui.updateChecked -> "已是最新"
-                            else -> "未检查"
-                        },
-                        badge = ui.updateCount,
-                        onClick = onOpenUpdates,
-                        modifier = Modifier.weight(1f),
-                    )
-                }
-
-                Spacer(Modifier.height(12.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    ActionTile(
-                        icon = Icons.Filled.Build,
-                        label = "诊断",
-                        supporting = "doctor 一键自检",
-                        onClick = onOpenDiagnostics,
-                        modifier = Modifier.weight(1f),
-                    )
-                    ActionTile(
-                        icon = Icons.Filled.Info,
-                        label = "部署",
-                        supporting = if (notProvisioned) "需要执行" else "已部署",
-                        onClick = onOpenProvision,
-                        modifier = Modifier.weight(1f),
-                    )
-                }
-            }
-        }
 
         Spacer(Modifier.height(14.dp))
 
@@ -528,6 +399,297 @@ fun LauncherHomePane(
 }
 
 // ────────────────────────────────────────────────────────────── 组件
+
+/**
+ * 「操作」卡（★ 位于页面最顶部）。
+ *
+ * ## 一键启动 / 分步启动：只显示一组
+ *
+ * 五个按钮同时摊开时，用户看到的是一堆灰按钮 + 一句解释，得先读懂矩阵才知道先点哪个。
+ * 这里按 [resolveStartMode] 的结果**只画一组**：
+ *   · [StartMode.ONE_SHOT]：主按钮「一键启动（环境 + DSH）」+「停止环境」；
+ *   · [StartMode.STEPWISE]：仅启动环境 / 启动 DSH / 停止 DSH / 停止环境（2×2）。
+ *
+ * ⚠️ 切换**只决定显示哪一组**：每个按钮的 enabled 仍然全部取自 [ui.controls]
+ * （`StartControls` 纯函数）。这里没有、也不许有第二份"什么时候能点"的判定。
+ *
+ * 免 root 版（[Edition.showsSplitStartUi] == false）**整块不出现**：那台机器上没有
+ * "只起环境"这条路，摆一个切过去只有灰按钮的开关就是在骗人。
+ */
+@Composable
+private fun OperationCard(
+    ui: LauncherViewModel.UiState,
+    vm: LauncherViewModel,
+    onOpenWeb: () -> Unit,
+    onOpenProvision: () -> Unit,
+    onOpenUpdates: () -> Unit,
+    onOpenDiagnostics: () -> Unit,
+) {
+    DshCard(Modifier.fillMaxWidth()) {
+        Column(Modifier.fillMaxWidth()) {
+            SectionLabel("操作")
+
+            val running = ui.state == EnvState.RUNNING
+            val transitional = ui.state == EnvState.STARTING || ui.state == EnvState.STOPPING
+            val notProvisioned = ui.provisioned == false
+            // 启用矩阵来自 core 的纯函数（StartControls）：面板只画，判定不许有第二份。
+            // busy / 过渡态是"临时不可点"，属于界面这一层，所以单独叠加。
+            val controls = ui.controls
+            val busy = ui.busy || transitional
+
+            if (Edition.showsSplitStartUi) {
+                // 实际显示哪一组：环境没跑听用户的；环境在跑按 status 的 env_mode 强制锁定
+                // （纯函数 + 单测，见 core/StartModeUi.kt —— 那里写了"运行中为什么必须锁"）。
+                val shown = resolveStartMode(
+                    envRunning = running,
+                    envMode = ui.status?.envMode,
+                    userChoice = ui.startMode,
+                )
+                // 运行中一律锁住切换：起法在 start 那一刻就定死了，换过去只会看到一组点不动的
+                // 按钮。解锁的唯一办法是「停止环境」——那句话就印在控件下面。
+                val switchLocked = isStartModeLocked(running)
+
+                Spacer(Modifier.height(10.dp))
+                StartModeToggle(
+                    selected = shown,
+                    enabled = !switchLocked,
+                    onSelect = vm::setStartMode,
+                )
+                // 只说"不可点"用户会当成 bug；说到"先停止环境"才是一条走得通的路。
+                startModeLockNote(running, ui.status?.envMode)?.let { note ->
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        text = note,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = WarnTone,
+                    )
+                }
+
+                Spacer(Modifier.height(12.dp))
+                when (shown) {
+                    // ── 一键启动：主按钮 + 停止环境 ──
+                    //
+                    // 为什么"一键启动"这个标签在运行中也不变形（不像免 root 版那样变成
+                    // 「停止环境」）：现在有两条起法，主按钮一变形用户就分不清当前生效的是
+                    // 哪条路。停止环境单独一张卡片，两个动作的语义才不会打架。
+                    StartMode.ONE_SHOT -> {
+                        PrimaryActionButton(
+                            text = if (notProvisioned) "尚未部署环境" else "一键启动（环境 + DSH）",
+                            stopping = false,
+                            brush = BrushStart,
+                            contentColor = OnAccent,
+                            enabled = controls.oneShotEnabled,
+                            busy = busy,
+                            onClick = { vm.start() },
+                        )
+
+                        Spacer(Modifier.height(12.dp))
+                        ActionTile(
+                            icon = Icons.Filled.Close,
+                            label = "停止环境",
+                            supporting = if (running) "连同 DSH 一起停" else "环境未运行",
+                            enabled = controls.envStopEnabled && !busy,
+                            onClick = { vm.stop() },
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
+
+                    // ── 分步启动：沿用原来那套 2×2 卡片外观 ──
+                    StartMode.STEPWISE -> {
+                        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                            ActionTile(
+                                icon = Icons.Filled.PlayArrow,
+                                label = "仅启动环境",
+                                supporting = when {
+                                    running -> "环境已在运行"
+                                    else -> "不起 DSH，维护用"
+                                },
+                                enabled = controls.startEnvOnlyEnabled && !busy,
+                                onClick = { vm.startEnvOnly() },
+                                modifier = Modifier.weight(1f),
+                            )
+                            ActionTile(
+                                icon = Icons.Filled.Close,
+                                label = "停止环境",
+                                supporting = if (running) "连同 DSH 一起停" else "环境未运行",
+                                enabled = controls.envStopEnabled && !busy,
+                                onClick = { vm.stop() },
+                                modifier = Modifier.weight(1f),
+                            )
+                        }
+
+                        Spacer(Modifier.height(12.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                            ActionTile(
+                                icon = Icons.Filled.PlayArrow,
+                                label = "启动 DSH",
+                                supporting = when {
+                                    ui.status?.dshRunning == true -> "DSH 已在运行"
+                                    !running -> "先起环境"
+                                    else -> "接上 DSH Web"
+                                },
+                                enabled = controls.dshStartEnabled && !busy,
+                                onClick = { vm.dshStart() },
+                                modifier = Modifier.weight(1f),
+                            )
+                            ActionTile(
+                                icon = Icons.Filled.Close,
+                                label = "停止 DSH",
+                                supporting = when {
+                                    ui.status?.isEnvOnly != true -> "需「仅环境」方式"
+                                    ui.status?.dshRunning == true -> "环境继续运行"
+                                    else -> "DSH 未在运行"
+                                },
+                                enabled = controls.dshStopEnabled && !busy,
+                                onClick = { vm.dshStop() },
+                                modifier = Modifier.weight(1f),
+                            )
+                        }
+                    }
+                }
+
+                // 互斥判定的理由（为什么有的按钮是灰的、下一步该点哪个）直接印在按钮下面。
+                // 只靠置灰，用户会以为是"还没加载好"而不是"这条路不能走"。
+                controls.note?.let { note ->
+                    Spacer(Modifier.height(12.dp))
+                    NoticeBar(
+                        text = note,
+                        tone = if (controls.noteIsWarning) WarnTone else MaterialTheme.colorScheme.primary,
+                    )
+                }
+            } else {
+                // ── 免 root（proot）版保持原样：环境与 DSH 一体，只有一键启动/停止 ──
+                Spacer(Modifier.height(12.dp))
+                val stopping = running || ui.state == EnvState.STOPPING
+                PrimaryActionButton(
+                    text = when {
+                        notProvisioned -> "尚未部署环境"
+                        stopping -> "停止环境"
+                        else -> "启动环境"
+                    },
+                    stopping = stopping,
+                    brush = if (stopping) BrushStop else BrushStart,
+                    // 启动＝白底黑字；停止＝深底白字
+                    contentColor = if (stopping) TextPrimary else OnAccent,
+                    enabled = !notProvisioned,
+                    busy = busy,
+                    onClick = { if (stopping) vm.stop() else vm.start() },
+                )
+            }
+
+            Spacer(Modifier.height(12.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                ActionTile(
+                    icon = Icons.Filled.Home,
+                    label = "打开 DSH",
+                    supporting = when {
+                        ui.canOpenWeb -> ui.status?.displayUrl ?: "WebView"
+                        ui.state == EnvState.RUNNING -> "正在获取登录地址…"
+                        else -> "环境未运行"
+                    },
+                    enabled = ui.canOpenWeb,
+                    onClick = onOpenWeb,
+                    modifier = Modifier.weight(1f),
+                )
+                ActionTile(
+                    icon = Icons.Filled.Refresh,
+                    label = "更新",
+                    supporting = when {
+                        ui.updateCount > 0 -> "${ui.updateCount} 个层可更新"
+                        ui.updateChecked -> "已是最新"
+                        else -> "未检查"
+                    },
+                    badge = ui.updateCount,
+                    onClick = onOpenUpdates,
+                    modifier = Modifier.weight(1f),
+                )
+            }
+
+            Spacer(Modifier.height(12.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                ActionTile(
+                    icon = Icons.Filled.Build,
+                    label = "诊断",
+                    supporting = "doctor 一键自检",
+                    onClick = onOpenDiagnostics,
+                    modifier = Modifier.weight(1f),
+                )
+                ActionTile(
+                    icon = Icons.Filled.Info,
+                    label = "部署",
+                    supporting = if (notProvisioned) "需要执行" else "已部署",
+                    onClick = onOpenProvision,
+                    modifier = Modifier.weight(1f),
+                )
+            }
+        }
+    }
+}
+
+/**
+ * 两段式切换控件：一键启动 / 分步启动。
+ *
+ * 为什么不用 Material3 的 `SingleChoiceSegmentedButtonRow`：它是 `@ExperimentalMaterial3Api`
+ * （跟着 material3 升级就可能改签名），而这里只有两个选项、样式还得跟现有的 Pill / ActionTile
+ * 一致 —— 一个 Surface + Row 就够，且不引任何新依赖。
+ *
+ * [enabled] = false（运行中锁定）时整块降透明度且不可点。**只降透明度是不够的**，
+ * 所以调用方必须在它下面同时印一句"为什么锁 + 怎么解锁"（见 [startModeLockNote]）。
+ */
+@Composable
+private fun StartModeToggle(
+    selected: StartMode,
+    enabled: Boolean,
+    onSelect: (StartMode) -> Unit,
+) {
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            // 视觉上明确"现在点不动"，而不是让用户点了没反应
+            .alpha(if (enabled) 1f else 0.55f),
+        shape = RoundedCornerShape(999.dp),
+        color = Mono2,
+        border = BorderStroke(1.dp, Line),
+    ) {
+        Row(
+            Modifier.padding(3.dp),
+            horizontalArrangement = Arrangement.spacedBy(3.dp),
+        ) {
+            StartMode.entries.forEach { entry ->
+                val active = entry == selected
+                Surface(
+                    modifier = Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(999.dp))
+                        .clickable(enabled = enabled) { onSelect(entry) },
+                    shape = RoundedCornerShape(999.dp),
+                    color = if (active) {
+                        MaterialTheme.colorScheme.primary.copy(alpha = 0.18f)
+                    } else {
+                        Color.Transparent
+                    },
+                    border = if (active) {
+                        BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.45f))
+                    } else {
+                        null
+                    },
+                ) {
+                    Text(
+                        text = entry.label,
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
+                        color = if (active) MaterialTheme.colorScheme.primary else TextMuted,
+                        textAlign = TextAlign.Center,
+                        maxLines = 1,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 8.dp),
+                    )
+                }
+            }
+        }
+    }
+}
 
 @Composable
 private fun ModePill(ui: LauncherViewModel.UiState) {

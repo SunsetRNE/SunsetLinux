@@ -162,6 +162,20 @@ class Prefs(context: Context) {
         set(value) = sp.edit { putBoolean(KEY_LOG_FOLLOW, value) }
 
     /**
+     * 首页「操作」卡的启动方式：一键启动 / 分步启动。**默认一键启动**
+     * （[StartMode.ONE_SHOT]：最省事、也最不容易走错的那条路）。
+     *
+     * 为什么存的是"用户偏好"而不是"本次起法"：本次起法是环境侧的事实，由 status 的
+     * `env_mode` 报出来（见 [EnvRunMode]）——App 不缓存它，缓存必然会在环境被模块/开机脚本
+     * 重启后过期。这里只记"下次环境没跑起来时默认显示哪一组"，
+     * 运行中那一档由 [resolveStartMode] 按 `env_mode` 强制覆盖（锁定的用户可见理由写在
+     * `StartModeUi.kt` 的文件注释里）。
+     */
+    var startMode: StartMode
+        get() = StartMode.from(sp.getString(KEY_START_MODE, null))
+        set(value) = sp.edit { putString(KEY_START_MODE, value.wire) }
+
+    /**
      * 是否已完成首启引导（模式选择）。
      * false 时启动器会拉起引导页；之后可从侧边栏「重新部署/引导」重进。
      */
@@ -246,6 +260,7 @@ class Prefs(context: Context) {
         const val KEY_DSH_DIST_TAG = "dsh_dist_tag"
         const val KEY_NPM_REGISTRY = "npm_registry"
         const val KEY_LOG_FOLLOW = "log_auto_follow"
+        const val KEY_START_MODE = "start_mode"
         const val KEY_ONBOARDED = "onboarded"
         const val KEY_MODULE_STEP = "module_step_ack"
         const val KEY_PROOT_BOOTSTRAP_DECLINED = "proot_bootstrap_declined"

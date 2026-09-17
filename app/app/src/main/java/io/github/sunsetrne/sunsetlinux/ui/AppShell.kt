@@ -64,6 +64,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.github.sunsetrne.sunsetlinux.ui.components.CapsuleReserve
@@ -73,6 +74,7 @@ import io.github.sunsetrne.sunsetlinux.core.DshPin
 import io.github.sunsetrne.sunsetlinux.core.Edition
 import io.github.sunsetrne.sunsetlinux.core.EnvMode
 import io.github.sunsetrne.sunsetlinux.core.EnvState
+import io.github.sunsetrne.sunsetlinux.core.TerminalStatusUi
 import io.github.sunsetrne.sunsetlinux.ui.components.Pill
 import io.github.sunsetrne.sunsetlinux.ui.theme.WarnTone
 import io.github.sunsetrne.sunsetlinux.ui.theme.BrushStart
@@ -238,11 +240,27 @@ fun AppShell(
                             },
                             style = MaterialTheme.typography.titleLarge,
                         )
+                        // 副标题：终端页给一句**自成一句、不依赖上下文**的说明。
+                        //
+                        // 为什么终端页不直接显示 `ui.stage`：那是全页通用的状态短语（例如
+                        // 「失败（未知，建议跑一键诊断）」），挤在顶栏这条窄光里会被裁成
+                        // 「失败（未知，建议跑一键诊…」—— 用户看到一句半截话，比没有还糟。
+                        // 终端页真正的前置条件是"环境在跑"，说明白这件事 + 下一步动作就够了。
+                        //
+                        // maxLines / overflow **只对终端页放宽**（2 行 + 省略号）：其它页
+                        // 保持原来的一行裁剪，不动既有观感。终端页那句本身很短
+                        // （见 TerminalStatusUi.subtitle 的长度约束），两行足够说完。
+                        val terminalTab = tab == ShellTab.TERMINAL
                         Text(
-                            text = ui.stage,
+                            text = if (tab == ShellTab.TERMINAL) {
+                                TerminalStatusUi.subtitle(ui.state == EnvState.RUNNING, ui.mode)
+                            } else {
+                                ui.stage
+                            },
                             style = MaterialTheme.typography.labelSmall,
                             color = if (ui.state == io.github.sunsetrne.sunsetlinux.core.EnvState.ERROR) Danger else TextMuted,
-                            maxLines = 1,
+                            maxLines = if (terminalTab) 2 else 1,
+                            overflow = if (terminalTab) TextOverflow.Ellipsis else TextOverflow.Clip,
                         )
                     }
                     // DSH 入口：从底栏挪到顶栏 —— 随时可点，也不再挤占底栏那一格。

@@ -55,6 +55,8 @@ import io.github.sunsetrne.sunsetlinux.core.PtyNative
 import io.github.sunsetrne.sunsetlinux.core.PtySession
 import io.github.sunsetrne.sunsetlinux.core.TerminalEmulator
 import io.github.sunsetrne.sunsetlinux.core.TerminalSession
+import io.github.sunsetrne.sunsetlinux.core.TerminalStatusUi
+import io.github.sunsetrne.sunsetlinux.ui.components.CapsuleReserve
 import io.github.sunsetrne.sunsetlinux.ui.components.Pill
 import io.github.sunsetrne.sunsetlinux.ui.theme.Danger
 import io.github.sunsetrne.sunsetlinux.ui.theme.Line
@@ -363,9 +365,15 @@ fun TerminalPane(
         modifier
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.background)
-            .padding(horizontal = 16.dp),
+            // ★ 底部给悬浮胶囊底栏留位（真机批注："悬浮导航栏遮挡了终端"）。
+            //   快捷键行与输入框原本正好落在胶囊下面，会被整块盖住。CapsuleReserve 是一个
+            //   常量（见 components/Common.kt）：这个数字散落写过好几遍、漏改一处就漏一个面板。
+            //   只加在终端页这一页 —— 其它页各自的滚动容器里已经有自己的留白，不动它们。
+            .padding(start = 16.dp, end = 16.dp, bottom = CapsuleReserve),
     ) {
-        Spacer(Modifier.height(8.dp))
+        // 竖直留白整体收掉约 1/4（用户："太散了"）。只动 Spacer/padding，**不设固定高度**：
+        // 硬挤压会让大屏上的终端变小气，而这里收的是容器之间的空隙，输出区该多大还是多大。
+        Spacer(Modifier.height(4.dp))
 
         // ── 状态条 + 工具
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -379,8 +387,21 @@ fun TerminalPane(
                 filled = state.running,
                 leadingDot = true,
             )
-            Spacer(Modifier.width(8.dp))
-            Pill(text = mode.modeLabel, color = TextMuted)
+            // 真实身份：**只在会话真的连上之后才显示**。
+            //
+            // 旧版这里是 `Pill(mode.modeLabel)`（一个恒定的 "ROOT"），它既没说明连接态，
+            // 也没说清环境里到底是什么身份 —— 用户看到 "ROOT" 就以为里面真有 root 权限。
+            // 现在按 mode 给事实：Root 版 `uid 0（root）`；免 root 版是 proot 伪造的 root，
+            // 没有真实 capabilities。没连上时我们对环境内一无所知 → 不显示（不编造）。
+            TerminalStatusUi.identityLabel(state.running, mode)?.let { identity ->
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    text = identity,
+                    style = MaterialTheme.typography.labelSmall.copy(fontFamily = MonoFamily),
+                    color = TextSecondary,
+                    maxLines = 1,
+                )
+            }
             Spacer(Modifier.weight(1f))
             TextButton(onClick = { state.clear() }) { Text("清屏") }
             TextButton(
@@ -398,18 +419,18 @@ fun TerminalPane(
         // 最容易让人以为是终端坏了。这里在输入框还在的时候就说清前提，
         // 并且直接给出「仅启动环境」—— 起好环境就能用，不必启动 DSH。
         if (!envRunning) {
-            Spacer(Modifier.height(8.dp))
+            Spacer(Modifier.height(4.dp))
             Surface(
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(16.dp),
                 color = MaterialTheme.colorScheme.surfaceVariant,
             ) {
-                Column(Modifier.padding(14.dp)) {
+                Column(Modifier.padding(10.dp)) {
                     Text(
                         "环境未运行 —— 终端要连进正在运行的环境（nsenter + chroot），现在没有可连的东西。",
                         style = MaterialTheme.typography.bodySmall,
                     )
-                    Spacer(Modifier.height(4.dp))
+                    Spacer(Modifier.height(2.dp))
                     Text(
                         if (onStartEnvOnly != null) {
                             "点「仅启动环境」把环境起来即可用终端；DSH 与终端无关，不必一起启动。"
@@ -419,7 +440,7 @@ fun TerminalPane(
                         style = MaterialTheme.typography.labelSmall,
                         color = TextMuted,
                     )
-                    Spacer(Modifier.height(6.dp))
+                    Spacer(Modifier.height(4.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                         onStartEnvOnly?.let { startEnvOnly ->
                             TextButton(onClick = startEnvOnly) { Text("仅启动环境") }
@@ -451,33 +472,42 @@ fun TerminalPane(
                 val rows = (hPx / lineH).toInt().coerceAtLeast(4)
                 LaunchedEffect(cols, rows) { state.resize(rows, cols) }
                 if (lines.isEmpty()) {
-                Column(Modifier.padding(16.dp)) {
+                // 空态：只留最必要的两三行，且**每一行都跟着真实状态自动变**（纯函数见
+                // core/TerminalStatusUi —— 旧版那句"root 模式会 chroot…proot 模式…"同时讲
+                // 两个 edition 的事，用户装的是其中一个，读到的另一半是噪音）。
+                Column(Modifier.padding(12.dp)) {
                     Text("终端还没有输出。", style = MaterialTheme.typography.bodySmall, color = TextSecondary)
-                    Spacer(Modifier.height(6.dp))
+                    Spacer(Modifier.height(3.dp))
+                    // 权限行：这一版**以什么身份、经哪条路**执行命令
                     Text(
-                        "命令在环境内执行：root 模式会 chroot 进 rootfs，proot 模式进 proot 的 bash。",
-                        style = MaterialTheme.typography.labelSmall,
+                        TerminalStatusUi.privilegeLine(mode),
+                        style = MaterialTheme.typography.labelSmall.copy(lineHeight = 15.sp),
                         color = TextMuted,
                     )
-                    Spacer(Modifier.height(4.dp))
+                    Spacer(Modifier.height(2.dp))
+                    // 引擎行：就绪时压成一行；降级时完整说明（全屏程序/Ctrl-C 不可用是
+                    // 用户必须知道的能力差异，不能为了紧凑把它压没）
                     Text(
-                        if (PtyNative.available) {
-                            "原生 PTY 已就绪：Ctrl-C / Tab / 方向键可用，vim / htop 这类全屏程序能跑，" +
-                                "窗口大小跟着控件走。"
-                        } else {
-                            "限制：原生 PTY 不可用（${PtyNative.loadError ?: "未知原因"}）—— " +
-                                "当前是行缓冲降级：全屏程序与 Ctrl-C 不可用；输出按行刷新。"
-                        },
-                        style = MaterialTheme.typography.labelSmall,
+                        TerminalStatusUi.engineLine(PtyNative.available, PtyNative.loadError),
+                        style = MaterialTheme.typography.labelSmall.copy(lineHeight = 15.sp),
                         color = TextMuted,
                     )
+                    // 未连接时才补这句**可操作**的提示；连上之后它自己消失
+                    if (!state.running) {
+                        Spacer(Modifier.height(3.dp))
+                        Text(
+                            TerminalStatusUi.NOT_CONNECTED_HINT,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                    }
                 }
             } else {
                 LazyColumn(
                     state = listState,
                     modifier = Modifier
                         .fillMaxSize()
-                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
                 ) {
                     items(lines) { line ->
                         Text(
@@ -504,7 +534,7 @@ fun TerminalPane(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(top = 6.dp),
+                .padding(top = 2.dp),
             horizontalArrangement = Arrangement.spacedBy(6.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -537,15 +567,15 @@ fun TerminalPane(
 
         // ── 提示（环境没起来 / 找不到 linuxctl）
         state.notice?.let { msg ->
-            Spacer(Modifier.height(8.dp))
+            Spacer(Modifier.height(4.dp))
             Surface(
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(16.dp),
                 color = MaterialTheme.colorScheme.surfaceVariant,
             ) {
-                Column(Modifier.padding(14.dp)) {
+                Column(Modifier.padding(10.dp)) {
                     Text(msg, style = MaterialTheme.typography.bodySmall)
-                    Spacer(Modifier.height(6.dp))
+                    Spacer(Modifier.height(4.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                         if (!envRunning) {
                             // 终端的环境前提：能一键起环境就别让用户先离开这个 tab
@@ -565,7 +595,7 @@ fun TerminalPane(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(vertical = 10.dp),
+                .padding(vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             OutlinedTextField(
@@ -587,7 +617,7 @@ fun TerminalPane(
                 keyboardActions = KeyboardActions(onSend = { submit() }),
                 modifier = Modifier.weight(1f),
             )
-            Spacer(Modifier.width(6.dp))
+            Spacer(Modifier.width(4.dp))
             IconButton(
                 onClick = { submit() },
                 enabled = state.running && input.isNotEmpty(),
@@ -605,6 +635,7 @@ fun TerminalPane(
             }
         }
 
-        Spacer(Modifier.height(8.dp))
+        // 底部只剩 2dp：真正的避让由最外层 Column 的 CapsuleReserve 负责
+        Spacer(Modifier.height(2.dp))
     }
 }
