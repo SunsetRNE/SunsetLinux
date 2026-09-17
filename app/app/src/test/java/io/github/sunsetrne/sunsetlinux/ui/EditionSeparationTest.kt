@@ -177,6 +177,43 @@ class EditionSeparationTest {
         )
     }
 
+    // ───────────────────────── 拆开的启动路径（仅 Root 版）
+
+    @Test
+    fun `拆开的启动按钮只在 Root 版渲染`() {
+        val home = read("ui/LauncherHomePane.kt")
+        assertTrue(
+            "启动区必须按 Edition.showsSplitStartUi 分岔 —— 免 root 版保持原样（只有一键启动/停止）",
+            home.contains("if (Edition.showsSplitStartUi)"),
+        )
+        val gate = home.indexOf("if (Edition.showsSplitStartUi)")
+        for (call in listOf("vm.startEnvOnly()", "vm.dshStart()", "vm.dshStop()")) {
+            assertTrue(
+                "$call 必须出现在 showsSplitStartUi 分支里（否则免 root 版会渲染一条走不通的路）",
+                home.indexOf(call) > gate,
+            )
+        }
+        // 反方向：proot 那条分支仍然只有原来的启动/停止（一键启动语义不变）
+        assertTrue(
+            "免 root 分支必须保留原来的启动/停止主按钮",
+            home.contains("\"启动环境\"") && home.contains("\"停止环境\""),
+        )
+    }
+
+    @Test
+    fun `免 root 版也能渲染（终端页的仅启动环境入口是可空的）`() {
+        val terminal = read("ui/TerminalPane.kt")
+        assertTrue(
+            "TerminalPane 必须把「仅启动环境」做成可空入口 —— proot 版没有这条路",
+            terminal.contains("onStartEnvOnly: (() -> Unit)? = null"),
+        )
+        val shell = read("ui/AppShell.kt")
+        assertTrue(
+            "AppShell 传这个回调时也要按 Edition.showsSplitStartUi 分岔",
+            Regex("""onStartEnvOnly = if \(Edition\.showsSplitStartUi\)""").containsMatchIn(shell),
+        )
+    }
+
     // ───────────────────────── 任务 B：进入即启用
 
     @Test

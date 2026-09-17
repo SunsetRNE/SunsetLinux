@@ -734,12 +734,12 @@ I/O error 上 —— 因为重启后规则失效；本次改动正是为了消�
 
 ### 回归与门禁
 
-模块 **1.0.27**（`STATUS.md` §3.10.28 doctor §3 假警报 + §3.10.29 **32 位算术** + §3.10.30 内置 DSH 未被启用
-+ §3.10.31 环境内 **dsh.url 写错目录**（App 永远"登录地址还没写出来"）+ 残留 dsh 占着 3080/loop；
-回归：root selftest 73/0 × bash+mksh、模块变体 36/0、provision 87/0）；
-App 单测 **175/0 × 2 个变体**（`LC_ALL=C.utf8 LANG=C.utf8 ./gradlew --no-daemon --offline `
+模块 **1.0.28**（`STATUS.md` §3.10.28 doctor §3 假警报 + §3.10.29 **32 位算术** + §3.10.30 内置 DSH 未被启用
++ §3.10.31 环境内 **dsh.url 写错目录** + §3.10.32 **环境/DSH 拆开启动**（`--no-dsh` · `dsh start|stop` · 互斥判定 · 终端可用）；
+回归：root selftest 81/0 × bash+mksh（本机 proot 沙箱 +1 skip，CI/真机 88/0）、模块变体 36/0、provision 87/0）；
+App 单测 **198/0 × 2 个变体**（`LC_ALL=C.utf8 LANG=C.utf8 ./gradlew --no-daemon --offline `
 `:app:testProotFullDebugUnitTest` / `:app:testRootFullDebugUnitTest`；POSIX locale 下中文测试名会让
-kotlinc 报 `InvalidPathException`，那是环境问题、CI 已设 C.UTF-8）；
+kotlinc 报 `InvalidPathException`，那是环境问题、CI 已设 C.UTF-8）；App **0.3.7**（启动区五按钮 + 互斥判定）；
 `node tools/module-variant-selftest.mjs` **31/0**（真打包、真落地、真跑一个临时 Ed25519 频道，
 含 4 个负例）；`tools/customize-selftest.mjs` 16/0；root selftest 62/0（bash+mksh）；
 provision 83/0；oneshot 29/0；shell-compat / contract / cmp-consistency / webroot 64/0 全绿。

@@ -125,11 +125,13 @@ fi
 # --- 3) 清理上次关机残留的运行态标记 -----------------------------------------
 # ready/mounted.json/dsh.pid/dsh.url 都是"这次开机有效"的东西；
 # 上次关机若没走 stop.sh，留着会让 App 误判为 running。
+# env-mode（full / env-only，§3.4）也一并清：它是"本次启动"的属性，跨开机留着只会误导。
 rm -f "$LINUX_HOME/run/ready" \
       "$LINUX_HOME/run/mounted.json" \
       "$LINUX_HOME/run/dsh.pid" \
       "$LINUX_HOME/run/dsh.url" \
       "$LINUX_HOME/run/dsh.port" \
+      "$LINUX_HOME/run/env-mode" \
       "$LINUX_HOME/run/supervisor.pid" \
       "$LINUX_HOME/run/stopping" 2>/dev/null
 : > "$LINUX_HOME/run/mounts" 2>/dev/null

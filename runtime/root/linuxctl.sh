@@ -78,6 +78,12 @@ if [ -f "$COMMON_DIR/layer-inspect.sh" ]; then
 else
     layer_has_path() { return 2; }   # 三态里的"判不了"，绝不假装"没有"
 fi
+# 环境内进程的识别/清理（判据是 /proc/<pid>/root）——`dsh start|stop` 与 stop.sh 共用一份。
+# 找不到时**不致命**：dsh stop 仍能按 run/dsh.pid 精确补刀，只是少了"pid 文件丢了"的兜底。
+if [ -f "$COMMON_DIR/env-procs.sh" ]; then
+    # shellcheck source=/dev/null
+    SUNSETLINUX_SOURCED=1 . "$COMMON_DIR/env-procs.sh"
+fi
 
 # ---------------------------------------------------------------------------
 # 选一个能跑**设备侧脚本**的 shell（start/stop/update/doctor 都靠它）
@@ -139,10 +145,15 @@ SUPERVISOR_PID_FILE="$RUN_DIR/supervisor.pid"
 DSH_PID_FILE="$RUN_DIR/dsh.pid"
 DSH_URL_FILE="$RUN_DIR/dsh.url"
 DSH_PORT_FILE="$RUN_DIR/dsh.port"
+# 本次启动是「一键启动」(full) 还是「仅启动环境」(env-only)：App 的互斥判定读它
+ENV_MODE_FILE="$RUN_DIR/env-mode"
 READY_FILE="$RUN_DIR/ready"
 MOUNTS_FILE="$RUN_DIR/mounts"
 LOGFILE="$RUN_DIR/linux.log"
 ERROR_FILE="$RUN_DIR/last-error"
+
+# 环境内进程的判据根：/proc/<pid>/root 等于它 = 这个进程在我们的 chroot 里（见 env-procs.sh）
+ENV_ROOTFS="$ROOTFS_DIR"
 
 # 层顺序：**POSIX 空格分隔字符串，不用数组**。
 # 本脚本在设备侧由 /system/bin/sh（Android mksh）执行，不能假设 bash 数组语义；
@@ -275,6 +286,86 @@ dsh_pid_alive() {
     [ -n "$pid" ] || return 1
     [ -d "/proc/$pid" ] || return 1
     printf '%s' "$pid"
+}
+
+# DSH 进程是否在跑（在跑就打印 pid）。
+#   「环境在跑但没有 DSH」是**一等状态**（App 的「仅启动环境」+ 终端维护），所以这个判断
+#   不能只看 state。优先 run/dsh.pid；pid 文件丢了或过期了（模块 ≤1.0.26 的老现场、
+#   手工 kill 过 supervisor）就按"root 在我们的 rootfs + 命令行像 dsh web"兜底 ——
+#   光看命令行会误杀别的环境（DSHA proot 版也叫 dsh web，见 STATUS §3.10.31）。
+dsh_is_running() {
+    local pid=""
+    pid="$(dsh_pid_alive 2>/dev/null || true)"
+    if [ -n "$pid" ]; then printf '%s' "$pid"; return 0; fi
+    if command -v env_proc_pids >/dev/null 2>&1; then
+        pid="$(env_proc_pids '*dsh*web*' 2>/dev/null | head -n1)"
+        if [ -n "$pid" ]; then printf '%s' "$pid"; return 0; fi
+    fi
+    return 1
+}
+
+# 本次启动是「一键启动」(full) 还是「仅启动环境」(env-only)；没启动过 → 空字符串
+env_mode_read() {
+    [ -f "$ENV_MODE_FILE" ] || return 0
+    tr -d ' \n\r' < "$ENV_MODE_FILE" 2>/dev/null | head -c 16
+}
+
+# 重启时**保持原来的起法**：env-only 起的就别再把 DSH 拽起来。
+#   层更新 / 版本回滚 / 快照恢复都会 stop+start。用户的场景恰恰是"在仅环境模式下更新层"——
+#   重启后凭空冒出 DSH（占着 3080）等于把维护模式悄悄踢掉，这是拆分后最容易漏的破绽。
+#   ★ 必须在 stop **之前**读 env-mode：stop.sh 会把它清掉。
+resume_start_like_before() { # resume_start_like_before <旧 env-mode>
+    case "${1:-}" in
+        env-only) cmd_start --no-dsh >/dev/null 2>&1 ;;
+        *)        cmd_start >/dev/null 2>&1 ;;
+    esac
+}
+
+# 等带令牌的登录 URL（supervise.sh 抓到 `dsh web: ` 那一行后写 run/dsh.url）
+wait_dsh_url() { # wait_dsh_url <秒>
+    local i=0 n=$((${1:-20} * 5))
+    while [ "$i" -lt "$n" ]; do
+        [ -s "$DSH_URL_FILE" ] && return 0
+        sleep 0.2
+        i=$(( i + 1 ))
+    done
+    return 1
+}
+
+# 在**运行中的环境里**把 DSH supervisor 拉起来（detached）。
+#   为什么 nsenter：本脚本在宿主 mount ns 里，挂载树在 start.sh 的私有 ns 里，不进去看不见。
+#   为什么 setsid：linuxctl 是 App 通过 `su -c` 起的；su 一退，进程组可能吃 SIGHUP ——
+#   DSH 必须活过"点按钮的那一次调用"。找不到 setsid 只是告警（真机 toybox 有）。
+spawn_dsh_in_env() { # spawn_dsh_in_env <port>
+    local port="$1" nspid="" sid="" c=""
+    nspid="$(ns_pid_alive)" || return 1
+    # 必须 nsenter：挂载树是在 start.sh 的**私有 mount ns** 里建的，宿主 ns 里直接 chroot
+    # 只会看到一个空壳（挂载点没被带进来），DSH 起不来还很难懂原因 —— 这里提前判死。
+    [ -x "$NSENTER" ] || { log "ERROR: 缺 $NSENTER，无法进入环境的私有 mount ns"; return 1; }
+    [ -f "$ROOTFS_DIR/opt/sunsetlinux/supervise.sh" ] || {
+        log "ERROR: 环境里没有 /opt/sunsetlinux/supervise.sh（模块与 rootfs 版本不同步？重装模块）"
+        return 1
+    }
+    for c in /system/bin/setsid /usr/bin/setsid; do
+        [ -x "$c" ] && { sid="$c"; break; }
+    done
+    [ -n "$sid" ] || warnl "找不到 setsid：DSH 可能随这次 su 会话一起被挂断"
+    if [ -n "$sid" ]; then
+        "$sid" "$NSENTER" --mount="/proc/$nspid/ns/mnt" --uts="/proc/$nspid/ns/uts" \
+            --wd="$ROOTFS_DIR" chroot "$ROOTFS_DIR" /usr/bin/env -i \
+            HOME=/root DSH_HOME=/root/.dsh \
+            PATH=/opt/node/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+            TERM="${TERM:-xterm-256color}" LANG="${LANG:-C.UTF-8}" \
+            /opt/sunsetlinux/supervise.sh --port "$port" >>"$LOGFILE" 2>&1 </dev/null &
+    else
+        "$NSENTER" --mount="/proc/$nspid/ns/mnt" --uts="/proc/$nspid/ns/uts" \
+            --wd="$ROOTFS_DIR" chroot "$ROOTFS_DIR" /usr/bin/env -i \
+            HOME=/root DSH_HOME=/root/.dsh \
+            PATH=/opt/node/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+            TERM="${TERM:-xterm-256color}" LANG="${LANG:-C.UTF-8}" \
+            /opt/sunsetlinux/supervise.sh --port "$port" >>"$LOGFILE" 2>&1 </dev/null &
+    fi
+    return 0
 }
 
 last_error_read() {
@@ -415,6 +506,19 @@ gather_status() {
         # 未挂载时给"表观容量/占用"，total 用镜像大小，used 取 null（不编造）
         up_total="$(dsh_size_of "$UPPER_IMG")"
     fi
+
+    # ---- dsh 进程是否在跑 / 本次启动模式 -----------------------------------
+    #   ★「环境在跑但没跑 DSH」是**一等状态**（App 的「仅启动环境」+ 终端维护、或 DSH 崩了），
+    #     所以 status 必须能把它和"环境没跑"分开 —— 这是 App 按钮互斥判定的输入。
+    #     dsh.running 是 §3.1 的**附加键**（契约允许；不改变任何既有键的语义）。
+    DSH_ST_DSH_RUNNING="false"
+    if [ "$state" = "running" ] && dsh_is_running >/dev/null 2>&1; then
+        DSH_ST_DSH_RUNNING="true"
+    fi
+    DSH_ST_ENV_MODE=""
+    case "$state" in
+        running|starting) DSH_ST_ENV_MODE="$(env_mode_read || true)" ;;
+    esac
 
     # ---- 组装 -------------------------------------------------------------
     DSH_ST_MODE="$MODE"
@@ -593,11 +697,13 @@ write_default_state() {
 # ---------------------------------------------------------------------------
 cmd_start() {
     # --layer-mode loop|dir：透传给 start.sh（docs/layer-mode.md 的三处开关之一）
-    local lm_flag=""
+    # --no-dsh：只起环境、不启动 DSH（App 的「仅启动环境」；见 docs/architecture.md §3.4）
+    local lm_flag="" no_dsh=0
     while [ $# -gt 0 ]; do
         case "$1" in
             --layer-mode)   lm_flag="${2:-}"; shift 2 ;;
             --layer-mode=*) lm_flag="${1#--layer-mode=}"; shift ;;
+            --no-dsh)       no_dsh=1; shift ;;
             *) warnl "start: 忽略未知参数 $1"; shift ;;
         esac
     done
@@ -620,7 +726,26 @@ cmd_start() {
     export SUNSETLINUX_LAYER_MODE
 
     # 已在运行：直接返回 running（§3 契约：幂等、退出码 0）
+    #   ★ 唯一的例外是「两种方法互斥」（App 的按钮判定就是这条规则的 UI 面）：
+    #     环境是按 --no-dsh（env-only）起来的，就不许再用"一键启动"悄悄把 DSH 塞进来 ——
+    #     用户特意把环境单独起来做维护（更新层/装包），凭空多出一个占着 3080 的 DSH
+    #     会让他分不清自己处于哪种模式。要起 DSH 就走 `linuxctl dsh start`，一步一个意图。
     if env_ready; then
+        if [ "$no_dsh" = "1" ]; then
+            log "环境已在运行（幂等；--no-dsh 不影响已运行的环境，run/env-mode=$(env_mode_read || true)）"
+            gather_status
+            emit "$(dsh_status_json)"
+            return 0
+        fi
+        if [ "$(env_mode_read || true)" = "env-only" ]; then
+            local msg="环境是按「仅启动环境」起的（run/env-mode=env-only）：要起 DSH 请用「启动 DSH」（linuxctl dsh start），或先「停止环境」再「一键启动」"
+            printf '%s\n' "$msg" > "$ERROR_FILE" 2>/dev/null || true
+            log "ERROR: $msg"
+            gather_status
+            DSH_ST_LAST_ERROR="$msg"
+            emit "$(dsh_status_json)"
+            return 1
+        fi
         log "环境已在运行（幂等）"
         gather_status
         emit "$(dsh_status_json)"
@@ -660,7 +785,10 @@ cmd_start() {
     }
 
     log "调用 start.sh（stdout 已丢弃，只保留 JSON 通道）"
-    if ! LINUX_HOME="$LH" SUNSETLINUX_LAYER_MODE="$lm" "$SH_BIN" "$starter" --layer-mode "$lm" >/dev/null 2>>"$LOGFILE"; then
+    local dsh_opt=""
+    [ "$no_dsh" = "1" ] && dsh_opt="--no-dsh"
+    if ! LINUX_HOME="$LH" SUNSETLINUX_LAYER_MODE="$lm" SUNSETLINUX_NO_DSH="$no_dsh" \
+            "$SH_BIN" "$starter" --layer-mode "$lm" $dsh_opt >/dev/null 2>>"$LOGFILE"; then
         local msg
         msg="$(last_error_read || true)"
         [ -z "$msg" ] && msg="start.sh 失败，详见 $LOGFILE"
@@ -838,6 +966,10 @@ cmd_snapshot() {
 
     local was_running=false
     env_ready && was_running=true
+    # 记住本次起法（stop 之后 run/env-mode 就被清掉了）：env-only 的维护会话重启后
+    # 不该被塞回一个 DSH（见 resume_start_like_before）
+    local was_mode=""
+    [ "$was_running" = true ] && was_mode="$(env_mode_read || true)"
     if [ "$was_running" = true ]; then
         log "为保证快照一致，先停止环境（完成后自动恢复）"
         cmd_stop >/dev/null || true
@@ -863,13 +995,13 @@ cmd_snapshot() {
     if [ "$rc" -ne 0 ]; then
         rm -f "$out"
         emit '{"ok":false,"error":"打包失败（详见日志）"}'
-        [ "$was_running" = true ] && cmd_start >/dev/null 2>&1
+        [ "$was_running" = true ] && resume_start_like_before "$was_mode"
         return 1
     fi
     local sz; sz="$(dsh_size_of "$out")"
     local usize; usize="$(dsh_size_of "$UPPER_IMG")"
     emit "{\"ok\":true,\"name\":\"$(jesc "$name")\",\"path\":\"$(jesc "$out")\",\"size\":$( [ -n "$sz" ] && printf '%s' "$sz" || printf 'null'),\"upper_size\":$( [ -n "$usize" ] && printf '%s' "$usize" || printf 'null'),\"compression\":\"$(jesc "$comp")\"}"
-    [ "$was_running" = true ] && cmd_start >/dev/null 2>&1
+    [ "$was_running" = true ] && resume_start_like_before "$was_mode"
     return 0
 }
 
@@ -955,6 +1087,8 @@ cmd_restore() {
 
     local was_running=false
     env_ready && was_running=true
+    local was_mode=""
+    [ "$was_running" = true ] && was_mode="$(env_mode_read || true)"
     [ "$was_running" = true ] && { log "先停止环境"; cmd_stop >/dev/null || true; }
 
     local tmp="$SNAP_DIR/.restore.$$"
@@ -980,7 +1114,7 @@ cmd_restore() {
     fi
     rm -rf "$tmp"
     emit "{\"ok\":true,\"name\":\"$(jesc "$name")\",\"path\":\"$(jesc "$src")\"}"
-    [ "$was_running" = true ] && cmd_start >/dev/null
+    [ "$was_running" = true ] && resume_start_like_before "$was_mode"
     return 0
 }
 
@@ -1162,10 +1296,13 @@ cmd_update() {
     # ---- 重启环境让新层生效 ----
     local was_running=false
     env_ready && was_running=true
+    # env-only 起的维护会话：更新层之后仍保持"只环境"（见 resume_start_like_before）
+    local was_mode=""
+    [ "$was_running" = true ] && was_mode="$(env_mode_read || true)"
     if [ "$was_running" = true ]; then
         log "重启环境以应用新层"
         cmd_stop >/dev/null 2>&1 || true
-        if ! cmd_start >/dev/null 2>&1; then
+        if ! resume_start_like_before "$was_mode"; then
             log "ERROR: 新层启动失败，回滚"
             local rolled=false
             if [ -n "$prev_path" ] && [ -f "$prev_path" ]; then
@@ -1181,7 +1318,7 @@ cmd_update() {
                 rolled=true
                 log "已回滚到 $prev_path"
             fi
-            cmd_start >/dev/null 2>&1 || true
+            resume_start_like_before "$was_mode" || true
             emit "{\"ok\":false,\"error\":\"新层启动失败$([ "$rolled" = true ] && echo '，已回滚' || echo '，且无法回滚')\",\"layer\":\"$(jesc "$layer")\"}"
             return 1
         fi
@@ -1361,9 +1498,11 @@ EOF
 
     local was_running=false
     env_ready && was_running=true
+    local was_mode=""
+    [ "$was_running" = true ] && was_mode="$(env_mode_read || true)"
     if [ "$was_running" = true ]; then
         cmd_stop >/dev/null 2>&1 || true
-        cmd_start >/dev/null 2>&1 || log "WARN: 回滚后启动失败，请查 run/last-error"
+        resume_start_like_before "$was_mode" || log "WARN: 回滚后启动失败，请查 run/last-error"
     fi
     emit "{\"ok\":true,\"layer\":\"$(jesc "$layer")\",\"from\":$( [ -n "$cur" ] && printf '"%s"' "$(jesc "$cur")" || printf 'null'),\"to\":\"$(jesc "$target")\",\"file\":\"$(jesc "$path")\",\"restarted\":$was_running}"
     return 0
@@ -1638,17 +1777,130 @@ cmd_dsh_install() {
     esac
 }
 
+# ---------------------------------------------------------------------------
+# dsh start / stop —— 在**运行中的环境里**单独开关 DSH（App 的「启动 DSH」/「停止 DSH」）
+#
+#   为什么不复用 start/stop：这是两条**独立**的意图（用户明确要求拆开）：
+#     · 「仅启动环境」= 把 Ubuntu 环境起来做维护（更新层、装包、跑终端），此时不该有 DSH
+#       占着 3080；
+#     · 「启动 DSH」= 环境已经在跑，只把这一个服务拉起来/停掉，环境保持不动。
+#   互斥规则（App 的按钮判定与这里**必须**一致，见 docs/architecture.md §3.4）：
+#     env_mode=full（一键启动）→ 不提供"单独停 DSH"：否则用户会处在一个自己都说不清的
+#       中间态；要单独控制就先「停止环境」，再用「仅启动环境」。
+#     env_mode=env-only → 两个方向都允许。
+# ---------------------------------------------------------------------------
+cmd_dsh_start() {
+    local port=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --port)   port="${2:-}"; shift 2 ;;
+            --port=*) port="${1#--port=}"; shift ;;
+            *) warnl "dsh start: 忽略未知参数 $1"; shift ;;
+        esac
+    done
+    case "${port:-}" in ''|*[!0-9]*) port="$(config_port)" ;; esac
+    if [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then port="$(config_port)"; fi
+
+    if ! env_ready; then
+        local msg="环境未运行：先用「仅启动环境」或「一键启动」把环境起来，再启动 DSH"
+        printf '%s\n' "$msg" > "$ERROR_FILE" 2>/dev/null || true
+        log "ERROR: $msg"
+        gather_status
+        DSH_ST_LAST_ERROR="$msg"
+        emit "$(dsh_status_json)"
+        return 1
+    fi
+
+    local pid=""
+    if pid="$(dsh_is_running)"; then
+        log "DSH 已在运行（pid=$pid，幂等）"
+        gather_status
+        emit "$(dsh_status_json)"
+        return 0
+    fi
+
+    rm -f "$ERROR_FILE" "$DSH_PID_FILE" "$DSH_URL_FILE" "$DSH_PORT_FILE" 2>/dev/null || true
+    log "在环境内启动 DSH（port=$port）"
+    if ! spawn_dsh_in_env "$port"; then
+        local msg="DSH 启动失败：进不去环境（nsenter/chroot 不可用）"
+        printf '%s\n' "$msg" > "$ERROR_FILE" 2>/dev/null || true
+        log "ERROR: $msg"
+        gather_status
+        DSH_ST_LAST_ERROR="$msg"
+        emit "$(dsh_status_json)"
+        return 1
+    fi
+    if wait_dsh_url 20; then
+        log "DSH 已启动（带令牌 URL 已就绪）"
+        gather_status
+        emit "$(dsh_status_json)"
+        return 0
+    fi
+    # 进程拉起来了但没打印 URL：把排查入口给用户（supervisor 的原话在 linux.log 里）
+    local msg="DSH 进程已拉起，但 20s 内没有打印带令牌的登录 URL —— 看 $LOGFILE 里 'dsh web: ' 那一行"
+    printf '%s\n' "$msg" > "$ERROR_FILE" 2>/dev/null || true
+    log "ERROR: $msg"
+    gather_status
+    DSH_ST_LAST_ERROR="$msg"
+    emit "$(dsh_status_json)"
+    return 1
+}
+
+cmd_dsh_stop() {
+    if ! env_ready; then
+        # 幂等：环境没跑时只需清掉过期凭证（令牌随进程失效，§3.3）
+        rm -f "$DSH_PID_FILE" "$DSH_URL_FILE" "$DSH_PORT_FILE" 2>/dev/null || true
+        log "环境未运行（幂等）：已清掉过期的 dsh 凭证文件"
+        gather_status
+        emit "$(dsh_status_json)"
+        return 0
+    fi
+    if [ "$(env_mode_read || true)" = "full" ]; then
+        local msg="本环境是「一键启动」起来的（run/env-mode=full）：按设计不单独停 DSH —— 请「停止环境」；要单独控制 DSH，就先停止环境再选「仅启动环境」"
+        printf '%s\n' "$msg" > "$ERROR_FILE" 2>/dev/null || true
+        log "ERROR: $msg"
+        gather_status
+        DSH_ST_LAST_ERROR="$msg"
+        emit "$(dsh_status_json)"
+        return 1
+    fi
+
+    local pid="" i=0
+    if pid="$(dsh_is_running)"; then
+        log "停止 DSH（pid=$pid），环境保持运行"
+        kill -TERM "$pid" 2>/dev/null || true
+        while [ "$i" -lt 150 ] && [ -d "/proc/$pid" ]; do sleep 0.1; i=$(( i + 1 )); done
+        if [ -d "/proc/$pid" ]; then
+            warnl "dsh(pid=$pid) 未在 15s 内退出，发送 KILL"
+            kill -KILL "$pid" 2>/dev/null || true
+        fi
+    else
+        log "DSH 本来就没在跑（幂等）"
+    fi
+    # 兜底：dsh.pid 丢了也要清干净 —— 否则 3080 与可写层被它占着，下次启动直接失败
+    #（真机 2026-09-17 的事故现场，见 docs/STATUS.md §3.10.31）
+    if command -v env_proc_kill_all >/dev/null 2>&1; then
+        ENV_ROOTFS="$ROOTFS_DIR" env_proc_kill_all '*dsh*web*'
+    fi
+    rm -f "$DSH_PID_FILE" "$DSH_URL_FILE" "$DSH_PORT_FILE" 2>/dev/null || true
+    gather_status
+    emit "$(dsh_status_json)"
+    return 0
+}
+
 cmd_dsh() {
     local sub="${1:-info}"; shift || true
     case "$sub" in
         info)    cmd_dsh_info "$@" ;;
         builtin) cmd_dsh_builtin "$@" ;;
         install) cmd_dsh_install "$@" ;;
+        start)   cmd_dsh_start "$@" ;;
+        stop)    cmd_dsh_stop "$@" ;;
         -h|--help|help)
-            printf '用法：linuxctl dsh {info|builtin [--module-dir D] [--force]|install}\n' >&2
-            emit '{"ok":true,"usage":"dsh info|builtin|install"}'
+            printf '用法：linuxctl dsh {info|builtin [--module-dir D] [--force]|install|start [--port N]|stop}\n' >&2
+            emit '{"ok":true,"usage":"dsh info|builtin|install|start|stop"}'
             return 0 ;;
-        *) log "未知子命令：dsh $sub"; emit '{"ok":false,"error":"dsh 的子命令必须是 info/builtin/install"}'; return 2 ;;
+        *) log "未知子命令：dsh $sub"; emit '{"ok":false,"error":"dsh 的子命令必须是 info/builtin/install/start/stop"}'; return 2 ;;
     esac
 }
 
@@ -1697,8 +1949,11 @@ linuxctl（sunsetlinux root 模式）
 用法：linuxctl <命令> [参数]
 
   provision [--seed <dir>]   首次部署：目录树 / upper.img / 配置（幂等；已部署返回 2）
-  start                      启动环境（幂等）
-  stop                       停止环境（幂等）
+  start [--layer-mode loop|dir] [--no-dsh]
+                             启动环境（幂等）。--no-dsh = **只起环境、不启动 DSH**
+                             （在环境里更新层/装包/开终端时用；与一键启动互斥，
+                              见 docs/architecture.md §3.4）
+  stop                       停止环境（幂等，连同里面的一切进程）
   status                     输出状态 JSON（architecture.md §3.1）
   attach [-- cmd...]         进入环境执行命令；无参数则开交互 shell
   exec -- cmd...             非交互执行（供 App 调用）
@@ -1718,6 +1973,9 @@ linuxctl（sunsetlinux root 模式）
   dsh builtin [--module-dir D] [--force]
                              把模块自带的 DSH 层落到 layers/（装模块时自动做，幂等）
   dsh install                从内置官方频道装/更新 dsh 层（一条指令）
+  dsh start [--port N]       在**运行中的环境里**单独启动 DSH（环境保持不动）
+  dsh stop                   单独停止 DSH（环境保持运行）；「一键启动」的环境不允许单独停
+                             —— 要单独控制 DSH 就先 stop，再用 start --no-dsh
   rollback <layer> [<ver>]   切回该层的指定版本（省略则挑比当前低的最高版本；
                              dsh 有内置版本时**优先回内置版本**）
                              只改 state.json 的指向，**不删任何层文件**，可来回切

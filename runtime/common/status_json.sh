@@ -338,6 +338,11 @@ dsh_status_emit_flat() {
     printf 'dsh.port\t%s\n'           "$(dsh_jnum "${DSH_ST_PORT:-}")"
     printf 'dsh.version\t%s\n'        "$(dsh_jstr "${DSH_ST_VERSION:-}")"
     printf 'dsh.healthy\t%s\n'        "$(dsh_jbool "${DSH_ST_HEALTHY:-false}")"
+    # dsh.running / env_mode 是 §3.1 的**附加键**（契约允许）：把「环境在跑但没跑 DSH」
+    # （= App 的「仅启动环境」）与「环境没跑」分开。proot 运行时也走同一份生成器，
+    # 不设置这两个变量时分别是 false / null（不编造）。
+    printf 'dsh.running\t%s\n'        "$(dsh_jbool "${DSH_ST_DSH_RUNNING:-false}")"
+    printf 'env_mode\t%s\n'           "$(dsh_jstr "${DSH_ST_ENV_MODE:-}")"
     printf 'layers.base.version\t%s\n'    "$(dsh_jstr "${DSH_ST_LAYER_BASE_VERSION:-}")"
     printf 'layers.base.size\t%s\n'       "$(dsh_jnum "${DSH_ST_LAYER_BASE_SIZE:-}")"
     printf 'layers.base.mounted\t%s\n'    "$(dsh_jbool "${DSH_ST_LAYER_BASE_MOUNTED:-false}")"
@@ -376,6 +381,9 @@ dsh_status_json() {
     printf '"schema":1,'
     printf '"mode":%s,'            "$(dsh_jstr "${DSH_ST_MODE:-}")"
     printf '"state":%s,'           "$(dsh_jstr "${DSH_ST_STATE:-}")"
+    # 附加键（§3.1 允许）：本次是「一键启动」full 还是「仅启动环境」env-only；
+    # 环境没在跑时是 null。App 的按钮互斥判定 = env_mode + dsh.running 两条。
+    printf '"env_mode":%s,'        "$(dsh_jstr "${DSH_ST_ENV_MODE:-}")"
     printf '"pid":%s,'             "$pid"
     printf '"uptime_sec":%s,'      "$uptime"
     printf '"dsh":{'
@@ -383,7 +391,8 @@ dsh_status_json() {
     printf   '"base_url":%s,'      "$(dsh_jstr "${DSH_ST_BASE_URL:-}")"
     printf   '"port":%s,'          "$(dsh_jnum "${DSH_ST_PORT:-}")"
     printf   '"version":%s,'       "$(dsh_jstr "${DSH_ST_VERSION:-}")"
-    printf   '"healthy":%s'        "$(dsh_jbool "${DSH_ST_HEALTHY:-false}")"
+    printf   '"healthy":%s,'       "$(dsh_jbool "${DSH_ST_HEALTHY:-false}")"
+    printf   '"running":%s'        "$(dsh_jbool "${DSH_ST_DSH_RUNNING:-false}")"
     printf '},'
     printf '"layers":{'
     printf   '"base":{"version":%s,"size":%s,"mounted":%s},' \

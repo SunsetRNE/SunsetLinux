@@ -65,4 +65,7 @@ object Edition {
 
     /** 要不要出现层模式（loop / dir）选择 —— 那是 root 模式独有的启动方式。 */
     val showsLayerModeUi: Boolean get() = EditionPolicy.showsLayerModeUi(isRoot)
+
+    /** 要不要出现「仅启动环境 / 启动 DSH / 停止 DSH」—— 同样是 root 运行时的专属能力。 */
+    val showsSplitStartUi: Boolean get() = EditionPolicy.showsSplitStartUi(isRoot)
 }

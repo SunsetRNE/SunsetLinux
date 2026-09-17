@@ -94,7 +94,7 @@ BIN_REQUIRED=(
     common/status_json.sh common/http_health.sh
 )
 
-BIN_COMMON=(status_json.sh http_health.sh layer-inspect.sh)
+BIN_COMMON=(status_json.sh http_health.sh layer-inspect.sh env-procs.sh)
 BIN_FIXTURES=(erofs-head.bin squashfs-head.bin zstd-head.bin)
 # ---- 解析实际路径 -----------------------------------------------------------
 # layer-spec.sh 在 rootfs/，其余在 runtime/root/，common 在 runtime/common/

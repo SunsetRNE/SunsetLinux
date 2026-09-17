@@ -317,6 +317,13 @@ fun AppShell(
                             mode = ui.mode,
                             envRunning = ui.state == EnvState.RUNNING,
                             onGoStart = { tab = ShellTab.START },
+                            // 只有 Root 版能"只起环境"：免 root 版的环境与 DSH 一体，
+                            // 传 null 让终端退回"去启动页"这一条路（见 EditionPolicy）
+                            onStartEnvOnly = if (Edition.showsSplitStartUi) {
+                                { vm.startEnvOnly() }
+                            } else {
+                                null
+                            },
                             modifier = Modifier.fillMaxSize(),
                         )
 

@@ -46,6 +46,18 @@ class EditionPolicyTest {
         )
     }
 
+    @Test
+    fun `拆开的启动按钮只属于 Root 版`() {
+        assertTrue(
+            "start --no-dsh 与 dsh start|stop 是 root 运行时脚本的子命令",
+            EditionPolicy.showsSplitStartUi(isRoot = true),
+        )
+        assertFalse(
+            "proot 版环境与 DSH 一体（start.sh 一次起完），给这几个按钮只会得到命令不存在",
+            EditionPolicy.showsSplitStartUi(isRoot = false),
+        )
+    }
+
     /**
      * [Edition] 上的短名字必须与 [EditionPolicy] 一致 —— 它就是调用点用的那个入口。
      * 这条**与变体无关**（两边都成立），所以在 proot / root 两个变体里都跑得过。
@@ -55,6 +67,7 @@ class EditionPolicyTest {
         assertEquals(EditionPolicy.showsKernelSuModuleUi(Edition.isRoot), Edition.showsModuleUi)
         assertEquals(EditionPolicy.showsRootlessRuntimeUi(Edition.isRoot), Edition.showsRootlessRuntimeUi)
         assertEquals(EditionPolicy.showsLayerModeUi(Edition.isRoot), Edition.showsLayerModeUi)
+        assertEquals(EditionPolicy.showsSplitStartUi(Edition.isRoot), Edition.showsSplitStartUi)
         // 历史属性与新名字不能分叉：以前的代码读 needsKernelSuModule，新的读 showsModuleUi
         assertEquals(
             "needsKernelSuModule 与 showsModuleUi 必须表达同一件事（否则老代码会绕过新的切割）",

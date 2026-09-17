@@ -503,6 +503,57 @@ su -c '/data/sunsetlinux/bin/linuxctl doctor'
 | 已装状态读不到时 | —— | **不给刷入按钮**，先让用户修 root 授权（与"读不到 ≠ 没装"一致） |
 | 重启 | —— | 只报告"重启后生效"（KernelSU 落 `modules_update/`），**App 不替用户重启**，脚本里有单测断言不许出现 `reboot` |
 
+### 3.10.32 「环境」与「DSH」拆开：两种启动方法 + 互斥判定（模块 1.0.28）
+
+**需求（用户原话）**：「能不能拆开？启动环境不等于启动 DSH …… 再补两个按钮是两者拆开分别启动，
+且开启判定，使用一键时则不能使用后者，使用后者时则不能使用前者，用于在虚拟环境上更新或者其他
+操作，这样的话也能补上『终端』功能的缺陷，把终端接入虚拟环境」。
+
+**为什么以前做不到**：`linuxctl start` 是一条龙（挂载树 + 私有 ns + `entry.sh` → `exec supervise.sh`
+→ DSH）。想进环境里更新层/装包/用终端，就**必须**把 DSH 一起拉起来占着 `127.0.0.1:3080`；
+`status` 里"环境在跑但 DSH 没跑"这种状态也**没有任何字段**能表达（`state=running` + `url=null`
+与"环境没跑"在 JSON 上分不开）。
+
+**做法**：
+
+| 层 | 改动 |
+|---|---|
+| `start.sh` | 新增 `--no-dsh`（内层靠 `SUNSETLINUX_NO_DSH` 传下去，与 layer-mode 同一招）；写 `run/env-mode`；chroot 时把 flag 交给 entry.sh |
+| `entry.sh` | 认 `--no-dsh`：照样准备 DNS/时区/HOME/DSH_HOME，然后**把进程挂住**（带 TERM trap）—— 它既是宿主侧"环境还活着"的锚点（内层 start.sh 在等它），也是终端与 `dsh start` 的落脚点 |
+| `linuxctl` | 新增 `dsh start [--port N]` / `dsh stop`；`start` 认 `--no-dsh`；两条**互斥拒绝**；status 增加 `dsh.running` / `env_mode` 两个附加键 |
+| `supervise.sh` | 自己加载 `$DSH_HOME/env`：`dsh start` 是宿主侧 nsenter+chroot 拉起的，**不经过 entry.sh** —— 少了这一步，DSH 会"起来了却拿不到 API key" |
+| `linuxctl` 的重启路径 | `resume_start_like_before`：层更新 / 版本回滚 / 快照打包 / 快照恢复都是 stop→start，**必须保持原来的起法**，否则用户在「仅环境」里更新层，重启后凭空多出一个占 3080 的 DSH（维护模式被悄悄踢掉）。`env-mode` 必须在 stop **之前**读（stop 会清它） |
+| `runtime/common/env-procs.sh`（新） | 环境内进程的识别/清理，判据 `/proc/<pid>/root == $LINUX_HOME/rootfs`；`stop` 清**全部**（含 `entry.sh` 的挂住进程、用户开着的终端会话、跑着的 apt）、`dsh stop` 只清 `*dsh*web*`；**`ENV_ROOTFS` 为空就一个都不动** |
+| `stop.sh` | 改用共用库（原来是自己写的一份 `ps \| while`）；清理 `env-mode` |
+| `post-fs-data.sh` | 开机也清 `run/env-mode`（它是"本次启动"的属性，跨开机留着只会误导） |
+| `doctor` §8 | 认出 `env-mode=env-only`：**不再**把它误报成"环境在运行却拿不到 dsh.url"（§3.10.31 的那条 fail 判据只对 full 成立），并显示本次是哪种起法 |
+| proot 侧 | status 也报 `dsh.running`（= DSH 活着）、`env_mode=null`；**没有**拆开启动这条路 —— 它的"环境"就是一个解开的 rootfs 目录，没有挂载树要在没有 DSH 的情况下维持 |
+| App 0.3.7 | 首页五个按钮 + 纯函数判定（`core/StartControls.kt`）；状态卡显示「启动方式」；env-only 且 DSH 没跑时"Web 健康"显示「DSH 未启动（仅环境方式）」而不是红字假故障；终端页只要求**环境**在跑，并给「仅启动环境」入口；诊断页不再对 env-only 提示"端口没写对" |
+
+**互斥规则**（App 的按钮判定与模块**必须**一致，完整表见 `docs/architecture.md` §3.4）：
+full 环境不许单独停 DSH；env-only 环境不许被"一键启动"顺手塞进 DSH（**拒绝**，不是幂等无动作）；
+环境没跑时 `dsh start` 失败、`dsh stop` 幂等成功。
+
+**回归**：
+
+- `runtime/root/selftest.sh` **73 → 81**（本机 proot 沙箱：81 通过 / 0 失败 / **1 skip**）× bash+mksh：
+  - `env-procs`：正例（root 匹配 → 必杀）、**反例**（别的环境的同名 dsh 一根汗毛都不许动）、
+    安全闸（`ENV_ROOTFS` 为空 → 一个都不动）、`stop.sh` 确实调用了共用库；
+  - 环境/DSH 分离：`dsh start`（环境没跑 → 失败）、`dsh stop`（幂等）、`--no-dsh` 整条链路
+    （linuxctl → start.sh → env-mode → entry.sh）、`supervise.sh` 自加载 env、
+    重启路径保持起法、doctor 的 env-only 话术；
+- App 单测 **198/0 × 2 个变体**（`testRootFullDebugUnitTest` / `testProotFullDebugUnitTest`，
+  6 条既有 skip）；新增 `StartControlsTest`（矩阵穷举）、`EnvModeStatusTest`（附加键解析与缺键退化）、
+  `EnvOnlyHintTest`（env-only 不报假故障）、`EditionSeparationTest`（只有 Root 版有这三个动作）。
+
+> 「环境在跑」那几条（status 的 `running`/`env_mode`、两条互斥拒绝、doctor 的 env-only 话术）
+> 在 proot 沙箱里是 **skip**：那里 `stat /proc/<pid>/ns/mnt` 会被 ptrace 拦掉，`ns_pid_alive`
+> 恒 false；CI 与真机会跑满（**88** 条）。
+> 逻辑本身用"只把 ns 可见性打桩、其余走真代码"的临时副本在本机跑通了：`state=running` /
+> `dsh.running=false` / `env_mode=env-only`、两条拒绝都按预期、`dsh stop` 真把进程停掉而环境
+> 仍保持 running、doctor 在 env-only 下不再报 fail（而在 full 缺 dsh.url 时**仍然**报 fail）。
+
+
 ### 3.10.31 环境内 dsh.url 写错目录 → App 永远「登录地址还没写出来」（模块 1.0.27）
 
 **真机现场（2026-09-17 19:06，模块 1.0.26 + 内置 DSH 0.1.5-rc.2）**：App 状态页一切正常 ——

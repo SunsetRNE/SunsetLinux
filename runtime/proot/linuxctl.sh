@@ -529,6 +529,10 @@ build_status() {
   ST_BASE_URL=$(jnull_or_str "$base_url")
   ST_PORT=$(jint "$port")
   ST_HEALTHY=$(jbool "$h")
+  # 附加键 dsh.running（§3.1 允许）：proot 模式**没有**"仅启动环境"这条路（它的"环境"
+  # 就是解开的一个 rootfs 目录，没有挂载树要在没有 DSH 的情况下维持），DSH 活着 = 环境在跑；
+  # 但键还是要给 —— App 用同一份解析代码，缺键会让它落到"url 有就算在跑"的兜底上。
+  ST_DSH_RUNNING=$(jbool "$( (( alive )) && printf true || printf false )")
   ST_LAST_ERROR=$(jnull_or_str "$le")
 
   # ---- layers（逻辑映射，见文件头说明） ----
@@ -568,10 +572,11 @@ build_status() {
 emit_status() { # 参数：成对的 <已编码key> <已编码val>，附加在 §3.1 字段之后
   local extra out="" i=0
   extra=("$@")          # mksh 里 `local extra=("$@")` 是语法错误：数组要先声明再赋值
-  out=$(printf '{"schema":%d,"mode":"proot","state":%s,"pid":%s,"uptime_sec":%s,' \
+  # env_mode 恒为 null：proot 模式没有「仅启动环境」这条路（附加键，见 §3.1/§3.4）
+  out=$(printf '{"schema":%d,"mode":"proot","state":%s,"env_mode":null,"pid":%s,"uptime_sec":%s,' \
     "$SCHEMA_VERSION" "$ST_STATE" "$ST_PID" "$ST_UPTIME")
-  out+=$(printf '"dsh":{"url":%s,"base_url":%s,"port":%s,"version":%s,"healthy":%s},' \
-    "$ST_URL" "$ST_BASE_URL" "$ST_PORT" "$ST_DSH_VER" "$ST_HEALTHY")
+  out+=$(printf '"dsh":{"url":%s,"base_url":%s,"port":%s,"version":%s,"healthy":%s,"running":%s},' \
+    "$ST_URL" "$ST_BASE_URL" "$ST_PORT" "$ST_DSH_VER" "$ST_HEALTHY" "$ST_DSH_RUNNING")
   out+=$(printf '"layers":{"base":{"version":%s,"size":%s,"mounted":%s},' \
     "$ST_BASE_VER" "$ST_BASE_SIZE" "$ST_BASE_MOUNTED")
   out+=$(printf '"runtime":{"version":%s,"size":%s,"mounted":%s},' \

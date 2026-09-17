@@ -50,9 +50,16 @@ log() {
 # 参数
 # ---------------------------------------------------------------------------
 PORT=""
+# ★ --no-dsh：只准备环境（DNS/时区/HOME/DSH_HOME…），**不启动 DSH**，然后把本进程挂住。
+#   为什么"挂住"而不是直接退出：本进程是 chroot 里的那一个，宿主侧的内层 start.sh 正
+#   `chroot … entry.sh` 等它 —— 它一退，整条启动链就结束、环境马上被判定为"退出"。
+#   于是"仅启动环境"就变成了"环境若即若离"：挂载在、ns 在，但没东西托管。
+#   挂住的这一层也让 App 的「终端」（`linuxctl attach`）与 `linuxctl dsh start` 都有落脚点。
+NO_DSH=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --port) PORT="${2:-}"; shift 2 ;;
+        --no-dsh) NO_DSH=1; shift ;;
         [0-9]*) PORT="$1"; shift ;;
         *) shift ;;
     esac
@@ -216,7 +223,18 @@ fi
 mkdir -p "$DSH_HOME" 2>/dev/null || true
 
 # ---------------------------------------------------------------------------
-# 5) 交给 supervisor（**exec**，让 supervise.sh 成为本子进程的直接替代，
+# 5) --no-dsh：环境就到这里为止（不跑 DSH），把本进程**挂住**守着挂载与 ns
+#    信号：stop.sh 会 TERM 宿主侧的 ns 持有者，但 chroot 里的这一层是**孤儿**，
+#    所以要自己接 TERM 干净退出（stop.sh 另有按 /proc/<pid>/root 的兜底清理）。
+# ---------------------------------------------------------------------------
+if [ "$NO_DSH" = "1" ]; then
+    log "entry.sh 就绪：--no-dsh（只准备环境，不启动 DSH；要起 DSH 用 linuxctl dsh start）"
+    trap 'log "收到停止信号（--no-dsh）：退出"; exit 0' TERM INT HUP QUIT
+    while :; do sleep 1; done
+fi
+
+# ---------------------------------------------------------------------------
+# 6) 交给 supervisor（**exec**，让 supervise.sh 成为本子进程的直接替代，
 #    这样环境内 ps 只有一层，信号也能直达）
 # ---------------------------------------------------------------------------
 SUP="$SELF_DIR/supervise.sh"

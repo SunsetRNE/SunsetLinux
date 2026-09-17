@@ -47,6 +47,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import io.github.sunsetrne.sunsetlinux.core.Edition
 import io.github.sunsetrne.sunsetlinux.core.EnvMode
 import io.github.sunsetrne.sunsetlinux.core.EnvState
 import io.github.sunsetrne.sunsetlinux.core.LinuxCtl
@@ -222,6 +223,10 @@ class TerminalPaneState internal constructor(
     /**
      * 连入环境。**要求环境已经在运行** —— `attach` 进的是一个已存在的 mount namespace，
      * 环境没起来时 linuxctl 只会报错退出，与其让用户看一行报错，不如这里先判一次。
+     *
+     * ⚠️ 这里**只看环境、不看 DSH**：`attach` 走的是 nsenter + chroot，与 DSH Web 无关。
+     * 所以「仅启动环境」之后（`env_mode=env-only`、DSH 没跑）终端必须照常可用 ——
+     * 这正是不再要求"先一键启动"的原因。
      */
     fun connect(mode: EnvMode) {
         if (running || starting) return
@@ -241,8 +246,15 @@ class TerminalPaneState internal constructor(
                     null
                 }
                 if (st == null || st.state != EnvState.RUNNING) {
+                    // 点名「仅启动环境」而不是笼统的"启动环境"：只想用终端的人不该被迫
+                    // 把 DSH 一起拉起来（那正是这次拆开启动要解决的问题）。
+                    val next = if (Edition.showsSplitStartUi) {
+                        "先到「启动」页点「仅启动环境」（不必启动 DSH）。"
+                    } else {
+                        "先到「启动」页点「启动环境」。"
+                    }
                     return@withContext "环境未运行（当前：${st?.state?.label ?: "未知"}）。" +
-                        "终端是连进正在运行的环境的 —— 先到「启动」页点「启动环境」。"
+                        "终端是连进正在运行的环境的 —— $next"
                 }
                 if (PtyNative.available) {
                     ptyActive = true
@@ -328,6 +340,8 @@ fun TerminalPane(
     mode: EnvMode,
     envRunning: Boolean,
     onGoStart: () -> Unit,
+    /** 「一键跳到『仅启动环境』」：非 Root 版没有这条路，传 null 即可。 */
+    onStartEnvOnly: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     val lines by state.lines.collectAsState()
@@ -375,6 +389,44 @@ fun TerminalPane(
             ) { Text(if (state.running) "重开" else "连接") }
             TextButton(onClick = { state.stop() }, enabled = state.running) {
                 Text("停止", color = Danger)
+            }
+        }
+
+        // ── 环境没起来：先把话说清楚，并给一条一键到位的路
+        //
+        // 为什么是常显横幅而不是等用户点了「连接」再报错：终端"看起来能用但连不上"
+        // 最容易让人以为是终端坏了。这里在输入框还在的时候就说清前提，
+        // 并且直接给出「仅启动环境」—— 起好环境就能用，不必启动 DSH。
+        if (!envRunning) {
+            Spacer(Modifier.height(8.dp))
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(16.dp),
+                color = MaterialTheme.colorScheme.surfaceVariant,
+            ) {
+                Column(Modifier.padding(14.dp)) {
+                    Text(
+                        "环境未运行 —— 终端要连进正在运行的环境（nsenter + chroot），现在没有可连的东西。",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        if (onStartEnvOnly != null) {
+                            "点「仅启动环境」把环境起来即可用终端；DSH 与终端无关，不必一起启动。"
+                        } else {
+                            "到「启动」页把环境起来之后回到这里点「连接」。"
+                        },
+                        style = MaterialTheme.typography.labelSmall,
+                        color = TextMuted,
+                    )
+                    Spacer(Modifier.height(6.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        onStartEnvOnly?.let { startEnvOnly ->
+                            TextButton(onClick = startEnvOnly) { Text("仅启动环境") }
+                        }
+                        TextButton(onClick = onGoStart) { Text("去启动页") }
+                    }
+                }
             }
         }
 
@@ -496,6 +548,10 @@ fun TerminalPane(
                     Spacer(Modifier.height(6.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                         if (!envRunning) {
+                            // 终端的环境前提：能一键起环境就别让用户先离开这个 tab
+                            onStartEnvOnly?.let { startEnvOnly ->
+                                TextButton(onClick = startEnvOnly) { Text("仅启动环境") }
+                            }
                             TextButton(onClick = onGoStart) { Text("去启动环境") }
                         }
                         TextButton(onClick = { state.connect(mode) }) { Text("重试") }

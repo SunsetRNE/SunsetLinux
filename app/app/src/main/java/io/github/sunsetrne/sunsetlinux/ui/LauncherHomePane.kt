@@ -17,8 +17,10 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Build
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.HorizontalDivider
@@ -43,6 +45,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import io.github.sunsetrne.sunsetlinux.ui.components.CapsuleReserve
 import io.github.sunsetrne.sunsetlinux.core.DshPaths
+import io.github.sunsetrne.sunsetlinux.core.Edition
 import io.github.sunsetrne.sunsetlinux.core.EnvMode
 import io.github.sunsetrne.sunsetlinux.core.EnvState
 import io.github.sunsetrne.sunsetlinux.core.Hint
@@ -149,20 +152,27 @@ fun LauncherHomePane(
                     },
                 )
                 ui.status?.uptimeText?.let { InfoRow("运行时长", it) }
+                // 启动方式直接显示：它是"下一步能点哪些按钮"的依据，藏起来用户就得猜
+                ui.status?.envMode?.let { InfoRow("启动方式", it.label) }
                 ui.status?.pid?.let { InfoRow("进程 PID", it.toString(), mono = true) }
                 ui.status?.dshVersion?.let { InfoRow("DSH 版本", it, mono = true) }
                 ui.status?.dshPort?.let { InfoRow("监听端口", it.toString(), mono = true) }
+                // 「仅启动环境」下 DSH 本来就没起：这时写"无响应"（红字）等于报了一个假故障，
+                // 用户会去查端口/日志。如实说"DSH 未启动"才是他要的信息。
+                val dshIntentionallyDown = ui.status?.isEnvOnly == true && ui.status?.dshRunning == false
                 InfoRow(
                     label = "Web 健康",
-                    value = when (ui.status?.dshHealthy) {
-                        true -> "正常（已响应）"
-                        false -> "无响应"
-                        null -> "—"
+                    value = when {
+                        dshIntentionallyDown -> "DSH 未启动（仅环境方式）"
+                        ui.status?.dshHealthy == true -> "正常（已响应）"
+                        ui.status?.dshHealthy == false -> "无响应"
+                        else -> "—"
                     },
-                    valueColor = when (ui.status?.dshHealthy) {
-                        true -> StateRunning
-                        false -> Danger
-                        null -> TextSecondary
+                    valueColor = when {
+                        dshIntentionallyDown -> TextSecondary
+                        ui.status?.dshHealthy == true -> StateRunning
+                        ui.status?.dshHealthy == false -> Danger
+                        else -> TextSecondary
                     },
                 )
 
@@ -240,11 +250,16 @@ fun LauncherHomePane(
                 SectionLabel("访问地址")
                 Spacer(Modifier.height(10.dp))
 
+                // 「仅启动环境」下 DSH 没起，永远拿不到地址：不能一直显示"获取中…"
+                // （那会让用户以为再等等就有了）。如实说明并指向「启动 DSH」。
+                val dshOff = ui.status?.isEnvOnly == true && ui.status?.dshRunning == false
+
                 AddressRow(
                     label = "本机",
                     value = ui.status?.displayUrl,
                     hint = when {
                         ui.status?.displayUrl != null -> null
+                        dshOff -> "DSH 未启动（仅环境方式）：点「启动 DSH」后才有地址"
                         ui.state == EnvState.RUNNING -> "获取中…"
                         else -> "环境未运行"
                     },
@@ -294,10 +309,11 @@ fun LauncherHomePane(
 
                 Spacer(Modifier.height(10.dp))
                 Text(
-                    text = if (ui.status?.dshUrl != null) {
-                        "登录地址已就绪（带一次性令牌，界面不显示也不缓存）"
-                    } else {
-                        "登录地址未就绪：环境 running 后由 run/dsh.url 提供"
+                    text = when {
+                        ui.status?.dshUrl != null -> "登录地址已就绪（带一次性令牌，界面不显示也不缓存）"
+                        // 同上：env-only 下"再等等"是错的，该说的是"去启动 DSH"
+                        dshOff -> "登录地址未就绪：现在只有环境在跑，DSH 没启动（点「启动 DSH」后就有）"
+                        else -> "登录地址未就绪：环境 running 后由 run/dsh.url 提供"
                     },
                     style = MaterialTheme.typography.labelSmall,
                     color = TextMuted,
@@ -337,22 +353,105 @@ fun LauncherHomePane(
                 val running = ui.state == EnvState.RUNNING
                 val transitional = ui.state == EnvState.STARTING || ui.state == EnvState.STOPPING
                 val notProvisioned = ui.provisioned == false
-                val stopping = running || ui.state == EnvState.STOPPING
+                // 启用矩阵来自 core 的纯函数（StartControls）：面板只画，判定不许有第二份。
+                // busy / 过渡态是"临时不可点"，属于界面这一层，所以单独叠加。
+                val controls = ui.controls
+                val busy = ui.busy || transitional
 
-                PrimaryActionButton(
-                    text = when {
-                        notProvisioned -> "尚未部署环境"
-                        stopping -> "停止环境"
-                        else -> "启动环境"
-                    },
-                    stopping = stopping,
-                    brush = if (stopping) BrushStop else BrushStart,
-                    // 启动＝白底黑字；停止＝深底白字
-                    contentColor = if (stopping) TextPrimary else OnAccent,
-                    enabled = !notProvisioned,
-                    busy = ui.busy || transitional,
-                    onClick = { if (stopping) vm.stop() else vm.start() },
-                )
+                if (Edition.showsSplitStartUi) {
+                    // ── Root 版：一键启动 vs 拆开启动**互斥**（矩阵见 StartControls）
+                    //
+                    // 为什么"一键启动"在运行中也保持这个标签（而不是像免 root 版那样
+                    // 变成「停止环境」）：现在有两条起法，主按钮一变形用户就分不清
+                    // 当前生效的是哪条路。停止环境单独做一张卡片，语义才不会打架。
+                    PrimaryActionButton(
+                        text = if (notProvisioned) "尚未部署环境" else "一键启动（环境 + DSH）",
+                        stopping = false,
+                        brush = BrushStart,
+                        contentColor = OnAccent,
+                        enabled = controls.oneShotEnabled,
+                        busy = busy,
+                        onClick = { vm.start() },
+                    )
+
+                    Spacer(Modifier.height(12.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        ActionTile(
+                            icon = Icons.Filled.PlayArrow,
+                            label = "仅启动环境",
+                            supporting = when {
+                                ui.state == EnvState.RUNNING -> "环境已在运行"
+                                else -> "不起 DSH，维护用"
+                            },
+                            enabled = controls.startEnvOnlyEnabled && !busy,
+                            onClick = { vm.startEnvOnly() },
+                            modifier = Modifier.weight(1f),
+                        )
+                        ActionTile(
+                            icon = Icons.Filled.Close,
+                            label = "停止环境",
+                            supporting = if (running) "连同 DSH 一起停" else "环境未运行",
+                            enabled = controls.envStopEnabled && !busy,
+                            onClick = { vm.stop() },
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
+
+                    Spacer(Modifier.height(12.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        ActionTile(
+                            icon = Icons.Filled.PlayArrow,
+                            label = "启动 DSH",
+                            supporting = when {
+                                ui.status?.dshRunning == true -> "DSH 已在运行"
+                                !running -> "先起环境"
+                                else -> "接上 DSH Web"
+                            },
+                            enabled = controls.dshStartEnabled && !busy,
+                            onClick = { vm.dshStart() },
+                            modifier = Modifier.weight(1f),
+                        )
+                        ActionTile(
+                            icon = Icons.Filled.Close,
+                            label = "停止 DSH",
+                            supporting = when {
+                                ui.status?.isEnvOnly != true -> "需「仅环境」方式"
+                                ui.status?.dshRunning == true -> "环境继续运行"
+                                else -> "DSH 未在运行"
+                            },
+                            enabled = controls.dshStopEnabled && !busy,
+                            onClick = { vm.dshStop() },
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
+
+                    // 互斥判定的理由（为什么有的按钮是灰的、下一步该点哪个）直接印在按钮下面。
+                    // 只靠置灰，用户会以为是"还没加载好"而不是"这条路不能走"。
+                    controls.note?.let { note ->
+                        Spacer(Modifier.height(12.dp))
+                        NoticeBar(
+                            text = note,
+                            tone = if (controls.noteIsWarning) WarnTone else MaterialTheme.colorScheme.primary,
+                        )
+                    }
+                } else {
+                    // ── 免 root（proot）版保持原样：环境与 DSH 一体，只有一键启动/停止
+                    val stopping = running || ui.state == EnvState.STOPPING
+                    PrimaryActionButton(
+                        text = when {
+                            notProvisioned -> "尚未部署环境"
+                            stopping -> "停止环境"
+                            else -> "启动环境"
+                        },
+                        stopping = stopping,
+                        brush = if (stopping) BrushStop else BrushStart,
+                        // 启动＝白底黑字；停止＝深底白字
+                        contentColor = if (stopping) TextPrimary else OnAccent,
+                        enabled = !notProvisioned,
+                        busy = busy,
+                        onClick = { if (stopping) vm.stop() else vm.start() },
+                    )
+                }
 
                 Spacer(Modifier.height(12.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -447,7 +546,10 @@ private fun statusSubtitle(ui: LauncherViewModel.UiState): String {
     return when (st.state) {
         EnvState.RUNNING -> buildList {
             add("运行时长 ${st.uptimeText ?: "—"}")
-            if (st.dshHealthy == true) add("Web 正常")
+            // DSH 没在跑是 env-only 的正常形态，不能写成"Web 正常"（那是假的），
+            // 也不该留空 —— 一句话说清"环境在跑、DSH 没起"。
+            if (st.isEnvOnly && !st.dshRunning) add("仅环境（DSH 未启动）")
+            else if (st.dshHealthy == true) add("Web 正常")
         }.joinToString(" · ")
 
         EnvState.STARTING -> "正在拉起 Node 与 DSH Web，请稍候…"

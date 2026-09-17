@@ -91,6 +91,10 @@ UNSHARE=/system/bin/unshare
 MODE="start"
 FOREGROUND=0
 MAKE_PRIVATE=0
+# ★ --no-dsh：「只起环境，不启动 DSH」（App 的「仅启动环境」）。
+#   为什么用环境变量兜底：内层是**重新执行本脚本**（`start.sh --inner …`），命令行参数不会
+#   自动带过去 —— 层模式早就用了同一招（export SUNSETLINUX_LAYER_MODE）。
+NO_DSH="${SUNSETLINUX_NO_DSH:-0}"
 # ★ 用 while + shift 解析，而不是 `for arg in "$@"`：后者在循环里 shift 不了下一个参数，
 #   `--layer-mode dir` 会被当成两个参数、报"未知参数 dir"（本地自测时踩到）。
 while [ $# -gt 0 ]; do
@@ -101,11 +105,14 @@ while [ $# -gt 0 ]; do
         --foreground) FOREGROUND=1; shift ;;
         --check-ready) MODE=check_ready; shift ;;
         --probe-only)  MODE=probe_only; shift ;;
+        --no-dsh)      NO_DSH=1; shift ;;
         --layer-mode)  LAYER_MODE_FLAG="${2:-}"; shift 2 ;;
         --layer-mode=*) LAYER_MODE_FLAG="${arg#--layer-mode=}"; shift ;;
         *) echo "start.sh: 未知参数 $arg" >&2; exit 2 ;;
     esac
 done
+SUNSETLINUX_NO_DSH="$NO_DSH"
+export SUNSETLINUX_NO_DSH
 
 # --- 层模式：**尽早**解析（拼错要立刻报，而不是等到挂载阶段才发现）--------
 #   注意这里 log/die 还没定义，所以用一个最小的本地报错。
@@ -1381,7 +1388,18 @@ main() {
         printf '%s\n' "$$" > "$SUPERVISOR_PID_FILE"
         rm -f "$ERROR_FILE"
         : > "$READY_FILE"
-        log "挂载树就绪，交给 entry.sh"
+        # ★ run/env-mode：本次是「一键启动」(full) 还是「仅启动环境」(env-only)。
+        #   这是**宿主侧**（App / `linuxctl dsh start|stop`）判定互斥的唯一依据，
+        #   所以写在共享的 run/ 里（环境内 /run 与宿主 $LINUX_HOME/run 是同一批 inode）。
+        local dsh_flag=""
+        if [ "$NO_DSH" = "1" ]; then
+            printf '%s\n' "env-only" > "$RUN_DIR/env-mode" 2>/dev/null || true
+            dsh_flag="--no-dsh"
+            log "挂载树就绪，交给 entry.sh（--no-dsh：只起环境，不启动 DSH）"
+        else
+            printf '%s\n' "full" > "$RUN_DIR/env-mode" 2>/dev/null || true
+            log "挂载树就绪，交给 entry.sh"
+        fi
         local rc=0
         # ★ 进 chroot 前必须显式给环境变量：`#!/usr/bin/env bash` 里的 env 用的是
         #   **从安卓继承的 PATH**（/product/bin:/system/bin 那一套），里面没有 /usr/bin
@@ -1390,7 +1408,7 @@ main() {
         #   entry.sh/supervise.sh 的 shebang 也一并从 `env bash` 改成 `/bin/bash`（双保险）。
         PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
         HOME=/root TERM="${TERM:-xterm-256color}" \
-            chroot "$ROOTFS_DIR" /opt/sunsetlinux/entry.sh "$(config_port)" || rc=$?
+            chroot "$ROOTFS_DIR" /opt/sunsetlinux/entry.sh "$(config_port)" $dsh_flag || rc=$?
         finish_environment "$rc"
         trap - EXIT
         exit "$rc"

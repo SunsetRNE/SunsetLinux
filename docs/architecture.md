@@ -95,9 +95,12 @@
   cache/                 # 下载缓存
   snapshots/             # 可写层快照（tar.zst）
   run/
-    dsh.pid              # supervisor 的 PID（宿主 PID 空间）
+    dsh.pid              # DSH 进程的 PID（宿主 PID 空间；supervise.sh 写的）
     dsh.port             # 实际监听的端口
     dsh.url              # 带令牌的登录 URL，权限 0600（每次重启都会变，见 §3.3）
+    env-mode             # full | env-only：本次是「一键启动」还是「仅启动环境」（见 §3.4）
+    ready                # 环境就绪标记（宿主侧判断"在跑"的锚点）
+    supervisor.pid       # 私有 mount ns 持有者的 PID（stop 靠它进 ns 卸载）
     linux.log            # 环境日志（App 日志页读取）
   bin/
     linuxctl             # 见 §3
@@ -235,6 +238,55 @@ dsh web: http://127.0.0.1:3080/?token=<launchToken>
 
 **给 App 的要求**：`DshWebActivity` 每次打开都从最新 `status.dsh.url` 取值加载；
 WebView 需启用 Cookie。加载后应停在 `/`（已鉴权），而不是停带 `?token=` 的地址。
+
+### 3.4 「环境」与「DSH」是两件事：两种启动方法（**互斥**）
+
+**为什么要有这一节**：环境（chroot + overlayfs 挂载树 + 私有 mount ns）与 DSH（环境里那一个
+Node 服务）本来就是两层东西，但 `linuxctl start` 一直把它们绑在一起。结果是：想"进环境里更新
+层、装个包、跑终端"时，DSH **必然**会被拉起来占着 `127.0.0.1:3080` —— 用户既分不清自己处于
+哪种状态，也没法在不跑 DSH 的情况下用「终端」。
+
+| 方法 | 命令 | 语义 |
+|---|---|---|
+| **一键启动** | `linuxctl start` | 环境 + DSH 一起起来（`run/env-mode=full`）。日常用这个 |
+| **仅启动环境** | `linuxctl start --no-dsh` | 只起环境（挂载树 + ns + `entry.sh --no-dsh` 把进程挂住），**不跑 DSH**（`run/env-mode=env-only`）。维护用：终端、更新层、装包 |
+| **启动 DSH** | `linuxctl dsh start [--port N]` | 环境必须**已在运行**；只把 DSH 服务拉起来（`setsid + nsenter + chroot + supervise.sh`，脱离调用者会话） |
+| **停止 DSH** | `linuxctl dsh stop` | 只停 DSH（环境继续跑）；只允许在 `env-only` 环境上做 |
+
+**互斥规则（模块与 App 必须一致 —— App 的按钮启用判定就是这张表的 UI 面）**：
+
+| 当前状态 | 一键启动 | 仅启动环境 | 启动 DSH | 停止 DSH | 停止环境 |
+|---|---|---|---|---|---|
+| 环境未运行 | ✅ | ✅ | ❌（提示先起环境） | ✅（幂等，顺手清过期凭证） | ✅（幂等） |
+| 运行中 · `env-mode=full` | ❌（已在运行） | ❌（会换掉模式） | ✅ 仅当 DSH 不在跑（崩了重启） | ❌（要单独控制就先停止环境） | ✅ |
+| 运行中 · `env-mode=env-only` | ❌（**拒绝**：要起 DSH 走 `dsh start`） | ❌（已在运行） | ✅ 仅当 DSH 不在跑 | ✅ 仅当 DSH 在跑 | ✅ |
+
+- 「一键启动」在 `env-only` 环境上**不是幂等地无动作，而是拒绝**（退出码 1 + 可读原因）：
+  用户特意把环境单独起来做维护，凭空冒出一个占着 3080 的 DSH 会让他分不清模式。
+- 反过来，`env-only` 起的环境被"一键启动"顺手升级成 full 也不行 —— 一步一个意图。
+- 环境没跑时 `dsh start` 失败（可读原因），`dsh stop` 幂等成功。
+
+**status 里的两个附加键**（§3.1 冻结 schema 之外，**允许**，App 用它做上表的判定）：
+
+- `dsh.running`：布尔。DSH 进程是否真的在跑。`state=running` + `dsh.running=false`
+  = 「环境在跑但没跑 DSH」这一等状态（以前它与"环境没跑"在 JSON 里分不开）。
+- `env_mode`：`"full"` | `"env-only"` | `null`（环境没在跑 / 判不了）。proot 模式恒为 `null`
+  —— 它没有"仅启动环境"这条路（"环境"就是一个解开的 rootfs 目录，没有挂载树要在没有 DSH
+  的情况下维持）。
+
+**实现要点**（都在 `runtime/root/`）：
+
+- `start.sh --no-dsh`：内层照常建挂载树、写 `ready`、写 `run/env-mode`，然后
+  `chroot … entry.sh <port> --no-dsh`；`entry.sh` 做完 DNS/时区/HOME/DSH_HOME 的准备后
+  **把进程挂住**（`while :; do sleep 1; done` + TERM trap）——它一退，宿主侧的内层 start.sh
+  就会认为"环境退出了"。挂住的这一层同时是终端（`linuxctl attach`）与 `dsh start` 的落脚点。
+- `dsh start`：`setsid nsenter -m/-u chroot … supervise.sh --port N`，输出追加到
+  `run/linux.log`；随后等 `run/dsh.url`（最长 20s），超时给出可读原因。
+- 进程清理走 **`runtime/common/env-procs.sh`**（linuxctl 与 stop.sh 共用）：判据是
+  `/proc/<pid>/root == $LINUX_HOME/rootfs`。**只看命令行会误杀别的环境**（免 root 版跑的是
+  同一个 `node /usr/local/bin/dsh web …`）。`stop`（停环境）清**全部**这样的进程；
+  `dsh stop` 只清 `*dsh*web*`（不能顺手把用户开着的终端会话杀掉）。`ENV_ROOTFS` 为空时
+  一个都不动 —— 判据残缺时宁可不做，也不能乱杀。
 
 ---
 
@@ -411,9 +463,14 @@ WebView 需启用 Cookie。加载后应停在 `/`（已鉴权），而不是停�
 - 技术：Kotlin + Jetpack Compose + Material 3（深色优先）。
 - 与 Linux 侧唯一接口：调用 `linuxctl`（root 模式经 `su -c`）并解析 §3.1 的 JSON。
 - 组件：
-  - `LauncherActivity`：Compose 首页 —— 状态卡（模式/状态/URL/运行时长）、一键启动/停止、
-    「打开 DSH」按钮（WebView）、更新角标。
+  - `LauncherActivity`：Compose 首页 —— 状态卡（模式/状态/URL/运行时长/启动方式）、启动区
+    （**一键启动 / 仅启动环境 / 启动 DSH / 停止 DSH / 停止环境** 五个按钮，启用矩阵见 §3.4；
+    仅 Root 版显示后四个）、「打开 DSH」按钮（WebView）、更新角标。
+    ★ 按钮的启用判定是 `core/StartControls.kt` 里的**纯函数**（`state` × `env_mode` ×
+    `dsh.running`），界面只负责画：判定错一格在界面上完全看不出来，必须能被 JVM 单测穷举。
   - `DshWebActivity`：WebView 加载 `status.dsh.url`；提供"在浏览器打开"。
+  - 终端页：`linuxctl attach`（nsenter + chroot）进环境，**与 DSH 无关** ——
+    `env_mode=env-only`（DSH 没起）时照常可用；环境没跑时页面给出「仅启动环境」入口。
   - `LinuxService`：前台服务（Android 14+ 用 `specialUse` 类型）+ `PARTIAL_WAKE_LOCK`；
     通知含 启动/停止/重启/打开 四个 action。
   - `ProvisionActivity`：首次部署向导（选模式、选频道、下载层、进度）。

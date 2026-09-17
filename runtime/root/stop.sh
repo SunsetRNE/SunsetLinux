@@ -28,8 +28,20 @@ ROOTFS_DIR="$LH/rootfs"
 
 SUPERVISOR_PID_FILE="$RUN_DIR/supervisor.pid"
 DSH_PID_FILE="$RUN_DIR/dsh.pid"
+ENV_MODE_FILE="$RUN_DIR/env-mode"
 READY_FILE="$RUN_DIR/ready"
 MOUNTS_FILE="$RUN_DIR/mounts"
+
+# 共用库：环境内进程的识别/清理（判据 /proc/<pid>/root）—— 与 linuxctl 一份实现，
+# 别在这里再写一遍（本仓库已经因为"同一判断两处各写一遍"漂移过一回）。
+COMMON_DIR=""
+for _cand in "$SELF_DIR/common" "$SELF_DIR/../common" "$SELF_DIR/../../runtime/common"; do
+    [ -f "$_cand/env-procs.sh" ] && { COMMON_DIR="$_cand"; break; }
+done
+if [ -n "$COMMON_DIR" ]; then
+    # shellcheck source=/dev/null
+    SUNSETLINUX_SOURCED=1 . "$COMMON_DIR/env-procs.sh"
+fi
 
 UMOUNT=/system/bin/umount
 MOUNT=/system/bin/mount
@@ -132,36 +144,27 @@ kill_stray_dsh() {
 }
 
 # ---------------------------------------------------------------------------
-# kill_env_leftovers —— **不能只信 pid 文件** 的那一半
+# kill_env_leftovers —— **不能只信 pid 文件** 的那一半（"停环境"就该把里面全结束）
 #
 #   真机事故（2026-09-17，模块 1.0.26）：supervise.sh 把 dsh.pid 写进了可写层里的假目录
 #   （docs/STATUS.md §3.10.31），宿主侧根本读不到 → kill_stray_dsh 拿着不存在的 pid 文件
 #   return 0 → 残留的 node/dsh 继续活着 → 它占着 127.0.0.1:3080 和那三个 loop 设备
 #   → **下一次 start 直接失败**（stop 日志里只有一句"loop 设备仍被占用"）。
 #
-#   判据（保守：两条都成立才动手，宁可不杀也不误杀）
-#     ① 命令里有 dsh + web；
-#     ② /proc/<pid>/root 指向**我们的** rootfs（$LINUX_HOME/rootfs）。
-#   为什么要 ②：别的环境里的 dsh 长得一模一样（真机实测：DSHA 的 proot 环境也是
-#   `node /usr/local/bin/dsh web --no-open --host 127.0.0.1 --port N`），唯一区别是
-#   它的 /proc/<pid>/root 是 `/`，而我们的（chroot 进 overlay 的）是 $LINUX_HOME/rootfs。
+#   这里的判据交给共用库（runtime/common/env-procs.sh）：**/proc/<pid>/root == 我们的 rootfs**。
+#   为什么不按命令行挑：别的环境里的 dsh 长得一模一样（真机实测：DSHA 的 proot 版也是
+#   `node /usr/local/bin/dsh web --no-open --host 127.0.0.1 --port N`），而 root 一个是 `/`、
+#   一个是 $LINUX_HOME/rootfs —— 命令行是**分不开**的，误杀别的环境就出大事了。
+#   为什么这里是"全部"而不是只挑 dsh：停环境就该把 DSH、entry.sh 的挂住进程、用户开着的
+#   终端会话、跑着的 apt 一起结束 —— 少杀一个，挂载点就被它钉住，下一次 start 又失败。
+#   （`linuxctl dsh stop` 只停 DSH 时走的是同一个库的**带通配**版本，那是另一件事。）
 # ---------------------------------------------------------------------------
 kill_env_leftovers() {
-    # 管道进 while：循环体在子壳里，但这里**唯一的副作用就是 kill**，不依赖变量回传。
-    ps -A -o PID,ARGS 2>/dev/null | while read -r _pid _cmd; do
-        case "${_pid:-}" in ''|*[!0-9]*) continue ;; esac
-        case "${_cmd:-}" in *dsh*web*) ;; *) continue ;; esac
-        _root="$(readlink "/proc/$_pid/root" 2>/dev/null || printf '')"
-        [ "$_root" = "$ROOTFS_DIR" ] || continue
-        warn "发现环境内残留进程（pid=$_pid, root=$_root）：$_cmd"
-        kill -TERM "$_pid" 2>/dev/null || true
-        _i=0
-        while [ "$_i" -lt 30 ] && [ -d "/proc/$_pid" ]; do sleep 0.1; _i=$(( _i + 1 )); done
-        if [ -d "/proc/$_pid" ]; then
-            warn "  pid=$_pid 未在 3s 内退出，发送 KILL"
-            kill -KILL "$_pid" 2>/dev/null || true
-        fi
-    done
+    if command -v env_proc_kill_all >/dev/null 2>&1; then
+        ENV_ROOTFS="$ROOTFS_DIR" env_proc_kill_all
+    else
+        warn "找不到 env-procs.sh：跳过环境内进程清理（残留进程会占着挂载点/端口，下次 start 可能失败）"
+    fi
     return 0
 }
 
@@ -247,7 +250,7 @@ unmount_upper() {
 # 6) 收尾：清理 run 下的运行期文件（保留 linux.log）
 # ---------------------------------------------------------------------------
 cleanup_run_files() {
-    rm -f "$READY_FILE" "$DSH_PID_FILE" "$SUPERVISOR_PID_FILE" \
+    rm -f "$READY_FILE" "$DSH_PID_FILE" "$SUPERVISOR_PID_FILE" "$ENV_MODE_FILE" \
           "$RUN_DIR/dsh.url" "$RUN_DIR/dsh.port" "$RUN_DIR/mounted.json" \
           "$RUN_DIR/started" 2>/dev/null || true
     : > "$MOUNTS_FILE" 2>/dev/null || true
@@ -344,7 +347,7 @@ main() {
         exit 0
     fi
     # 有残留：清掉进程相关文件但保留 mounts 记录，方便下一次 stop 继续清
-    rm -f "$READY_FILE" "$DSH_PID_FILE" "$SUPERVISOR_PID_FILE" \
+    rm -f "$READY_FILE" "$DSH_PID_FILE" "$SUPERVISOR_PID_FILE" "$ENV_MODE_FILE" \
           "$RUN_DIR/dsh.url" "$RUN_DIR/dsh.port" 2>/dev/null || true
     log "停止完成（有挂载残留，见上面的 WARN）"
     exit 0

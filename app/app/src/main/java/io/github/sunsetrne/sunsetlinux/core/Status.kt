@@ -38,6 +38,28 @@ enum class EnvState(val wire: String, val label: String) {
     }
 }
 
+/**
+ * status JSON 的**附加键** `env_mode`：本次 `start` 起来的是"环境 + DSH"还是"只有环境"。
+ *
+ * 为什么 App 必须知道这件事（而不是只看 state）：拆开启动之后，"环境在跑"再也不能
+ * 说明"DSH 在跑"。两种起法的**下一步操作完全相反** ——
+ *   · [FULL]（一键启动）：DSH 归环境管，单独 `dsh stop` 会被模块拒绝，只能整体停止；
+ *   · [ENV_ONLY]：DSH 是独立的一层，可以单独启停而环境继续跑。
+ * 判错的后果是用户点了按钮却被脚本拒绝（或者更糟：以为能单独停 DSH 结果把环境也停了）。
+ *
+ * `null` 的语义是**判不了**（环境没在跑，或旧模块没报这个键），不是某一档 —— 调用方
+ * 必须把 null 与 [FULL] 区分开，否则旧模块上会给出"本次是一键启动"这种编造的说法。
+ */
+enum class EnvRunMode(val wire: String, val label: String) {
+    FULL("full", "一键启动（环境 + DSH）"),
+    ENV_ONLY("env-only", "仅环境（未启 DSH）");
+
+    companion object {
+        fun from(raw: String?): EnvRunMode? =
+            entries.firstOrNull { it.wire.equals(raw?.trim(), ignoreCase = true) }
+    }
+}
+
 /** `status.layers.<id>`，字段全部容错（不可得为 null，而不是省略）。 */
 data class LayerInfo(
     val id: String,
@@ -70,6 +92,16 @@ data class DshStatus(
     val upperTotal: Long?,
     val lastError: String?,
     /**
+     * 附加键 `dsh.running`（模块新增）：DSH 进程**是否真的在跑**。
+     *
+     * 为什么需要它：拆开启动之后"环境 running"不再蕴含"DSH running"（`env-only` 起法下
+     * 环境跑着而 DSH 没起）。缺这个键时是 null —— 此时 [dshRunning] 会退化为
+     * "有带令牌 url 就算在跑"，绝不能因为缺键就崩或显示成"DSH 在跑"。
+     */
+    val dshRunningReported: Boolean? = null,
+    /** 附加键 `env_mode`；null = 环境没在跑 / 旧模块没报 → **判不了**，不编造。 */
+    val envMode: EnvRunMode? = null,
+    /**
      * 非 root 模式**实际**用的运行时（`proroot` / `proot`），从 status JSON 的新键
      * `rootless:{kind,version}` 读；没启动过时是 null（不编造）。
      *
@@ -84,6 +116,30 @@ data class DshStatus(
 ) {
     val isRunning: Boolean get() = state == EnvState.RUNNING
     val isBusy: Boolean get() = state == EnvState.STARTING || state == EnvState.STOPPING
+
+    /**
+     * 环境是否真的在跑（**与 DSH 无关**）。
+     *
+     * 单开这个名字而不是到处写 `state == RUNNING`：拆开启动之后"环境在跑"是终端可用的
+     * 唯一前提，而"DSH 在跑"是另一件事 —— 两个判断混用会导致 env-only 模式下终端被误判为不可用。
+     */
+    val envRunning: Boolean get() = state == EnvState.RUNNING
+
+    /**
+     * DSH 是否在跑。
+     *
+     * 优先用模块报的 `dsh.running`（它是权威事实）；**缺键时退化**为"有带令牌 url 就算在跑"
+     * —— 那个 url 只在 DSH 起来之后才写进 status，所以"有 url"是旧模块上最接近的近似。
+     * 退化的方向是明确的：没有 url 就判"没在跑"（不猜"可能在跑"），因为"点了「启动 DSH」"
+     * 在模块侧是幂等的，而反过来"以为在跑 → 按钮点不动"会让用户彻底卡住。
+     */
+    val dshRunning: Boolean get() = dshRunningReported ?: !dshUrl.isNullOrBlank()
+
+    /** 本次是按「仅启动环境」起的（环境在跑且模块报了 env-only）。 */
+    val isEnvOnly: Boolean get() = envRunning && envMode == EnvRunMode.ENV_ONLY
+
+    /** 本次是按「一键启动」起的（环境与 DSH 一起）。 */
+    val isFullMode: Boolean get() = envRunning && envMode == EnvRunMode.FULL
 
     /**
      * 「打开 DSH」是否可用。
@@ -188,6 +244,11 @@ data class DshStatus(
                 upperUsed = storage?.num("upper_used"),
                 upperTotal = storage?.num("upper_total"),
                 lastError = o.str("last_error"),
+                // 附加键（§3.1 冻结键名不动，这里只读新增键）：
+                //   · dsh.running 缺失 → null，由 DshStatus.dshRunning 决定退化口径；
+                //   · env_mode 缺失/取值未知 → null（"判不了"），绝不当成 full。
+                dshRunningReported = dsh?.bool("running"),
+                envMode = EnvRunMode.from(o.str("env_mode")),
                 raw = raw,
             )
         }

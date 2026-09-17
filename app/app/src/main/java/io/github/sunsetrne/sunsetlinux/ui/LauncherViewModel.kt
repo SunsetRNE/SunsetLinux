@@ -14,6 +14,7 @@ import io.github.sunsetrne.sunsetlinux.core.Hint
 import io.github.sunsetrne.sunsetlinux.core.LinuxCtl
 import io.github.sunsetrne.sunsetlinux.core.LogExport
 import io.github.sunsetrne.sunsetlinux.core.Prefs
+import io.github.sunsetrne.sunsetlinux.core.StartControls
 import io.github.sunsetrne.sunsetlinux.core.TransportSupport
 import io.github.sunsetrne.sunsetlinux.core.UpdateChecker
 import kotlinx.coroutines.Job
@@ -78,6 +79,21 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
     ) {
         val state: EnvState get() = status?.state ?: EnvState.UNKNOWN
         val canOpenWeb: Boolean get() = status?.canOpenWeb == true
+
+        /**
+         * 启动区五个按钮的启用矩阵（纯函数 [StartControls.forStatus]，单测穷举在
+         * `StartControlsTest`）。放在这里而不是面板里：面板只画，判定不许有第二份。
+         *
+         * `provisioned == false` 才是"明确没部署"；null（还没探测出来）不算 ——
+         * 沿用原界面的口径，免得冷启动首帧把按钮全灰掉。
+         */
+        val controls: StartControls
+            get() = StartControls.forStatus(
+                notProvisioned = provisioned == false,
+                envRunning = status?.envRunning == true,
+                envMode = status?.envMode,
+                dshRunning = status?.dshRunning == true,
+            )
     }
 
     private val prefs = Prefs(app)
@@ -272,6 +288,35 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
     fun stop() = runAction("已提交停止请求") { it.stop() }
 
     fun restart() = runAction("已提交重启请求") { it.restart() }
+
+    // ── 拆开的启动路径（仅 Root 版）
+    //
+    // 三个动作各自先过 edition 判断：按钮只在 Root 版渲染，但动作是 public 的，
+    // 漏一处判断（例如以后有人从终端页直接调）就会在免 root 版上发出一条根本
+    // 不存在的命令。判断放在动作入口，比依赖"调用点记得看 Edition"可靠。
+
+    /** 只起环境、不起 DSH；起来之后终端就能用，DSH 由「启动 DSH」单独接。 */
+    fun startEnvOnly() {
+        if (!Edition.showsSplitStartUi) return
+        runAction("已提交「仅启动环境」请求（未启动 DSH）") { it.startEnvOnly() }
+    }
+
+    /** 单独启动 DSH（环境必须已在运行）。 */
+    fun dshStart() {
+        if (!Edition.showsSplitStartUi) return
+        runAction("已提交「启动 DSH」请求") { it.dshStart() }
+    }
+
+    /**
+     * 单独停止 DSH（环境继续运行）。
+     *
+     * full 模式下模块会拒绝这条命令，原因来自 status 的 `last_error`；这里不做
+     * 二次判断 —— 界面已经按 [StartControls] 置灰，能走到这里说明是 env-only。
+     */
+    fun dshStop() {
+        if (!Edition.showsSplitStartUi) return
+        runAction("已提交「停止 DSH」请求（环境继续运行）") { it.dshStop() }
+    }
 
     /** 恢复出厂：清空可写层。破坏性操作，调用方必须先确认。 */
     fun resetEnvironment() = runAction("已清空可写层（恢复出厂），请重新启动环境") { it.reset() }

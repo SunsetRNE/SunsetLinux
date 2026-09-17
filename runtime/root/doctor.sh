@@ -1125,6 +1125,13 @@ if [ -f "$RUN_DIR/ready" ] && [ -f "$RUN_DIR/supervisor.pid" ]; then
     if [ -n "$spid" ] && [ -d "/proc/$spid" ]; then
         ok "环境运行中（ns_pid=$spid）"
         add_finding ok runtime "running ns_pid=$spid"
+        # 本次是哪种起法（§3.4）：doctor 是排障入口，"环境在跑但没 DSH"必须一眼看出来，
+        # 否则用户会照着一键启动的预期去找一个根本不存在的故障。
+        case "$(cat "$RUN_DIR/env-mode" 2>/dev/null | tr -d ' \n\r')" in
+            full)     info "本次是「一键启动」：环境 + DSH（run/env-mode=full）" ;;
+            env-only) info "本次是「仅启动环境」：环境在跑、DSH 没起（run/env-mode=env-only，维护模式）" ;;
+            *)        info "run/env-mode 缺失或无法识别：判不了本次是一键启动还是仅启动环境（旧模块起的？）" ;;
+        esac
     else
         warn "ready 文件存在但守护进程 $spid 已不存在（残留状态，建议 linuxctl stop 后重新 start）"
         add_finding warn runtime "stale ready"
@@ -1136,6 +1143,13 @@ fi
 if [ -f "$RUN_DIR/dsh.url" ]; then
     ok "run/dsh.url 存在（带令牌登录 URL，权限 $(stat -c '%a' "$RUN_DIR/dsh.url" 2>/dev/null)）"
     add_finding ok dsh_url "present"
+elif env_running && [ "$(cat "$RUN_DIR/env-mode" 2>/dev/null | tr -d ' \n\r')" = "env-only" ]; then
+    # 「仅启动环境」（`linuxctl start --no-dsh`）：**没有 dsh.url 才是正常的** ——
+    # 这条路就是给"在环境里更新/装包/开终端"用的，DSH 没起来是预期行为，不是故障。
+    # （§3.4；用错判据会把它报成 fail，用户就会去"修"一个本来就对的状态。）
+    ok "环境按「仅环境」方式运行（run/env-mode=env-only）：没跑 DSH 是预期行为"
+    info "要用 DSH：linuxctl dsh start（环境保持运行）；要改成整体启动：先 linuxctl stop"
+    add_finding ok dsh_url "env-only"
 elif env_running; then
     # 环境在跑却没有登录 URL = App 一定打不开界面（"环境已在运行，但登录地址还没写出来"）。
     # 这与"环境没起来"是**两件事**，必须分开报，否则用户会去重启一个本来就好的环境。

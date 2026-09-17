@@ -45,4 +45,15 @@ object EditionPolicy {
      * 所以这一组选项也只对 Root 版有意义。
      */
     fun showsLayerModeUi(isRoot: Boolean): Boolean = isRoot
+
+    /**
+     * 「仅启动环境 / 启动 DSH / 停止 DSH」这三个按钮只在 Root 版出现。
+     *
+     * 为什么不是"两版都显示、proot 上点了报错"：`linuxctl start --no-dsh` 与
+     * `linuxctl dsh start|stop` 是 **root 运行时脚本的子命令**，proot 运行时里
+     * 环境与 DSH 本来就是一体（`start.sh` 一次起完），没有"只起环境"这个中间态。
+     * 免 root 版给这几个按钮，用户点下去只会得到"命令不存在"——那条路根本走不通，
+     * 所以按 §一 的原则整块不出现，而不是显示后拒绝。
+     */
+    fun showsSplitStartUi(isRoot: Boolean): Boolean = isRoot
 }

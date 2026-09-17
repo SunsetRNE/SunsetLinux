@@ -271,7 +271,13 @@ object Diagnoser {
         }
 
         // 4) 在跑但 Web 不健康
-        if (state == EnvState.RUNNING && status.dshHealthy == false) {
+        //
+        // ★ 要排除「仅启动环境」且 DSH 没跑的情况：那时 Web 不响应是**预期的**
+        //   （DSH 压根没启动），报"端口无响应 / 端口没写对"会把用户引去做无用的诊断。
+        //   他该做的是点「启动 DSH」—— 那句话由首页状态卡说明，这里不重复也不误导。
+        if (state == EnvState.RUNNING && status.dshHealthy == false &&
+            !(status.envMode == EnvRunMode.ENV_ONLY && !status.dshRunning)
+        ) {
             add(
                 Hint(
                     title = "Web 端口无响应",

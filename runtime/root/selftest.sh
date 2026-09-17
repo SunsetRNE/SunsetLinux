@@ -945,23 +945,21 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# stop.sh 的残留清理不许只信 run/dsh.pid（同一起事故的另一半）
-#   事故链：dsh.pid 被写进可写层假目录 → 宿主读不到 → stop.sh 的 kill_stray_dsh 拿不到 pid
-#   → 残留 node/dsh 继续占着 127.0.0.1:3080 与三个 loop 设备 → **下一次 start 失败**。
-#   所以补了 kill_env_leftovers：判据是「命令像 dsh web」**且**「/proc/<pid>/root == 我们的
-#   rootfs」。这里用桩 ps/readlink 把两条都跑一遍（正例必须杀、反例一根汗毛都不许动 ——
-#   真机上别的环境（DSHA proot）也是 `node /usr/local/bin/dsh web …`，误杀就出事）。
+# 环境内进程清理（runtime/common/env-procs.sh）—— stop.sh 与 linuxctl 共用的一份
+#   事故链（docs/STATUS.md §3.10.31）：dsh.pid 被写进可写层假目录 → 宿主读不到 →
+#   stop.sh 只按 pid 文件补刀 = 没补 → 残留进程占着 127.0.0.1:3080 与 loop → 下次 start 失败。
+#   判据必须带 /proc/<pid>/root（别的环境的 dsh 命令行一模一样，见下）。
 # ---------------------------------------------------------------------------
-head_ "stop.sh 残留清理：只杀 root 在我们 rootfs 里的 dsh"
-_STOP_SRC="$SELF_DIR/stop.sh"
-_SE="$TMP/leftovers.sh"
-{
-    printf 'warn() { printf "WARN %%s\\n" "$*" >&2; }\n'
-    sed -n '/^kill_env_leftovers()/,/^}/p' "$_STOP_SRC" 2>/dev/null
-} > "$_SE"
-if ! grep -q '^kill_env_leftovers()' "$_SE"; then
-    bad "stop.sh 里抽不到 kill_env_leftovers()（函数被改名/删了？残留 dsh 又会占着 3080）"
+head_ "环境内进程清理（判据：/proc/<pid>/root == 我们的 rootfs）"
+_COMMON_DIR="$SELF_DIR/../common"
+if [ ! -f "$_COMMON_DIR/env-procs.sh" ]; then
+    bad "找不到 runtime/common/env-procs.sh（stop.sh / linuxctl 的进程清理都靠它）"
 else
+    if grep -q 'env_proc_kill_all' "$SELF_DIR/stop.sh" 2>/dev/null; then
+        ok "stop.sh 走共用库 env_proc_kill_all（没有自己再写一份 ps|while 匹配）"
+    else
+        bad "stop.sh 没调用 env_proc_kill_all：残留进程会占着挂载点/端口，下次 start 直接失败"
+    fi
     mkdir -p "$TMP/lstub" "$TMP/lroot"
     printf '#!/bin/sh\nprintf "%%s\\n" "${FAKE_ROOT:-}"\n' > "$TMP/lstub/readlink"
     chmod +x "$TMP/lstub/readlink"
@@ -969,29 +967,154 @@ else
     sleep 300 & _V1=$!
     printf '#!/bin/sh\nprintf "%%s\\n" "  PID ARGS" "%s node /usr/local/bin/dsh web --host 127.0.0.1 --port 3080"\n' "$_V1" > "$TMP/lstub/ps"
     chmod +x "$TMP/lstub/ps"
-    PATH="$TMP/lstub:$PATH" ROOTFS_DIR="$TMP/lroot" FAKE_ROOT="$TMP/lroot" \
-        "$SH_BIN" -c '. "$1"; kill_env_leftovers' _ "$_SE" >/dev/null 2>&1
+    PATH="$TMP/lstub:$PATH" FAKE_ROOT="$TMP/lroot" ENV_ROOTFS="$TMP/lroot" \
+        "$SH_BIN" -c '. "$1"; env_proc_kill_all' _ "$_COMMON_DIR/env-procs.sh" >/dev/null 2>&1
     sleep 0.3
     _S1=""
     [ -f "/proc/$_V1/stat" ] && _S1="$(sed 's/.*) //' "/proc/$_V1/stat" 2>/dev/null | cut -c1)"
     case "$_S1" in
-        ""|Z) ok "残留 dsh（root=$TMP/lroot）被杀掉（state=${_S1:-gone}）" ;;
-        *)    bad "残留 dsh 没被杀（state=$_S1）：stop 之后端口/loop 会被它占住，下次 start 直接失败" ;;
+        ""|Z) ok "环境内残留进程（root=$TMP/lroot）被杀掉（state=${_S1:-gone}）" ;;
+        *)    bad "环境内残留进程没被杀（state=$_S1）：stop 之后端口/loop 会被它占住" ;;
     esac
     kill "$_V1" 2>/dev/null || true
     # 反例：root 不是我们的 rootfs（别的环境的同名 dsh）→ 一根汗毛都不许动
     sleep 300 & _V2=$!
     printf '#!/bin/sh\nprintf "%%s\\n" "  PID ARGS" "%s node /usr/local/bin/dsh web --host 127.0.0.1 --port 0"\n' "$_V2" > "$TMP/lstub/ps"
     chmod +x "$TMP/lstub/ps"
-    PATH="$TMP/lstub:$PATH" ROOTFS_DIR="$TMP/lroot" FAKE_ROOT=/ \
-        "$SH_BIN" -c '. "$1"; kill_env_leftovers' _ "$_SE" >/dev/null 2>&1
+    PATH="$TMP/lstub:$PATH" FAKE_ROOT=/ ENV_ROOTFS="$TMP/lroot" \
+        "$SH_BIN" -c '. "$1"; env_proc_kill_all' _ "$_COMMON_DIR/env-procs.sh" >/dev/null 2>&1
     _S2=""
     [ -f "/proc/$_V2/stat" ] && _S2="$(sed 's/.*) //' "/proc/$_V2/stat" 2>/dev/null | cut -c1)"
     case "$_S2" in
         S|R|D) ok "别的环境的 dsh（root=/）没被误杀（state=$_S2）" ;;
-        *)     bad "误杀了 root 不是我们 rootfs 的进程（state=${_S2:-gone}）：判据必须带 /proc/<pid>/root 这一条" ;;
+        *)     bad "误杀了 root 不是我们 rootfs 的进程（state=${_S2:-gone}）：判据必须带 /proc/<pid>/root" ;;
     esac
     kill "$_V2" 2>/dev/null || true
+    # 安全闸：ENV_ROOTFS 为空（判据残缺）→ 一个都不许动
+    sleep 300 & _V3=$!
+    printf '#!/bin/sh\nprintf "%%s\\n" "  PID ARGS" "%s node /usr/local/bin/dsh web --port 3080"\n' "$_V3" > "$TMP/lstub/ps"
+    chmod +x "$TMP/lstub/ps"
+    PATH="$TMP/lstub:$PATH" FAKE_ROOT="$TMP/lroot" ENV_ROOTFS= \
+        "$SH_BIN" -c '. "$1"; env_proc_kill_all' _ "$_COMMON_DIR/env-procs.sh" >/dev/null 2>&1
+    _S3=""
+    [ -f "/proc/$_V3/stat" ] && _S3="$(sed 's/.*) //' "/proc/$_V3/stat" 2>/dev/null | cut -c1)"
+    case "$_S3" in
+        S|R|D) ok "ENV_ROOTFS 为空时一个进程都不动（判据残缺 = 不做，而不是乱杀）" ;;
+        *)     bad "ENV_ROOTFS 为空还动手了（state=${_S3:-gone}）：这是最危险的一类误杀" ;;
+    esac
+    kill "$_V3" 2>/dev/null || true
+fi
+
+# ---------------------------------------------------------------------------
+# 环境 / DSH 分离（App 的「一键启动 · 仅启动环境 · 启动 DSH · 停止 DSH」）
+#   两种方法是**互斥**的：env-mode=env-only 的环境不许被"一键启动"顺手塞进 DSH；
+#   env-mode=full（一键启动）的环境不许单独停 DSH。这条规则在 App 的按钮判定与
+#   linuxctl 里必须一致 —— 这里验的是 linuxctl 那一半（真跑命令，不只看文本）。
+# ---------------------------------------------------------------------------
+head_ "环境 / DSH 分离（仅启动环境 · 启动 DSH · 互斥判定）"
+_ES="$TMP/envsplit"
+mkdir -p "$_ES/run" "$_ES/etc" "$_ES/layers"
+# 假的"环境在跑"现场：ready + supervisor.pid + env-mode。
+# supervisor.pid 用**自测脚本自己**（$$）：只需要一个活着、且 /proc/<pid>/ns/mnt 可读的进程，
+# 本进程就满足（在普通 Linux 上；proot 沙箱里 ns 文件的 stat 会被 ptrace 拦掉 → 见下面的 skip）。
+# 刻意不用新起的 sleep：省一个要收拾的子进程。
+printf '%s\n' "$$" > "$_ES/run/supervisor.pid"
+: > "$_ES/run/ready"
+printf 'env-only\n' > "$_ES/run/env-mode"
+_es_ctl() { LINUX_HOME="$_ES" "$SH_BIN" "$SELF_DIR/linuxctl.sh" "$@"; }
+if [ -r "/proc/$$/ns/mnt" ]; then
+    _es_j="$(_es_ctl status 2>/dev/null)"
+    case "$_es_j" in
+        *'"state":"running"'*) ok "status：环境在跑（state=running）" ;;
+        *) bad "status 没把假环境判成 running：$_es_j" ;;
+    esac
+    case "$_es_j" in
+        *'"running":false'*) ok "status：dsh.running=false（环境在跑、DSH 没跑 —— 一等状态）" ;;
+        *) bad "status 的 dsh.running 不是 false：$_es_j" ;;
+    esac
+    case "$_es_j" in
+        *'"env_mode":"env-only"'*) ok "status：env_mode=env-only（App 靠它做按钮互斥）" ;;
+        *) bad "status 没报 env_mode=env-only：$_es_j" ;;
+    esac
+    # 互斥①：env-only 的环境不许被"一键启动"顺手塞进 DSH（按**拒绝理由**断言，不看退出码 ——
+    # 退出码非 0 也可能是因为别的失败，那样就成了假绿）
+    _es_out="$(_es_ctl start 2>&1 || true)"
+    case "$_es_out" in
+        *仅启动环境*) ok "「一键启动」在 env-only 环境上被拒（要起 DSH 得走 dsh start）" ;;
+        *) bad "「一键启动」在 env-only 环境上的拒绝信息不对：$_es_out" ;;
+    esac
+    # 互斥②：full（一键启动）的环境不许单独停 DSH
+    printf 'full\n' > "$_ES/run/env-mode"
+    _es_out="$(_es_ctl dsh stop 2>&1 || true)"
+    case "$_es_out" in
+        *一键启动*) ok "「停止 DSH」在 full 环境上被拒（要单独控制就先停止环境）" ;;
+        *) bad "「停止 DSH」在 full 环境上的拒绝信息不对：$_es_out" ;;
+    esac
+    rm -f "$_ES/run/ready"
+else
+    rm -f "$_ES/run/ready"
+    skip_ "本机看不到 /proc/<pid>/ns/mnt（proot 沙箱）→ 跳过「环境在跑」那几条；CI 与真机会跑"
+fi
+# 环境没跑之后：dsh start 必须失败、dsh stop 必须幂等成功（这两条与 ns 可见性无关）
+rm -f "$_ES/run/supervisor.pid"
+if _es_ctl dsh start >/dev/null 2>&1; then
+    bad "环境没跑时 dsh start 居然成功了"
+else
+    ok "环境没跑时 dsh start 失败（提示先起环境）"
+fi
+if _es_ctl dsh stop >/dev/null 2>&1; then
+    ok "环境没跑时 dsh stop 幂等成功（顺手清掉过期凭证）"
+else
+    bad "环境没跑时 dsh stop 不是幂等成功"
+fi
+# 一键启动那条链路的**参数透传**（互斥判定之外的真链路）：linuxctl → start.sh → run/env-mode
+_NO_N="$(grep -c -F 'SUNSETLINUX_NO_DSH="$no_dsh"' "$SELF_DIR/linuxctl.sh" 2>/dev/null)"
+_OPT_N="$(grep -c -F -- '--no-dsh)' "$SELF_DIR/start.sh" 2>/dev/null)"
+_EM_N="$(grep -c -F 'env-only' "$SELF_DIR/start.sh" 2>/dev/null)"
+if [ "$_NO_N" = "1" ] && [ "$_OPT_N" = "1" ] && [ "$_EM_N" -ge 1 ]; then
+    ok "start --no-dsh 的链路完整（linuxctl 透传 → start.sh 认参数 → 写 run/env-mode=env-only）"
+else
+    bad "start --no-dsh 的链路缺件（linuxctl=$_NO_N start.sh参数=$_OPT_N env-mode=$_EM_N）"
+fi
+_EN_N="$(grep -c -F -- '--no-dsh' "$SELF_DIR/entry.sh" 2>/dev/null)"
+if [ "$_EN_N" -ge 1 ]; then
+    ok "entry.sh 认 --no-dsh（只准备环境，不 exec supervise.sh）"
+else
+    bad "entry.sh 不认 --no-dsh：环境起来后会立刻跑 DSH，或直接退出"
+fi
+# 拆开启动**不经过 entry.sh**（宿主侧直接 nsenter+chroot 拉 supervise.sh），
+# 所以 API key 那个 env 文件必须由 supervise.sh 自己加载 —— 否则"起来了却用不了"。
+if grep -q -F '. "$ENV_FILE"' "$SELF_DIR/supervise.sh" 2>/dev/null && \
+   grep -q -F 'set -a' "$SELF_DIR/supervise.sh" 2>/dev/null; then
+    ok "supervise.sh 自己加载 \$DSH_HOME/env（dsh start 那条路也拿得到 API key）"
+else
+    bad "supervise.sh 没加载 \$DSH_HOME/env：linuxctl dsh start 起来的 DSH 会拿不到 API key"
+fi
+# 层更新 / 版本回滚 / 快照恢复 / 快照打包都会 stop→start：**必须保持原来的起法**，
+# 否则用户在「仅环境」里更新层，重启后凭空多出一个占着 3080 的 DSH —— 维护模式被悄悄踢掉。
+_RB_N="$(grep -c -F 'resume_start_like_before' "$SELF_DIR/linuxctl.sh" 2>/dev/null)"
+_WM_N="$(grep -c -F 'was_mode="$(env_mode_read' "$SELF_DIR/linuxctl.sh" 2>/dev/null)"
+if [ "$_RB_N" -ge 5 ] && [ "$_WM_N" -ge 4 ]; then
+    ok "重启路径保持原来的起法（resume=$_RB_N 处，was_mode=$_WM_N 处）：env-only 不会被塞回 DSH"
+else
+    bad "重启路径没保持 env-mode（resume=$_RB_N was_mode=$_WM_N）：维护会话会被 DSH 踢掉"
+fi
+# doctor 不许把「仅环境」当成故障：它区分"环境在跑但没跑 DSH"（预期）与
+# "环境在跑却拿不到 dsh.url"（故障，见 §3.10.31）。判错会让用户去修一个正确的状态。
+if [ -r "/proc/$$/ns/mnt" ]; then
+    : > "$_ES/run/ready"
+    printf 'env-only\n' > "$_ES/run/env-mode"
+    printf '%s\n' "$$" > "$_ES/run/supervisor.pid"
+    _es_doc="$(LINUX_HOME="$_ES" SUNSETLINUX_MOUNT=true SUNSETLINUX_UMOUNT=true \
+        "$SH_BIN" "$SELF_DIR/doctor.sh" 2>&1 || true)"
+    case "$_es_doc" in
+        *仅环境*) ok "doctor 认出 run/env-mode=env-only（「没跑 DSH」不再被当成故障）" ;;
+        *) bad "doctor 没认出 env-only：用户会被引去「修」一个本来正确的状态" ;;
+    esac
+    case "$_es_doc" in
+        *"run/dsh.url 不存在 —— App 拿不到"*) bad "doctor 把 env-only 误报成「运行中却缺 dsh.url」" ;;
+        *) ok "doctor 没把 env-only 误报成故障" ;;
+    esac
 fi
 
 printf '\n=========================================\n'

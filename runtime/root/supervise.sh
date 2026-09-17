@@ -46,6 +46,24 @@ done
 case "${PORT:-}" in ''|*[!0-9]*) PORT=3080 ;; esac
 if [ "$PORT" -lt 1 ] || [ "$PORT" -gt 65535 ]; then PORT=3080; fi
 
+# ---------------------------------------------------------------------------
+# 加载环境变量文件（$DSH_HOME/env，0600）—— ★ 谁启动本脚本都得生效
+#
+#   一键启动那条路：entry.sh 已经 `set -a; . env` 之后才 exec 本脚本 → 变量在环境里。
+#   拆开启动那条路（`linuxctl dsh start`，见 docs/architecture.md §3.4）：宿主侧直接
+#   `nsenter + chroot + supervise.sh` 把它拉起来，**不经过 entry.sh** —— 少了这一步，
+#   DSH 会拿不到 API key（以及用户在 env 里放的任何配置），表现是"起来了却用不了"。
+#   重复加载是幂等的（同名变量覆盖成同值），所以两条路都留着这一份最稳。
+# ---------------------------------------------------------------------------
+DSH_HOME="${DSH_HOME:-/root/.dsh}"
+ENV_FILE="$DSH_HOME/env"
+if [ -f "$ENV_FILE" ]; then
+    set -a
+    # shellcheck source=/dev/null
+    . "$ENV_FILE" 2>/dev/null || true
+    set +a
+fi
+
 LOG="$RUN_DIR/linux.log"
 URL_FILE="$RUN_DIR/dsh.url"
 PID_FILE="$RUN_DIR/dsh.pid"

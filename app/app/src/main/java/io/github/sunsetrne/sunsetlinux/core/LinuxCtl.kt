@@ -130,6 +130,53 @@ class LinuxCtl(private val context: Context, val mode: EnvMode) {
 
     suspend fun start(): CtlResult = execBlocking(listOf("start"), TIMEOUT_START_STOP)
 
+    /**
+     * **只起环境**（`start --no-dsh`）：挂载/进入环境，但不起 DSH。
+     *
+     * 用途是把"虚拟环境里更新/维护"和"用 DSH"解耦 —— 一键启动会让 DSH 一直占着
+     * 端口与进程树，而维护（apt/npm、改 profile）根本不需要它。起来之后由
+     * [dshStart] / [dshStop] 单独控制 DSH。
+     *
+     * ⚠️ 环境**已经在跑**时这条命令会被模块拒绝（退出码 1 + 中文 last_error）——
+     * 界面侧的互斥判定见 [StartControls]，不要在调用点各自猜。
+     */
+    suspend fun startEnvOnly(): CtlResult =
+        splitStartGuarded { execBlocking(listOf("start", "--no-dsh"), TIMEOUT_START_STOP) }
+
+    /**
+     * 启动 DSH（`dsh start`）：**要求环境已经在跑**。
+     *
+     * 模块侧是幂等的：DSH 已在跑时不会重复起；`env_mode=full` 时只有"DSH 恰好不在跑"
+     * （崩了）才允许补起，否则拒绝。所以界面在 full 模式下直接置灰（见 [StartControls]），
+     * 免得用户点了才看到拒绝。
+     */
+    suspend fun dshStart(): CtlResult =
+        splitStartGuarded { execBlocking(listOf("dsh", "start"), TIMEOUT_START_STOP) }
+
+    /**
+     * 停止 DSH（`dsh stop`）：环境必须已经在跑。
+     *
+     * `env_mode=full` 时模块**拒绝**（DSH 是那次一键启动的一部分，要停就整体停）——
+     * 拒绝原因会经 [CtlResult.message]（stderr 中文 + status 里的 last_error）回到界面。
+     * `env-only` 时正常停 DSH，环境继续跑，终端仍然可用。
+     */
+    suspend fun dshStop(): CtlResult =
+        splitStartGuarded { execBlocking(listOf("dsh", "stop"), TIMEOUT_START_STOP) }
+
+    /**
+     * 拆开启动的三条命令只对 **root 模式**成立：`dsh start/stop` 与 `--no-dsh` 是
+     * root 运行时（`runtime/root/linuxctl.sh`）的子命令，proot 运行时里没有这两条路。
+     *
+     * 这里返回**明确的中文失败**而不是静默执行：万一以后有人从别处调用（UI 漏了
+     * edition 判断），用户看到的是一句能理解的话，而不是 `unknown command` 的原文。
+     */
+    private suspend fun splitStartGuarded(block: suspend () -> CtlResult): CtlResult =
+        if (mode != EnvMode.ROOT) {
+            CtlResult.fail("「仅启动环境 / 单独启停 DSH」只支持 Root 版：免 root（proot）版的环境与 DSH 是一体的。")
+        } else {
+            block()
+        }
+
     suspend fun stop(): CtlResult = execBlocking(listOf("stop"), TIMEOUT_START_STOP)
 
     /** 重启 = 幂等 stop + 幂等 start。 */
