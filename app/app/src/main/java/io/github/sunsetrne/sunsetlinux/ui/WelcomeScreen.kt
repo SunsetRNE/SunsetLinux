@@ -392,8 +392,14 @@ private fun StepMode(state: WelcomeState) {
             )
             Spacer(Modifier.height(8.dp))
             Text(
-                text = "两个 App 包名不同：可以同时装、各自独立（KernelSU 的 root 授权按包名记，" +
-                    "免 root 版不需要授权）。",
+                // ★ 这句按 edition 分岔：免 root 版里连"KernelSU"这个词都不该出现
+                //   （§六 验收判据是"不出现任何「KernelSU 模块」字样"，而提 root 授权
+                //    对免 root 用户也没有任何可操作的含义）。
+                text = if (Edition.showsModuleUi) {
+                    "两个 App 包名不同：可以同时装、各自独立（root 授权按包名记，两个 App 互不影响）。"
+                } else {
+                    "两个 App 包名不同：可以同时装、各自独立（免 root 版不需要任何授权）。"
+                },
                 style = MaterialTheme.typography.labelSmall,
                 color = TextMuted,
             )

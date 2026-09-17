@@ -7,6 +7,7 @@ import io.github.sunsetrne.sunsetlinux.core.CtlResult
 import io.github.sunsetrne.sunsetlinux.core.Diagnoser
 import io.github.sunsetrne.sunsetlinux.core.DshRuntime
 import io.github.sunsetrne.sunsetlinux.core.DshStatus
+import io.github.sunsetrne.sunsetlinux.core.Edition
 import io.github.sunsetrne.sunsetlinux.core.EnvMode
 import io.github.sunsetrne.sunsetlinux.core.EnvState
 import io.github.sunsetrne.sunsetlinux.core.Hint
@@ -108,18 +109,42 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
             _ui.update { it.copy(zstdReason = reason) }
         }
         // root / 模块状态：一次探测、结果进 UiState（"关于"页与首页都用它）
+        //
+        // ★ 免 root 版**什么都不探**（docs/module-variants.md §一："不探测、不提示、不内嵌"）：
+        //   · `DeviceStatus.root` 会真的起一个 `su` 进程 —— 免 root 版上这既没意义，
+        //     又可能在部分 ROM 上弹出一个授权框（用户会以为装错了 App）；
+        //   · `DeviceStatus.module` 走 su 读 /data/adb —— 免 root 版上必然失败，
+        //     却要白等一次超时，读到的"模块读不到"还会写进关于页。
+        //   所以这两条探测在免 root 版**根本不发起**，而不是"发起了再隐藏结果"。
         viewModelScope.launch {
             val io2 = kotlinx.coroutines.Dispatchers.IO
-            val root = kotlinx.coroutines.withContext(io2) {
-                io.github.sunsetrne.sunsetlinux.core.DeviceStatus.root(force = true)
+            val root = if (Edition.needsSu) {
+                kotlinx.coroutines.withContext(io2) {
+                    io.github.sunsetrne.sunsetlinux.core.DeviceStatus.root(force = true)
+                }
+            } else {
+                // 免 root 版：su 是"不需要"，不是"探测失败"——如实写一句话，别留空白
+                io.github.sunsetrne.sunsetlinux.core.RootProbe(
+                    io.github.sunsetrne.sunsetlinux.core.RootState.UNKNOWN,
+                    "免 root 版不探测 su（也不需要）",
+                )
             }
-            val module = kotlinx.coroutines.withContext(io2) {
-                io.github.sunsetrne.sunsetlinux.core.DeviceStatus.module(force = true)
+            val module = if (Edition.showsModuleUi) {
+                kotlinx.coroutines.withContext(io2) {
+                    io.github.sunsetrne.sunsetlinux.core.DeviceStatus.module(force = true)
+                }
+            } else {
+                null
             }
             _ui.update {
-                it.copy(rootLabel = root.label, rootHint = root.hint,
-                        moduleLabel = module.label, moduleHint = module.hint,
-                        moduleReadable = module.readable, moduleVersion = module.version)
+                it.copy(
+                    rootLabel = root.label,
+                    rootHint = root.hint,
+                    moduleLabel = module?.label,
+                    moduleHint = module?.hint,
+                    moduleReadable = module?.readable == true,
+                    moduleVersion = module?.version,
+                )
             }
         }
         startPolling()
@@ -152,7 +177,11 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
         try {
             val choice = DshRuntime.resolveMode(app, prefs)
             val ctl = LinuxCtl(app, choice.mode)
-            val su = DshRuntime.suAvailable()
+            // ★ 轮询里的 su 探测也必须按 edition 短路：`DshRuntime.suAvailable()` 会起一个
+            //   `su` 进程（60 秒缓存），在免 root 版上每轮白跑一次、还可能弹出授权框 ——
+            //   "免 root 版不探测 su"是 docs/module-variants.md §一 的明确要求。
+            //   免 root 版固定 false（它本来就没有 su，也不需要）。
+            val su = if (Edition.needsSu) DshRuntime.suAvailable() else false
             val exists = ctl.exists()
 
             val status = if (exists) ctl.status() else DshStatus.unavailable(NOT_PROVISIONED_HINT)
@@ -224,12 +253,14 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
         _ui.update { it.copy(logAutoFollow = enabled) }
     }
 
-    /** 手动刷新（下拉/按钮），会重新探测 su。 */
+    /** 手动刷新（下拉/按钮），会重新探测 su（免 root 版不探，见 [refresh]）。 */
     fun forceRefresh() {
         viewModelScope.launch {
             _ui.update { it.copy(loading = true) }
-            DshRuntime.invalidateSuProbe()
-            DshRuntime.suAvailable(force = true)
+            if (Edition.needsSu) {
+                DshRuntime.invalidateSuProbe()
+                DshRuntime.suAvailable(force = true)
+            }
             refresh()
         }
     }
@@ -391,7 +422,20 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
         private const val LOG_POLL_MS = 5_000L
         private const val ACTION_TIMEOUT_MS = 200_000L
         private const val UPDATE_CHECK_INTERVAL_MS = 10 * 60 * 1000L
-        const val NOT_PROVISIONED_HINT =
-            "环境尚未部署：没有找到 linuxctl。请先执行部署向导（Root 模式需先装好 KernelSU 模块）。"
+
+        /**
+         * "没找到 linuxctl"时首页那句指引。
+         *
+         * ★ 必须按 edition 分岔：这句话直接出现在首屏，而"Root 模式需先装好 KernelSU 模块"
+         *   对免 root 用户是一条**走不通的路**（他的机器上没有 KernelSU），
+         *   免 root 版该给的下一步是"打开时会自动铺 / 去侧边栏手动铺"。
+         */
+        val NOT_PROVISIONED_HINT: String =
+            if (Edition.needsKernelSuModule) {
+                "环境尚未部署：没有找到 linuxctl。请先执行部署向导（Root 模式需先装好 KernelSU 模块）。"
+            } else {
+                "环境尚未部署：没有找到 linuxctl。免 root 版正常会在打开时自动铺好；" +
+                    "也可以从侧边栏「重新部署 / 首启引导」手动铺。"
+            }
     }
 }

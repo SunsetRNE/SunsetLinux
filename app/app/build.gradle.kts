@@ -402,12 +402,21 @@ abstract class SyncBundledModule : DefaultTask() {
             .orEmpty()
 
         fun versionOf(zip: File): String =
-            zip.name.removePrefix("sunsetlinux-module-").removeSuffix(".zip").trim().removePrefix("v")
+            zip.name.removePrefix("sunsetlinux-module-").removeSuffix(".zip")
+                .removeSuffix("-bare").removeSuffix("-full")
+                .trim().removePrefix("v")
+
+        /** 变体名（docs/module-variants.md §2.6）：默认名 = full（自带 DSH），`-bare` = 不带 DSH。 */
+        fun variantOf(zip: File): String = if (zip.name.endsWith("-bare.zip")) "bare" else "full"
 
         fun key(v: String): List<Int> =
             v.split('.', '-', '_', '+').map { seg -> seg.takeWhile { it.isDigit() }.toIntOrNull() ?: 0 }
 
-        val zips = candidates.files.filter { it.isFile && it.name.endsWith(".zip") }
+        // ★ APK 内嵌的是 **bare 变体**：APK 的 base/full 档已经把 dsh 层放进离线包了，
+        //   模块再内嵌一份 = 同样的 48 MB 塞两遍。默认名（不带后缀）只给 full，所以这里
+        //   **优先挑 -bare**；确实没有 bare 时才退回（老仓库产物/单手包场景）。
+        val allZips = candidates.files.filter { it.isFile && it.name.endsWith(".zip") }
+        val zips = allZips.filter { it.name.endsWith("-bare.zip") }.ifEmpty { allZips }
         val pick = zips.firstOrNull { versionOf(it) == wanted.removePrefix("v") }
             ?: zips.maxWithOrNull(
                 Comparator { a, b ->
@@ -446,6 +455,7 @@ abstract class SyncBundledModule : DefaultTask() {
                 append("{\n")
                 append("  \"schema\": 1,\n")
                 append("  \"version\": \"").append(wanted.ifEmpty { "v$version" }).append("\",\n")
+                append("  \"variant\": \"").append(variantOf(pick)).append("\",\n")
                 append("  \"file\": \"sunsetlinux-module-").append(version).append(".zip\",\n")
                 append("  \"asset\": \"module/sunsetlinux-module.zip\",\n")
                 append("  \"size\": ").append(to.length()).append(",\n")
@@ -454,7 +464,7 @@ abstract class SyncBundledModule : DefaultTask() {
                 append("}\n")
             },
         )
-        logger.lifecycle("已内嵌模块包：${pick.name} → assets/module/（${to.length() / 1024} KB，sha256 ${sha.take(12)}…）")
+        logger.lifecycle("已内嵌模块包：${pick.name}（变体 ${variantOf(pick)}）→ assets/module/（${to.length() / 1024} KB，sha256 ${sha.take(12)}…）")
     }
 }
 

@@ -64,6 +64,63 @@ MODULE_PKG_DIR="${MODULE_PKG_DIR:-/sdcard/Download}"
 CHANNELS_JSON="$ETC_DIR/channels.json"
 STATE_JSON="$ETC_DIR/state.json"
 
+# ---------------------------------------------------------------------------
+# 内置官方频道（docs/module-variants.md §2.4）
+#
+# 为什么要写进**运行时**而不只留在 App 里：模块可以脱离 App 使用（KernelSU 管理器 +
+# 终端），而"一条指令从频道装 DSH"的前提是 channels.json 里有一条**可信**频道。
+# 公钥不是秘密 —— 它是这条频道的信任根（与 App 的 core/Prefs.kt 的 OFFICIAL、
+# module/mkmodule.sh 里的 URL 逐字一致；改了任一处都要同步，App 有契约测试盯着）。
+# ---------------------------------------------------------------------------
+SUNSETLINUX_OFFICIAL_CHANNEL_URL="${SUNSETLINUX_OFFICIAL_CHANNEL_URL:-https://sunsetrne.github.io/SunsetLinux/channel/channel.json}"
+SUNSETLINUX_OFFICIAL_CHANNEL_PUBKEY="${SUNSETLINUX_OFFICIAL_CHANNEL_PUBKEY:-YXoAcwa3clZCRd7+DlIHMS3cQ40HlyXVSKblvX5Ye1M=}"
+
+# 确保 channels.json 里有 official（合并，不覆盖用户自己的频道）。
+# 读时合并、写时不删：与 App 的 withBuiltin/withoutBuiltin 同一套语义，不会重复。
+ensure_official_channel() {
+    mkdir -p "$ETC_DIR" 2>/dev/null || true
+    if [ -f "$CHANNELS_JSON" ] && grep -q '"id"[[:space:]]*:[[:space:]]*"official"' "$CHANNELS_JSON" 2>/dev/null; then
+        return 0
+    fi
+    local node=""
+    node="$(find_node || true)"
+    if [ -n "$node" ]; then
+        # 用 node 合并（不引第三方依赖：App/CLI 都靠 node 做验签，这里本来就需要它）
+        "$node" -e '
+          const fs = require("node:fs");
+          const [p, url, pk] = process.argv.slice(1);
+          let doc = { schema: 1, channels: [] };
+          try { const d = JSON.parse(fs.readFileSync(p, "utf8")); if (Array.isArray(d.channels)) doc = d; } catch {}
+          if (!doc.schema) doc.schema = 1;
+          if (!doc.channels.some((c) => c && c.id === "official")) {
+            doc.channels.unshift({ id: "official", name: "SunsetLinux 官方", url, pubkey: pk, enabled: true, priority: 10 });
+          }
+          fs.writeFileSync(p, JSON.stringify(doc, null, 2));
+        ' "$CHANNELS_JSON" "$SUNSETLINUX_OFFICIAL_CHANNEL_URL" "$SUNSETLINUX_OFFICIAL_CHANNEL_PUBKEY" >/dev/null 2>&1 || true
+        [ -f "$CHANNELS_JSON" ] && log "已确保内置官方频道在 $CHANNELS_JSON 里"
+        return 0
+    fi
+    if [ ! -f "$CHANNELS_JSON" ]; then
+        cat > "$CHANNELS_JSON" <<EOF
+{
+  "schema": 1,
+  "channels": [
+    {
+      "id": "official",
+      "name": "SunsetLinux 官方",
+      "url": "$SUNSETLINUX_OFFICIAL_CHANNEL_URL",
+      "pubkey": "$SUNSETLINUX_OFFICIAL_CHANNEL_PUBKEY",
+      "enabled": true,
+      "priority": 10
+    }
+  ]
+}
+EOF
+        log "已写入内置官方频道：$CHANNELS_JSON"
+    fi
+    return 0
+}
+
 # 更新路径**只用 gzip 产物**：设备侧实测没有 zstd（/system/bin/zstd 不存在），
 # 只有 toybox 的 gzip。App 侧走 .zst（体积小约 35%），WebUI 侧走 .gz。
 # 这就是 layer-spec §3 要求"两种都发布"的原因。
@@ -341,6 +398,36 @@ for (const ch of out.channels) {
   }
 }
 out.updates = Object.values(byId).sort((a, b) => (a.id < b.id ? -1 : 1));
+
+// ---- resolve 模式：给「一条指令从频道装」用（docs/module-variants.md §2.4）----
+// ★ 输出 **TSV 而不是 JSON**：调用方是设备侧的 mksh 脚本，没有 jq；
+//   一行制表符分隔的字段用 `read`/`set --` 就能安全取用（URL 里不会有制表符）。
+// ★ 只从**验签通过**的频道里挑（out.updates 的构造已经过滤了 signature_valid）。
+if (mode === 'resolve') {
+  const want = process.argv[6] || '';
+  const cands = (out.updates || []).filter((u) => u.id === want);
+  cands.sort((a, b) => (b.priority ?? 0) - (a.priority ?? 0));
+  const pick = cands[0] || null;
+  if (!pick) {
+    // 把"为什么没有"说清楚：全频道验签失败和"已是最新"是**两件事**，
+    // 前端（与用户）必须能分辨 —— 前者要报警，后者只是没事可做。
+    const chs = out.channels || [];
+    const failed = chs.filter((c) => !c.signature_valid);
+    const allFailed = failed.length > 0 && failed.length === chs.length;
+    // 把**每个**失败频道的原因都带上（最多两个）：只说"第一个"会在"官方频道离线、
+    // 自建频道被改坏"这种组合里指错方向。
+    const detail = failed.slice(0, 2).map((c) => `${c.id}: ${c.error || '未知原因'}`).join('；');
+    const reason = allFailed
+      ? `所有频道都没通过校验（${detail}）`
+      : '频道里没有该层，或本机已是最新';
+    process.stdout.write(`RESOLVE\tNONE\t${String(reason).replace(/\s+/g, ' ')}\n`);
+    process.exit(0);
+  }
+  process.stdout.write(['RESOLVE', pick.id, pick.version, pick.url || '', pick.sha256 || '',
+                        pick.sha256_raw || '', pick.size_raw || '', pick.channel || ''].join('\t') + '\n');
+  process.exit(0);
+}
+
 process.stdout.write(JSON.stringify(out));
 MJS
     chmod 0644 "$NODE_VERIFIER" 2>/dev/null || true
@@ -356,6 +443,9 @@ cmd_check() {
         emit '{"ok":false,"error":"找不到 node（runtime 层未安装或未挂载）。检查更新需要 Node 做 Ed25519 验签（不在浏览器里实现密码学）。","hint":"先完成首次部署（linuxctl provision），或确认 runtime 层已在 layers/ 中"}'
         return 1
     fi
+    # ★ 内置官方频道先补上：CLI-only 用户（只装模块、没装 App）本来没有 channels.json，
+    #   "一条指令从频道装"必须自己把这条可信频道准备好（docs/module-variants.md §2.4）。
+    ensure_official_channel
     if [ ! -f "$CHANNELS_JSON" ]; then
         emit '{"ok":false,"error":"没有频道配置","hint":"先在 App 的设置页添加频道，或运行：$LINUX_HOME/bin/sunsetlinux-channel channels add ..."}'
         return 1
@@ -509,6 +599,56 @@ cmd_apply() {
     fi
     emit "{\"ok\":false,\"error\":\"安装失败\",\"detail\":${upd:-null}}"
     return 1
+}
+
+# ---------------------------------------------------------------------------
+# install <layer> —— **一条指令**从内置官方频道装/更新该层
+#   （docs/module-variants.md §2.4：模块 bare 变体与 CLI-only 用户的正道）
+#
+# 与 apply 的分工：apply 是"给我 URL+版本，我去下载"，参数由前端从 check 结果里挑；
+# install 是"别问了，从可信频道装这一层的最新版" —— 所以它自己跑一次解析。
+# ★ 解析（拉清单 + Ed25519 验签 + 版本比较）仍然全在 Node 里做，shell 只读一行 TSV。
+# ---------------------------------------------------------------------------
+cmd_install() {
+    local layer="${1:-}"
+    case "$layer" in base|runtime|dsh) ;; *) emit '{"ok":false,"error":"用法：update.sh install <base|runtime|dsh>"}'; return 1 ;; esac
+
+    local node=""
+    node="$(find_node || true)"
+    if [ -z "$node" ]; then
+        emit '{"ok":false,"error":"找不到 node（runtime 层未安装或未挂载）","hint":"先完成首次部署或安装 runtime 层"}'
+        return 1
+    fi
+    ensure_official_channel
+    write_node_verifier
+
+    local line=""
+    line="$("$node" "$NODE_VERIFIER" "$CHANNELS_JSON" "$STATE_JSON" resolve "$MODULE_DIR/module.prop" "$layer" 2>/dev/null)" || true
+    case "$line" in
+        RESOLVE*) ;;
+        *) emit "{\"ok\":false,\"error\":\"频道解析失败（验签没过或网络不可达）\",\"hint\":\"先跑 linuxctl update-check，它会给出每个频道的错误原文\"}"; return 1 ;;
+    esac
+
+    local _tag="" id="" ver="" url="" sha="" raw="" rawsize="" chan="" reason=""
+    local _tab _oifs
+    _tab="$(printf '\t')"
+    _oifs="$IFS"
+    IFS="$_tab"
+    set -- $line
+    IFS="$_oifs"
+    _tag="${1:-}"; id="${2:-}"; ver="${3:-}"; url="${4:-}"; sha="${5:-}"; raw="${6:-}"; rawsize="${7:-}"; chan="${8:-}"
+    # NONE 那一行：第 3 个字段是**原因**（不是版本号）——"全频道验签失败"要能报出来
+    if [ "$id" = "NONE" ]; then reason="$ver"; id=""; ver=""; fi
+
+    if [ "$id" != "$layer" ] || [ -z "$ver" ] || [ -z "$url" ]; then
+        [ -n "$reason" ] || reason="频道里没有可用的 $layer 层（或已是最新）"
+        emit "{\"ok\":false,\"error\":\"$(jesc "$reason")\",\"channel\":$( [ -n "$chan" ] && printf '"%s"' "$(jesc "$chan")" || printf 'null' ),\"hint\":\"先跑 linuxctl update-check 看每个频道的错误原文；已是最新时无需安装\"}"
+        return 1
+    fi
+    log "内置官方频道给出：$id $ver（频道 ${chan:-?}）"
+    # 把 raw 大小透给 apply，让它把空间检查做在**下载之前**
+    UPDATE_NEED_BYTES="${rawsize:-0}"
+    cmd_apply "$id" "$ver" "$url" "$sha"
 }
 
 # ---------------------------------------------------------------------------
@@ -698,11 +838,12 @@ main() {
     case "$sub" in
         check)    cmd_check "$@" ;;
         apply)    cmd_apply "$@" ;;
+        install)  cmd_install "$@" ;;
         versions) cmd_versions "$@" ;;
         module-info)   cmd_module_info "$@" ;;
         module-check)  cmd_module_check "$@" ;;
         module-apply)  cmd_module_apply "$@" ;;
-        *) printf '[update] 用法：update.sh check|apply|versions|module-info|module-check|module-apply\n' >&2; exit 2 ;;
+        *) printf '[update] 用法：update.sh check|apply|install|versions|module-info|module-check|module-apply\n' >&2; exit 2 ;;
     esac
 }
 

@@ -8,9 +8,17 @@
 # **`/data/sunsetlinux/bin/linuxctl` 永远不会出现 → App 无法控制环境**。
 #
 # 用法：
-#   bash module/mkmodule.sh [--version <ver>] [--out <zip 路径>]
-# 产物：
-#   dist/sunsetlinux-module.zip（+ .sha256、MANIFEST 清单）
+#   bash module/mkmodule.sh [--version <ver>] [--out <zip 路径>] [--variant full|bare]
+#                           [--dsh-layer <dsh-<版本>.erofs.gz>] [--dsh-sums <SHA256SUMS.layers.txt>]
+# 产物（见 docs/module-variants.md §2）：
+#   full → dist/sunsetlinux-module-<ver>.zip        ← **默认版本**，自带 DSH（dsh/ 目录）
+#   bare → dist/sunsetlinux-module-<ver>-bare.zip   ← 不带 DSH，一条指令从频道装
+#
+# 为什么默认是 full 但**必须显式给 --dsh-layer**：
+#   没有 dsh 层却产出"默认名"的包，就是"把不带 DSH 的包冒充默认版本"—— 用户装完
+#   发现起不来，而这正是要消灭的失败模式。所以两条都硬拦：
+#     · full 且没给 --dsh-layer → 拒绝打包（提示改用 --variant bare）
+#     · bare 且给了 --dsh-layer → 也拒绝（不许"标 bare 却夹带"）
 # =============================================================================
 set -euo pipefail
 
@@ -19,19 +27,38 @@ REPO_DIR="$(cd -- "$SELF_DIR/.." && pwd -P)"
 
 VERSION=""
 OUT=""
+VARIANT="full"
+DSH_LAYER=""
+DSH_SUMS=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --version) VERSION="${2:-}"; shift 2 ;;
         --version=*) VERSION="${1#*=}"; shift ;;
         --out) OUT="${2:-}"; shift 2 ;;
         --out=*) OUT="${1#*=}"; shift ;;
-        -h|--help) sed -n '2,16p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        --variant) VARIANT="${2:-}"; shift 2 ;;
+        --variant=*) VARIANT="${1#*=}"; shift ;;
+        --dsh-layer) DSH_LAYER="${2:-}"; shift 2 ;;
+        --dsh-layer=*) DSH_LAYER="${1#*=}"; shift ;;
+        --dsh-sums) DSH_SUMS="${2:-}"; shift 2 ;;
+        --dsh-sums=*) DSH_SUMS="${1#*=}"; shift ;;
+        -h|--help) sed -n '2,20p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "未知参数：$1" >&2; exit 2 ;;
     esac
 done
 
 log() { printf '[mkmodule] %s\n' "$*" >&2; }
 die() { printf '[mkmodule] 错误: %s\n' "$*" >&2; exit 1; }
+
+# 官方频道 URL：与 App（core/Prefs.kt 的 OFFICIAL）、runtime/root/update.sh 里的**同一把**。
+# 三处必须逐字一致（App 有 OfficialChannelContractTest 盯着；改了这里就要同步）。
+SUNSETLINUX_OFFICIAL_CHANNEL_URL="${SUNSETLINUX_OFFICIAL_CHANNEL_URL:-https://sunsetrne.github.io/SunsetLinux/channel/channel.json}"
+
+# 「编译只在 CI」的可判定形式之一（docs/module-variants.md §3.2）：
+# 本地打出来的包只用于开发/排障，不作为发布来源 —— 这里出声，并落一个标记。
+if [ "${GITHUB_ACTIONS:-}" != "true" ]; then
+    log "⚠️  本次是**本地打包**：产物仅供开发/排障，不作为发布来源（发布只由 CI 的 main 流水线产出）"
+fi
 
 command -v zip >/dev/null 2>&1 || die "缺少 zip 命令"
 
@@ -84,6 +111,54 @@ if [ -z "$VERSION" ]; then
     VERSION="$(sed -n 's/^version=//p' "$SELF_DIR/module.prop" | head -n1)"
 fi
 [ -n "$VERSION" ] || die "无法确定版本（module.prop 里没有 version=，请用 --version 指定）"
+
+# ---- 变体校验 + 内嵌 DSH 层的元信息 -----------------------------------------
+# 规则（docs/module-variants.md §2.1/§2.6）：默认 full 必须有层；bare 必须没有层。
+# 这条硬拦是**故意的**：允许"full 但没层"就等于允许发布一个冒充默认版本的残包。
+case "$VARIANT" in
+    full|bare) ;;
+    *) die "未知变体：$VARIANT（只支持 full / bare）" ;;
+esac
+
+DSH_VER=""
+DSH_FILE=""
+DSH_SHA_GZ=""
+DSH_SHA_RAW=""
+DSH_SIZE_RAW=""
+DSH_SRC_NAME=""
+
+if [ "$VARIANT" = "full" ]; then
+    [ -n "$DSH_LAYER" ] || die "full 变体必须给 --dsh-layer <dsh-<版本>.erofs.gz>（拿不到层就用 --variant bare）"
+fi
+if [ "$VARIANT" = "bare" ] && [ -n "$DSH_LAYER" ]; then
+    die "bare 变体不接受 --dsh-layer（不许标 bare 却夹带 DSH）"
+fi
+
+if [ -n "$DSH_LAYER" ]; then
+    [ -f "$DSH_LAYER" ] || die "找不到 dsh 层文件：$DSH_LAYER"
+    DSH_SRC_NAME="$(basename "$DSH_LAYER")"
+    case "$DSH_SRC_NAME" in
+        *.erofs.gz) ;;
+        *) die "只接受 .erofs.gz（设备侧没有 zstd；裸镜像 201 MB 也不该塞进模块）——实际：$DSH_SRC_NAME" ;;
+    esac
+    DSH_VER="${DSH_SRC_NAME#dsh-}"
+    DSH_VER="${DSH_VER%.erofs.gz}"
+    [ -n "$DSH_VER" ] && [ "$DSH_VER" != "$DSH_SRC_NAME" ] \
+        || die "层文件名要形如 dsh-<版本>.erofs.gz（解析不出版本）：$DSH_SRC_NAME"
+    DSH_FILE="dsh-$DSH_VER.erofs.gz"
+    DSH_SHA_GZ="$(sha256sum "$DSH_LAYER" | awk '{print $1}')"
+
+    # sha256_raw / size_raw 从频道的 SHA256SUMS.layers.txt 里取（**绝不填 0 冒充**）。
+    # 取不到就留 null：那只是"解压后没法二次核对"，不影响安装，但 manifest 要如实写。
+    [ -n "$DSH_SUMS" ] || DSH_SUMS="$REPO_DIR/dist/SHA256SUMS.layers.txt"
+    if [ -f "$DSH_SUMS" ]; then
+        line="$(awk -v want="dsh-$DSH_VER.erofs" '$2==want || $3==want {print; exit}' "$DSH_SUMS" 2>/dev/null || true)"
+        # 两种格式都认：`<sha256_raw>  dsh-<ver>.erofs <size_raw>`（本项目）与 sha256sum 的 `<sha>  <file>`
+        DSH_SHA_RAW="$(printf '%s' "$line" | awk '{print $1}')"
+        DSH_SIZE_RAW="$(printf '%s' "$line" | awk 'NF>=3 && $3 ~ /^[0-9]+$/ {print $3}')"
+    fi
+    log "内嵌 DSH 层：$DSH_FILE（版本 $DSH_VER，gz sha256 ${DSH_SHA_GZ:0:12}…，raw ${DSH_SHA_RAW:0:12}…）"
+fi
 
 # ---- 组装 -------------------------------------------------------------------
 STAGE="$REPO_DIR/build/module-pkg"
@@ -179,6 +254,40 @@ cp -rf "$SELF_DIR/webroot/." "$STAGE/webroot/"
 chmod -R a+rX "$STAGE/webroot" 2>/dev/null || true
 install -m 0644 "$SELF_DIR/webroot/index.html" "$STAGE/webroot/index.html"
 
+# ---- dsh/：**内嵌 DSH 层**（只有 full 变体；docs/module-variants.md §2.2）------
+# 这里放的是**官方签名频道里的 gzip 产物**（不是裸镜像，也不是"DSH 源码树"）：
+#   · 设备侧只有 toybox 的 gzip，没有 zstd → 只能 .gz
+#   · 裸镜像 201 MB 压不动 → 不该进模块 zip
+#   · 让设备自己构建 DSH 层正是 `supervise.sh exit 78` 的成因（缺 web profile / pnpm /
+#     软链层级）—— 把它交给 CI 一次做好，才是"只缺 DSH 这一块"的正确补法。
+# manifest.json 是**落地时唯一要读的东西**：版本、文件名、两个 sha256、raw 大小、来源。
+if [ "$VARIANT" = "full" ]; then
+    mkdir -p "$STAGE/dsh"
+    install -m 0644 "$DSH_LAYER" "$STAGE/dsh/$DSH_FILE"
+    {
+        printf '{\n'
+        printf '  "schema": 1,\n'
+        printf '  "layer": "dsh",\n'
+        printf '  "variant": "full",\n'
+        printf '  "version": "%s",\n' "$DSH_VER"
+        printf '  "file": "%s",\n' "$DSH_FILE"
+        printf '  "sha256_gz": "%s",\n' "$DSH_SHA_GZ"
+        printf '  "sha256_raw": %s,\n' "$( [ -n "$DSH_SHA_RAW" ] && printf '"%s"' "$DSH_SHA_RAW" || printf 'null' )"
+        printf '  "size_raw": %s,\n' "$( [ -n "$DSH_SIZE_RAW" ] && printf '%s' "$DSH_SIZE_RAW" || printf 'null' )"
+        printf '  "source": {\n'
+        printf '    "kind": "channel",\n'
+        printf '    "url": "%s",\n' "$SUNSETLINUX_OFFICIAL_CHANNEL_URL"
+        printf '    "built_at": "%s"\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        printf '  }\n'
+        printf '}\n'
+    } > "$STAGE/dsh/manifest.json"
+    [ -f "$STAGE/dsh/$DSH_FILE" ] || die "dsh 载荷没铺进 stage"
+    log "dsh/ 铺入：$DSH_FILE + manifest.json"
+else
+    rm -rf "$STAGE/dsh"
+    log "变体 bare：不内嵌 DSH（DSH 从内置官方频道用 linuxctl dsh install 一条指令装）"
+fi
+
 # ---- 夹具：让 selftest.sh 在真机上也能真跑（否则只能 SKIP 掉全部断言） --------
 mkdir -p "$STAGE/bin/fixtures"
 for f in "${BIN_FIXTURES[@]}"; do
@@ -192,29 +301,59 @@ for f in "${BIN_FIXTURES[@]}"; do
     fi
 done
 
-# ---- 写入版本 ---------------------------------------------------------------
-# module.prop 的 version 用给定版本；versionCode 若没有就按语义版本折算
+# ---- 写入版本 + 变体标识 -----------------------------------------------------
+# module.prop 的 version 用给定版本；versionCode 若没有就按语义版本折算。
+# variant= 是**新增键**（KernelSU/Magisk 忽略未知键）：让用户与工具都能一眼看出
+# "这个包自带 DSH 还是不带"，也是回归断言（tools/module-variant-selftest.mjs）的抓手。
 if grep -q '^version=' "$STAGE/module.prop"; then
     sed -i "s|^version=.*|version=$VERSION|" "$STAGE/module.prop"
 else
     printf 'version=%s\n' "$VERSION" >> "$STAGE/module.prop"
 fi
+if grep -q '^variant=' "$STAGE/module.prop"; then
+    sed -i "s|^variant=.*|variant=$VARIANT|" "$STAGE/module.prop"
+else
+    printf 'variant=%s\n' "$VARIANT" >> "$STAGE/module.prop"
+fi
+# 描述里写明变体（模块管理器里显示的就是它）：用户不打开包也该知道装的是哪一种。
+case "$VARIANT" in
+    full) _VNOTE="本包**自带 DSH**（$DSH_VER）：装完重启即可用，可更新、可一键回滚到内置版本。" ;;
+    bare) _VNOTE="本包**不含 DSH**：DSH 用一条指令从官方频道装（linuxctl dsh install）。" ;;
+esac
+if grep -q '^description=' "$STAGE/module.prop"; then
+    _DBASE="$(sed -n 's/^description=//p' "$STAGE/module.prop" | head -n1 | sed 's/ *\[变体[^]]*\]$//')"
+    printf '%s [变体 %s]\n' "$_DBASE" "$VARIANT" > "$STAGE/.desc"
+    sed -i "s|^description=.*|description=$(cat "$STAGE/.desc")|" "$STAGE/module.prop"
+    rm -f "$STAGE/.desc"
+fi
 {
     printf 'packed_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     printf 'packer=mkmodule.sh\n'
     printf 'version=%s\n' "$VERSION"
+    printf 'variant=%s\n' "$VARIANT"
+    printf 'build_source=%s\n' "$( [ "${GITHUB_ACTIONS:-}" = "true" ] && printf 'ci' || printf 'local' )"
+    [ -n "$DSH_VER" ] && printf 'dsh_version=%s\n' "$DSH_VER"
+    printf 'note=%s\n' "$_VNOTE"
     printf '\n--- webroot/ 内容 ---\n'
     ( cd "$STAGE" && find webroot -type f 2>/dev/null | sort )
     printf '\n--- bin/ 内容 ---\n'
     ( cd "$STAGE" && find . -type f | sort )
 } > "$STAGE/MANIFEST.txt"
 
-log "版本：$VERSION"
+log "版本：$VERSION；变体：$VARIANT${DSH_VER:+（内置 DSH $DSH_VER）}"
 log "bin/ 铺入 $(find "$STAGE/bin" -type f | wc -l) 个脚本"
 log "顶层文件：$(find "$STAGE" -maxdepth 1 -type f | wc -l) 个"
 
 # ---- 打包 -------------------------------------------------------------------
-[ -n "$OUT" ] || OUT="$REPO_DIR/dist/sunsetlinux-module-$VERSION.zip"
+# 命名规则（docs/module-variants.md §2.6）：**默认名只给 full**。
+# bare 一律带 -bare 后缀 —— 它就是"告诉用户这个包不带 DSH"的那块牌子。
+DIST_DIR="${SUNSETLINUX_DIST_DIR:-$REPO_DIR/dist}"
+if [ -z "$OUT" ]; then
+    case "$VARIANT" in
+        full) OUT="$DIST_DIR/sunsetlinux-module-$VERSION.zip" ;;
+        bare) OUT="$DIST_DIR/sunsetlinux-module-$VERSION-bare.zip" ;;
+    esac
+fi
 mkdir -p "$(dirname "$OUT")"
 rm -f "$OUT"
 ( cd "$STAGE" && zip -q -r -X "$OUT" . )
@@ -228,7 +367,19 @@ command -v unzip >/dev/null 2>&1 && {
     # ★ KernelSU 只在模块根找 webroot/index.html：缺了 WebUI 入口就没了
     unzip -l "$OUT" | grep -q 'webroot/index.html' || die "zip 里没有 webroot/index.html（KernelSU 的 WebUI 入口）"
     unzip -l "$OUT" | grep -q 'lib/detect-mount.sh' || die "zip 里没有 lib/detect-mount.sh（挂载实现探测）"
+    # ★ 变体自洽：full 必须有载荷、bare 必须没有（"冒充默认版本"在这里就被拦下）
+    if [ "$VARIANT" = "full" ]; then
+        unzip -l "$OUT" | grep -q 'dsh/manifest.json' || die "full 变体里没有 dsh/manifest.json（载荷丢了）"
+        unzip -l "$OUT" | grep -q "dsh/$DSH_FILE"     || die "full 变体里没有 dsh/$DSH_FILE（载荷丢了）"
+    else
+        unzip -l "$OUT" | grep -q 'dsh/' && die "bare 变体里出现了 dsh/（标 bare 却夹带 DSH）"
+    fi
 }
+
+# 「本地构建」标记：与 mkmodule 的警告配套（仅记录，不阻断）
+if [ "${GITHUB_ACTIONS:-}" != "true" ]; then
+    printf 'source=local\nat=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$(dirname "$OUT")/.build-source"
+fi
 
 sha256sum "$OUT" > "$OUT.sha256"
 printf '\n产物：%s\n  %s  %s 字节\n  %s\n' \

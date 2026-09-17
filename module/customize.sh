@@ -75,6 +75,30 @@ else
   ui_print "- 已存在，保留现有内容（幂等）"
 fi
 
+# --- 2b) 内置 DSH：把模块自带的层落到环境里（full 变体）-----------------------
+# 见 docs/module-variants.md §2.3。为什么在**安装时**展开（而不是每次开机）：
+#   · 解压约 200 MB，放开机流程里会拖慢启动；装模块时用户本来就在等，失败也当场看得见；
+#   · 幂等由 linuxctl 判（同版本已落地直接跳过），所以重复装/覆盖装不会重复解压。
+MODULE_VARIANT="$(sed -n 's/^variant=//p' "$MODDIR/module.prop" 2>/dev/null | head -n1)"
+[ -n "$MODULE_VARIANT" ] || MODULE_VARIANT=full
+if [ -f "$MODDIR/dsh/manifest.json" ]; then
+  ui_print ""
+  ui_print "- 本包含内置 DSH（变体 $MODULE_VARIANT）：展开到 $LINUX_HOME/layers/"
+  _CTL="$MODDIR/bin/linuxctl.sh"
+  if [ -f "$_CTL" ]; then
+    _OUT="$(LINUX_HOME="$LINUX_HOME" /system/bin/sh "$_CTL" dsh builtin --module-dir "$MODDIR" 2>&1)"
+    case "$_OUT" in
+      *'"ok":true'*) ui_print "  内置 DSH 已就位（重启后开机自建 base/runtime 时直接用它）" ;;
+      *) ui_print "! 内置 DSH 没展开成功（原因见下）——可在 root 终端重试同样这条命令" ;;
+    esac
+    printf '%s\n' "$_OUT" | while IFS= read -r _line; do
+      ui_print "  $_line"
+    done
+  else
+    ui_print "! 模块包里没有 bin/linuxctl.sh，无法展开内置 DSH（模块包不完整？）"
+  fi
+fi
+
 # --- 3) 首次部署提示（★ 这一段是用户读得最多的地方：先把**推荐路径**说清楚）----
 #
 # 顺序上刻意"先重启、后手动"：1.0.9 起模块会在开机时自己建层，用户什么都不用做；
@@ -83,7 +107,15 @@ fi
 #   · ui_print 的双引号串里**不能**再出现 ASCII 双引号 —— 会把句子截断，
 #     后半句被当真命令执行（真机上就是"只在没有任何"后面没了）；
 #   · 命令一律写 /system/bin/sh：裸 `sh` 在模块环境里可能是 busybox ash。
-if [ ! -f "$LINUX_HOME/layers/dsh.erofs" ] && [ ! -f "$LINUX_HOME/layers/dsh.squashfs" ]; then
+# 层名带版本（dsh-<版本>.erofs）也是常态：内置 DSH 展开出来的就是这种名字，
+# 所以判定必须同时认"无版本名"与"带版本名"两种 —— 老写法只看 dsh.erofs 会把
+# 已经装好的内置层当成"没有层"，再念一遍半小时的部署提示。
+DSH_PRESENT=0
+for _f in "$LINUX_HOME/layers/dsh.erofs" "$LINUX_HOME/layers/dsh.squashfs" \
+          "$LINUX_HOME"/layers/dsh-*.erofs "$LINUX_HOME"/layers/dsh-*.squashfs; do
+  [ -f "$_f" ] && { DSH_PRESENT=1; break; }
+done
+if [ "$DSH_PRESENT" = "0" ]; then
   VER="$(sed -n 's/^version=//p' "$MODDIR/module.prop" 2>/dev/null | head -n1)"
   ui_print ""
   ui_print "****************************************"
@@ -92,6 +124,14 @@ if [ ! -f "$LINUX_HOME/layers/dsh.erofs" ] && [ ! -f "$LINUX_HOME/layers/dsh.squ
   ui_print " 重启后模块会在开机时自己把环境建出来（零点击，不需要你敲任何命令）："
   ui_print "   Ubuntu base → Node + pnpm → DSH 三层只读镜像 + 可写层（约十几分钟到半小时，"
   ui_print "   日志：$LINUX_HOME/run/provision.log；期间可以正常用手机）。"
+  ui_print ""
+  case "$MODULE_VARIANT" in
+    full)
+      ui_print " 本包含内置 DSH：DSH 这一层不用等、也不用下载（其余两层照上面的流程建）。" ;;
+    *)
+      ui_print " 本包**不含** DSH：等 base/runtime 建好后，DSH 用一条指令从官方频道装（最快）："
+      ui_print "   /system/bin/sh $LINUX_HOME/bin/linuxctl.sh dsh install" ;;
+  esac
   ui_print ""
   ui_print " 两条可选的加速/排查路径："
   ui_print "   · 想自己盯着进度，就在 root 终端跑（KernelSU 管理器 / MT 管理器「以 root 执行」）："

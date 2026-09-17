@@ -1,10 +1,12 @@
 # ============================================================================
 # SunsetLinux 流水线（**一条到底**：环境准备 → 多节点编译 → 合并 → 多重发布）
 #
-#   推 main / beta 或手动触发时，**只有本工作流会跑**（其余工作流都改成手动/可复用）。
+#   推 **main** 或手动触发时，**只有本工作流会跑**（其余工作流都改成手动/可复用）。
+#   `beta` 等分支只存内容：要出 beta 预发布就手动跑本工作流并把 channel 选成 beta
+#   （决策 3，见 docs/module-variants.md §三）。
 #
 #   ① prep    环境准备：读版本 + 由 variants.json 生成编译矩阵 + 打模块 zip
-#   ② bundles 环境准备：内嵌离线包（四个组合各一份 .bin）
+#   ② bundles 环境准备：内嵌离线包（六个变体各一份 .bin）+ 默认模块（full，自带 DSH）
 #   ③ build   编译矩阵：**一个组合一个节点**（并行；单组合失败不影响其它组合）
 #   ④ gates   回归门禁：shell(bash+mksh) / node / App 单测（与编译并行）
 #   ⑤ publish 合并产物 → index.json → 下载页 → gh-pages → GitHub Release
@@ -24,7 +26,10 @@ name: 流水线
 
 on:
   push:
-    branches: [beta, main]
+    # ★ 只有 `main` 触发编译与发布（docs/module-variants.md §3）：
+    #   "编译只在 CI 跑、发布只由 main 触发"，`beta` 从此只是**内容存储**
+    #   （要出 beta 预发布就手动 workflow_dispatch，并把 channel 选成 beta）。
+    branches: [main]
     # 纯文档改动不发布：产物不会变，重跑一次完整构建纯属浪费。
     paths-ignore:
       - 'docs/**'
@@ -34,7 +39,7 @@ on:
   workflow_dispatch:
     inputs:
       channel:
-        description: '发布通道（auto 按分支：main→stable、beta→beta）'
+        description: '发布通道（stable = 正式；beta = 预发布，只能这样触发）'
         type: choice
         options: [auto, stable, beta]
         default: auto
@@ -119,11 +124,15 @@ jobs:
           # 再打一份到日志（矩阵是"环境准备"的输出，出问题时第一个要看的就是它）
           python3 -c "import json;d=json.load(open('tools/offline-bundle/variants.json'));print('组合：', ', '.join(d['variants']))"
 
-      - name: 打包模块 zip（APK 内嵌 + Release 资产）
+      - name: 打包模块 zip（APK 内嵌用的 **bare** 变体）
         run: |
           set -euo pipefail
           command -v zip >/dev/null 2>&1 || sudo apt-get install -y -qq zip
-          bash module/mkmodule.sh
+          # ★ APK 内嵌 bare（docs/module-variants.md §2.6）：base/full 档 APK 已自带
+          #   dsh 层，模块再内嵌一份就是同样的 48 MB 塞两遍。
+          #   **默认版本（full，自带 DSH）**由 ② bundles 节点用频道里的 dsh 层打，
+          #   产物名走默认名 sunsetlinux-module-<版本>.zip（见 offline-bundle.yml）。
+          bash module/mkmodule.sh --variant bare
           ls -l dist/sunsetlinux-module-*.zip
 
       - name: 上传模块 zip（编译节点要用）

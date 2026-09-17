@@ -1292,6 +1292,19 @@ cmd_rollback() {
     esac
     cur="$(dsh_layer_version "$STATE_JSON" "$layer" 2>/dev/null || true)"
 
+    # ★ dsh 的默认回滚目标 = **内置版本**（随模块冻结的那份，docs/module-variants.md §2.5）。
+    #   为什么优先内置而不是"次高版本"：用户更新出问题时的第一诉求是"回到装模块时那份"，
+    #   而"次高版本"可能只是另一个同样有问题的频道版本。没有内置记录才退回老逻辑。
+    if [ -z "$target" ] && [ "$layer" = "dsh" ]; then
+        local _bver=""
+        _bver="$(dsh_builtin_field version 2>/dev/null || true)"
+        if [ -n "$_bver" ] && [ "$_bver" != "$cur" ] \
+           && { [ -f "$LAYERS_DIR/$(layer_file_name dsh "$_bver")" ] || [ -f "$LAYERS_DIR/dsh-$_bver.squashfs" ]; }; then
+            target="$_bver"
+            log "回滚目标取内置版本（模块自带的那份）：$_bver"
+        fi
+    fi
+
     # 已安装版本清单：POSIX 字符串（换行分隔），不用数组 —— 见文件头 LAYER_NAMES 的说明
     local versions="" f v
     for f in "$LAYERS_DIR/$layer"-*.erofs "$LAYERS_DIR/$layer"-*.squashfs; do
@@ -1344,6 +1357,238 @@ EOF
     fi
     emit "{\"ok\":true,\"layer\":\"$(jesc "$layer")\",\"from\":$( [ -n "$cur" ] && printf '"%s"' "$(jesc "$cur")" || printf 'null'),\"to\":\"$(jesc "$target")\",\"file\":\"$(jesc "$path")\",\"restarted\":$was_running}"
     return 0
+}
+
+# ---------------------------------------------------------------------------
+# dsh —— DSH 这一块的两种交付方式（docs/module-variants.md §2）
+#
+#   dsh info                       只读：模块载荷 / 内置版本 / 当前生效版本
+#   dsh builtin [--module-dir D]   把模块自带的 dsh 层落到 layers/（幂等；安装时 customize.sh 调）
+#   dsh install                    一条指令：从**内置官方频道**装/更新 dsh 层
+#
+# 为什么要有 builtin：模块 `full` 变体自带 DSH 层镜像（.erofs.gz）——装完重启就能用，
+#   不需要联网、也不需要设备侧再构建（设备侧构建 DSH 正是 `exit 78` 的成因）。
+# 为什么 install 转发到 update.sh：拉清单 + Ed25519 验签 + 下载 + 校验 + 解压 + 落盘 + 失败
+#   回滚是 update.sh 的既有实现（唯一一份）；在这里重写一份必然漂移（repo-strategy §2.3）。
+# ---------------------------------------------------------------------------
+DSH_BUILTIN_JSON="$ETC_DIR/dsh-builtin.json"
+
+# 从 etc/dsh-builtin.json 取字段（纯 sed：设备侧没有 jq 也能读）
+dsh_builtin_field() { # <key>
+    [ -f "$DSH_BUILTIN_JSON" ] || return 0
+    tr -d ' \n\t' < "$DSH_BUILTIN_JSON" 2>/dev/null \
+        | sed -n "s/.*\"$1\":\"\([^\"]*\)\".*/\1/p" | head -n1
+}
+
+# 找"模块自带的 DSH 载荷"所在目录（里面有 dsh/manifest.json）。
+# 候选顺序：显式 --module-dir / 环境变量 → 本脚本上一级（模块 bin/ 的上级就是模块根）
+#          → KernelSU 的模块目录 → $LINUX_HOME（万一有人把载荷拷过去）
+dsh_module_dir() {
+    local c="" d="${LINUXCTL_MODULE_DIR:-}"
+    for c in "$d" "$SELF_DIR/.." "/data/adb/modules/sunsetlinux" "$LH"; do
+        [ -n "$c" ] || continue
+        [ -f "$c/dsh/manifest.json" ] && { printf '%s' "$c"; return 0; }
+    done
+    return 1
+}
+
+# JSON 值：空 → null
+_jstr() { if [ -n "${1:-}" ]; then printf '"%s"' "$(jesc "$1")"; else printf 'null'; fi; }
+
+cmd_dsh_info() {
+    local mod_dir="" payload=false variant="none" pver="" pfile=""
+    local bver="" bfile="" bsha="" bsrc="" bfilepath=""
+    local aver="" afile="" afmt=""
+
+    # 可选 --module-dir：从别处调用时（例如 /data/sunsetlinux/bin/linuxctl）也能指定模块目录
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --module-dir) mod_dir="${2:-}"; shift 2 ;;
+            --module-dir=*) mod_dir="${1#*=}"; shift ;;
+            *) shift ;;
+        esac
+    done
+    [ -n "$mod_dir" ] || mod_dir="$(dsh_module_dir 2>/dev/null || true)"
+    if [ -n "$mod_dir" ]; then
+        payload=true
+        variant="$(sed -n 's/^variant=//p' "$mod_dir/module.prop" 2>/dev/null | head -n1)"
+        [ -n "$variant" ] || variant="full"
+        pver="$(tr -d ' \n\t' < "$mod_dir/dsh/manifest.json" 2>/dev/null \
+                | sed -n 's/.*"version":"\([^"]*\)".*/\1/p' | head -n1)"
+        pfile="$(tr -d ' \n\t' < "$mod_dir/dsh/manifest.json" 2>/dev/null \
+                | sed -n 's/.*"file":"\([^"]*\)".*/\1/p' | head -n1)"
+    fi
+
+    bver="$(dsh_builtin_field version)"
+    bfile="$(dsh_builtin_field file)"
+    bsha="$(dsh_builtin_field sha256_raw)"
+    bsrc="$(dsh_builtin_field source)"
+    if [ -n "$bver" ]; then
+        bfilepath="$LAYERS_DIR/$(layer_file_name dsh "$bver")"
+        [ -f "$bfilepath" ] || bfilepath="$LAYERS_DIR/dsh-$bver.squashfs"
+        [ -f "$bfilepath" ] || bfilepath=""
+    fi
+
+    aver="$(dsh_layer_version "$STATE_JSON" dsh 2>/dev/null || true)"
+    case "$aver" in ""|unknown|null) aver="" ;; esac
+    afile="$(find_layer dsh 2>/dev/null || true)"
+    [ -n "$afile" ] && afmt="$(layer_format "$afile" 2>/dev/null || echo unknown)"
+
+    emit "{\"ok\":true,\"module\":{\"dir\":$(_jstr "$mod_dir"),\"variant\":$(_jstr "$variant"),\"has_payload\":$payload,\"payload_version\":$(_jstr "$pver"),\"payload_file\":$(_jstr "$pfile")},\"builtin\":$( [ -n "$bver" ] && printf '{"version":%s,"file":%s,"sha256_raw":%s,"source":%s,"path":%s,"present":%s}' "$(_jstr "$bver")" "$(_jstr "$bfile")" "$(_jstr "$bsha")" "$(_jstr "$bsrc")" "$(_jstr "$bfilepath")" "$( [ -n "$bfilepath" ] && printf 'true' || printf 'false' )" || printf 'null' ),\"active\":$( [ -n "$aver" ] && printf '{"version":%s,"file":%s,"format":%s}' "$(_jstr "$aver")" "$(_jstr "$afile")" "$(_jstr "$afmt")" || printf 'null' )}"
+    return 0
+}
+
+# 把模块自带的 DSH 层落到 $LINUX_HOME/layers/（幂等 + 校验 + 空间检查）
+cmd_dsh_builtin() {
+    local mod_dir="" force=0
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --module-dir) mod_dir="${2:-}"; shift 2 ;;
+            --module-dir=*) mod_dir="${1#*=}"; shift ;;
+            --force) force=1; shift ;;
+            -*) log "未知选项：$1"; emit '{"ok":false,"error":"未知选项"}'; return 1 ;;
+            *) shift ;;
+        esac
+    done
+    [ -n "$mod_dir" ] || mod_dir="$(dsh_module_dir 2>/dev/null || true)"
+    if [ -z "$mod_dir" ]; then
+        emit '{"ok":false,"error":"找不到模块自带的 DSH 载荷（<模块目录>/dsh/manifest.json）","hint":"本模块很可能是 bare 变体（不带 DSH）：用 linuxctl dsh install 从内置官方频道装"}'
+        return 1
+    fi
+    local mf="$mod_dir/dsh/manifest.json"
+    [ -f "$mf" ] || { emit "{\"ok\":false,\"error\":\"没有载荷清单：$(jesc "$mf")\"}"; return 1; }
+
+    local flat="" ver="" file="" sha_raw="" size_raw=""
+    flat="$(tr -d ' \n\t' < "$mf" 2>/dev/null)"
+    ver="$(printf '%s' "$flat" | sed -n 's/.*"version":"\([^"]*\)".*/\1/p' | head -n1)"
+    file="$(printf '%s' "$flat" | sed -n 's/.*"file":"\([^"]*\)".*/\1/p' | head -n1)"
+    # ★ sha256_raw 可能是 null（频道没给 raw 值时）：那种情况只能核 gz 的 sha256，
+    #   要如实记下来（"没有 raw 校验"≠"校验通过"）。
+    sha_raw="$(printf '%s' "$flat" | sed -n 's/.*"sha256_raw":"\([^"]*\)".*/\1/p' | head -n1)"
+    size_raw="$(printf '%s' "$flat" | sed -n 's/.*"size_raw":\([0-9][0-9]*\).*/\1/p' | head -n1)"
+    [ -n "$ver" ] && [ -n "$file" ] || { emit '{"ok":false,"error":"manifest.json 解析失败（缺 version/file）"}'; return 1; }
+    local src="$mod_dir/dsh/$file"
+    [ -f "$src" ] || { emit "{\"ok\":false,\"error\":\"载荷文件不存在：$(jesc "$src")\"}"; return 1; }
+
+    local dst=""
+    dst="$LAYERS_DIR/$(layer_file_name dsh "$ver")"
+    mkdir -p "$LAYERS_DIR" "$ETC_DIR" 2>/dev/null || true
+
+    # 幂等：同版本已落地、且内置记录一致 → 直接返回（不重复解 200 MB）
+    if [ "$force" != "1" ] && [ -f "$dst" ] && [ "$(dsh_builtin_field version)" = "$ver" ]; then
+        emit "{\"ok\":true,\"action\":\"already\",\"layer\":\"dsh\",\"version\":$( _jstr "$ver" ),\"file\":\"$(jesc "$dst")\"}"
+        return 0
+    fi
+
+    # 空间检查：解压后 ≈ size_raw（拿不到就按 320 MB 估），至少留 300 MB 余量
+    local avail_kb="" need_b=0
+    avail_kb="$(df -k "$LAYERS_DIR" 2>/dev/null | awk 'NR==2{print $4}' | tr -dc '0-9')"
+    case "$size_raw" in ''|*[!0-9]*) size_raw=0 ;; esac
+    if [ "$size_raw" -gt 0 ]; then need_b="$size_raw"; else need_b=$((320 * 1024 * 1024)); fi
+    need_b=$(( need_b + 300 * 1024 * 1024 ))
+    if [ -n "$avail_kb" ] && [ "$avail_kb" -gt 0 ]; then
+        if [ $(( avail_kb * 1024 )) -lt "$need_b" ]; then
+            emit "{\"ok\":false,\"error\":\"空间不足，无法展开内置 DSH 层\",\"available_kb\":$avail_kb,\"needed_kb\":$(( need_b / 1024 )),\"hint\":\"清理 cache/ 或 snapshots/ 后重试：linuxctl dsh builtin --force\"}"
+            return 1
+        fi
+    fi
+
+    have gzip || { emit '{"ok":false,"error":"缺少 gzip（toybox 应自带）"}'; return 1; }
+    local tmp="$dst.tmp.$$"
+    rm -f "$tmp" 2>/dev/null || true
+    if ! gzip -dc "$src" > "$tmp" 2>/dev/null; then
+        rm -f "$tmp" 2>/dev/null || true
+        emit '{"ok":false,"error":"gzip 解压失败（模块包损坏？重刷模块后再试）"}'
+        return 1
+    fi
+    local got=""
+    if have sha256sum; then got="$(sha256sum "$tmp" 2>/dev/null | awk '{print $1}')"; fi
+    if [ -n "$sha_raw" ] && [ -n "$got" ] && [ "$got" != "$sha_raw" ]; then
+        rm -f "$tmp" 2>/dev/null || true
+        emit "{\"ok\":false,\"error\":\"解压结果 sha256 与载荷清单不符（模块包损坏）\",\"expected\":\"$(jesc "$sha_raw")\",\"actual\":\"$(jesc "$got")\"}"
+        return 1
+    fi
+    local fmt=""
+    fmt="$(layer_format "$tmp" 2>/dev/null || echo unknown)"
+    if [ "$fmt" != "erofs" ] && [ "$fmt" != "squashfs" ]; then
+        rm -f "$tmp" 2>/dev/null || true
+        emit '{"ok":false,"error":"解压结果不是有效的 erofs/squashfs 镜像（载荷损坏）"}'
+        return 1
+    fi
+    if ! mv -f "$tmp" "$dst" 2>/dev/null; then
+        rm -f "$tmp" 2>/dev/null || true
+        emit '{"ok":false,"error":"落盘失败（空间不足？）"}'
+        return 1
+    fi
+    chmod 0644 "$dst" 2>/dev/null || true
+
+    # etc/dsh-builtin.json = **内置版本的唯一事实源**（回滚与 doctor 都读它）
+    {
+        printf '{\n'
+        printf '  "schema": 1,\n'
+        printf '  "version": "%s",\n' "$(jesc "$ver")"
+        printf '  "file": "%s",\n' "$(jesc "$(basename "$dst")")"
+        printf '  "path": "%s",\n' "$(jesc "$dst")"
+        printf '  "sha256_raw": %s,\n' "$(_jstr "$sha_raw")"
+        printf '  "size_raw": %s,\n' "$( [ "$size_raw" -gt 0 ] && printf '%s' "$size_raw" || printf 'null' )"
+        printf '  "source": "module",\n'
+        printf '  "module_dir": "%s",\n' "$(jesc "$mod_dir")"
+        printf '  "at": "%s"\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date)"
+        printf '}\n'
+    } > "$DSH_BUILTIN_JSON" 2>/dev/null || warnl "写 $DSH_BUILTIN_JSON 失败（回滚目标会退化）"
+    chmod 0644 "$DSH_BUILTIN_JSON" 2>/dev/null || true
+
+    # state.json：**只在还没有 dsh 记录时**写。
+    #   · 全新环境：让 start.sh 一上来就能定位到内置层（否则要等 device-provision 写完 state）
+    #   · 已有环境：不动 —— 用户可能已经从频道更新过 dsh，模块升级不该把它悄悄退回去
+    local cur="" activated=false
+    cur="$(dsh_layer_version "$STATE_JSON" dsh 2>/dev/null || true)"
+    case "$cur" in ""|unknown|null)
+        write_state_for_layer dsh "$ver" "$dst" "$sha_raw" "$fmt" && activated=true ;;
+    esac
+    log "内置 DSH 已就位：$dst（版本 $ver${sha_raw:+, sha256_raw 已核}）"
+    emit "{\"ok\":true,\"action\":\"materialized\",\"layer\":\"dsh\",\"version\":$( _jstr "$ver" ),\"file\":\"$(jesc "$dst")\",\"sha256_raw\":$(_jstr "$sha_raw"),\"size_raw\":$( [ "$size_raw" -gt 0 ] && printf '%s' "$size_raw" || printf 'null' ),\"state_updated\":$activated}"
+    return 0
+}
+
+# 一条指令：从内置官方频道装/更新 dsh 层（转发 update.sh install）
+cmd_dsh_install() {
+    local u="$SELF_DIR/update.sh"
+    [ -f "$u" ] || u="$LH/bin/update.sh"
+    if [ ! -f "$u" ]; then
+        emit '{"ok":false,"error":"找不到 update.sh（应与 linuxctl.sh 同目录）"}'
+        return 1
+    fi
+    # 人类可读进度走 stderr（不捕获）；stdout 只留 JSON。
+    local out=""
+    out="$(LINUX_HOME="$LH" LINUXCTL_SH="$SELF_DIR/linuxctl.sh" "$SH_BIN" "$u" install dsh "$@")" || true
+    local last=""
+    last="$(printf '%s\n' "$out" | tail -n1)"
+    case "$last" in
+        \{*)
+            emit "$last"
+            # ★ 退出码要跟着 ok 走：脚本调用方（模块 service.sh / CI / 用户）靠退出码判断，
+            #   不能"失败也 exit 0"（那会让自动化以为装好了）。
+            case "$last" in
+                *'"ok":true'*) return 0 ;;
+                *) return 1 ;;
+            esac ;;
+        *)   emit "{\"ok\":false,\"error\":\"install dsh 没有输出可解析的 JSON\",\"detail\":$(_jstr "$out")}"; return 1 ;;
+    esac
+}
+
+cmd_dsh() {
+    local sub="${1:-info}"; shift || true
+    case "$sub" in
+        info)    cmd_dsh_info "$@" ;;
+        builtin) cmd_dsh_builtin "$@" ;;
+        install) cmd_dsh_install "$@" ;;
+        -h|--help|help)
+            printf '用法：linuxctl dsh {info|builtin [--module-dir D] [--force]|install}\n' >&2
+            emit '{"ok":true,"usage":"dsh info|builtin|install"}'
+            return 0 ;;
+        *) log "未知子命令：dsh $sub"; emit '{"ok":false,"error":"dsh 的子命令必须是 info/builtin/install"}'; return 2 ;;
+    esac
 }
 
 # ---------------------------------------------------------------------------
@@ -1406,7 +1651,14 @@ linuxctl（sunsetlinux root 模式）
                              缺省时沿用 state.json 的当前版本，都没有才降级为
                              <layer>.erofs（无版本名，回滚不可用，会告警）。
                              同层多版本并存，旧文件不删（回滚要用）。
-  rollback <layer> [<ver>]   切回该层的指定版本（省略则挑比当前低的最高版本）
+  update dsh                 **一条指令**：从内置官方频道装/更新 dsh 层
+                             （等价于 linuxctl dsh install；验签失败即拒绝）
+  dsh info                   只读：模块载荷 / 内置 DSH 版本 / 当前生效版本
+  dsh builtin [--module-dir D] [--force]
+                             把模块自带的 DSH 层落到 layers/（装模块时自动做，幂等）
+  dsh install                从内置官方频道装/更新 dsh 层（一条指令）
+  rollback <layer> [<ver>]   切回该层的指定版本（省略则挑比当前低的最高版本；
+                             dsh 有内置版本时**优先回内置版本**）
                              只改 state.json 的指向，**不删任何层文件**，可来回切
   update-check               拉取并**验签**频道清单，报告可更新项（Ed25519，失败即拒绝）
   update-apply <layer> <ver> <url> [sha256]
@@ -1658,6 +1910,8 @@ main() {
     # **先把它建出来再报告"存在"**，得出完全错误的结论。只读工具不该有副作用。
     case "$sub" in
         footprint|status|logs|doctor|version|help|-h|--help) : ;;
+        # dsh info 也是只读的；dsh builtin/install 自己会 mkdir 需要的那几个目录
+        dsh) : ;;
         *) mkdir -p "$RUN_DIR" "$LAYERS_DIR" "$ETC_DIR" 2>/dev/null || true ;;
     esac
 
@@ -1672,7 +1926,15 @@ main() {
         snapshot)  cmd_snapshot "$@" ;;
         restore)   cmd_restore "$@" ;;
         reset)     cmd_reset "$@" ;;
-        update)    cmd_update "$@" ;;
+        update)
+            # `linuxctl update dsh`（**不带文件**）= 从内置官方频道装/更新 dsh 层（一条指令）。
+            # 带文件时保持老语义：安装本地裸镜像（App / WebUI 走的就是它）。
+            if [ $# -eq 1 ] && [ "$1" = "dsh" ]; then
+                cmd_dsh_install
+            else
+                cmd_update "$@"
+            fi ;;
+        dsh)       cmd_dsh "$@" ;;
         rollback)  cmd_rollback "$@" ;;
         doctor)    cmd_doctor "$@" ;;
         footprint) cmd_footprint "$@" ;;

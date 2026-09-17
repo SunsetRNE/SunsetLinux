@@ -428,6 +428,9 @@ module/
   uninstall.sh        # 默认保留 /data/sunsetlinux（不删用户数据），仅清理模块自身
   webroot/index.html  # ★ KernelSU 模块 WebUI（见 §6.2）
   mkmodule.sh         # 打包：把运行时脚本与 webroot/ 打进 zip
+                      #   两个变体：full（默认，自带 DSH 层 dsh/）/ bare（不带 DSH）
+                      #   —— 见 docs/module-variants.md §2
+  dsh/                # （**打包产物**，只在 full 变体里）官方 dsh 层镜像 + manifest.json
 ```
 
 **★ 本模块是「纯脚本模块」，不挂载任何系统路径。**

@@ -38,11 +38,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: 打包模块 zip
+      - name: 打包模块 zip（APK 内嵌用的 bare 变体）
         run: |
           set -euo pipefail
           command -v zip >/dev/null 2>&1 || sudo apt-get install -y -qq zip
-          bash module/mkmodule.sh
+          # APK 内嵌 bare（docs/module-variants.md §2.6）；默认模块（full）由
+          # ② bundles 节点用频道里的 dsh 层打，⑤ publish 会把它一起收进发布。
+          bash module/mkmodule.sh --variant bare
       - name: 上传模块 zip
         uses: actions/upload-artifact@v4
         with:

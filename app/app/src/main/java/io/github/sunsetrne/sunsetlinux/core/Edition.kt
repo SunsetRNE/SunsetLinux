@@ -49,4 +49,20 @@ object Edition {
 
     /** 免 root 版不需要 su（也不该去申请）—— 界面上不要提示"去授权 root"。 */
     val needsSu: Boolean get() = isRoot
+
+    // ── 界面切割（判定本身在 [EditionPolicy]，这里只是给调用点一个短名字）──────────
+    //
+    // 为什么不让各面板直接写 `Edition.isRoot`：docs/module-variants.md §一 要求
+    // "免 root 版不出现任何模块痕迹、root 版不出现 proot 设置"，而每一处各写一遍判断
+    // 就会漏（真机已经漏过：侧边栏说明、关于页的"本版不使用模块"、进 App 就探模块）。
+    // 统一走这三个属性，源码级契约测试还能钉住"没人绕过去"。
+
+    /** 要不要出现 KernelSU 模块相关的内容（模块版本行 / 模块更新卡片 / 刷入按钮 / 模块探测）。 */
+    val showsModuleUi: Boolean get() = EditionPolicy.showsKernelSuModuleUi(isRoot)
+
+    /** 要不要出现 proot / proroot 相关的设置项与说明（免 root 运行时选择、attribution）。 */
+    val showsRootlessRuntimeUi: Boolean get() = EditionPolicy.showsRootlessRuntimeUi(isRoot)
+
+    /** 要不要出现层模式（loop / dir）选择 —— 那是 root 模式独有的启动方式。 */
+    val showsLayerModeUi: Boolean get() = EditionPolicy.showsLayerModeUi(isRoot)
 }

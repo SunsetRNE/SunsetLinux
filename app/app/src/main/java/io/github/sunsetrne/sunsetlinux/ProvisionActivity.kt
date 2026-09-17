@@ -162,7 +162,8 @@ class ProvisionActivity : ComponentActivity() {
             val probe = if (Edition.needsSu) DeviceStatus.root(force = true)
                         else RootProbe(RootState.UNKNOWN, "免 root 版不探测 su（也不需要）")
             val su = Edition.needsSu && probe.granted
-            val module = if (Edition.needsKernelSuModule) DeviceStatus.module(force = true) else null
+            // 统一走 Edition.showsModuleUi（与 needsKernelSuModule 等价）：判定只有一个入口
+            val module = if (Edition.showsModuleUi) DeviceStatus.module(force = true) else null
 
             withMain {
                 rootProbe.value = probe
@@ -176,9 +177,13 @@ class ProvisionActivity : ComponentActivity() {
                 ctlReady.value = ready
                 if (Edition.needsSu) appendLog("环境检测：${probe.label}（${probe.detail}）")
                 appendLog("本版：${Edition.label}（${Edition.applicationId}）· 模式固定为 ${mode.value.modeLabel}")
-                appendLog("环境检测：${module?.label ?: "免 root 版与 KernelSU 模块无关"}")
+                // ★ 模块那两行只在 Root 版打印：免 root 版的日志里出现"模块"字样同样是痕迹
+                //   （原来的写法会打一句"免 root 版与 KernelSU 模块无关"—— 提模块本身就不该有）
+                if (Edition.showsModuleUi) {
+                    appendLog("环境检测：${module?.label ?: "检测中…"}")
+                    module?.hint?.let { appendLog("→ $it") }
+                }
                 probe.hint?.let { appendLog("→ $it") }
-                module?.hint?.let { appendLog("→ $it") }
                 if (mode.value == EnvMode.ROOT && !su) {
                     appendLog("提示：本版是 Root 版但没有 su —— 请先在 KernelSU/Magisk 里授权本应用；" +
                         "不想 root 就用「免 root 版」（两个 App 可同时安装）。")

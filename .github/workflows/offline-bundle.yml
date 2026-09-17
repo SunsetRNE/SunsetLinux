@@ -46,7 +46,7 @@ concurrency:
 
 jobs:
   bundle:
-    name: 打包四个组合并挂到 Release
+    name: 打包六个组合（+ 默认模块 full）并挂到 Release
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -161,6 +161,59 @@ jobs:
 
       - name: 回归（合成部件全链路 + 负例）
         run: node tools/offline-bundle/selftest.mjs
+
+      # ── 默认模块（full 变体：自带 DSH）────────────────────────────────────────
+      # 为什么在这里做：本节点已经把频道里的层**逐层下载并校验过 sha256**，
+      # 而默认模块要的正是 dsh 那一层（docs/module-variants.md §2.1/§2.6）。
+      #   · APK 内嵌的是 bare（pipeline 的 ① prep 打的），两者不冲突；
+      #   · 默认产物名 `sunsetlinux-module-<版本>.zip` 只给 full —— 拿不到 dsh 层时
+      #     **不产出默认名**（绝不把不带 DSH 的包冒充默认版本），并明确说出来。
+      - name: 打包**默认模块**（full：内嵌频道里的 dsh 层）
+        run: |
+          set -euo pipefail
+          command -v zip >/dev/null 2>&1 || sudo apt-get install -y -qq zip
+          MODV="$(sed -n 's/^version=//p' module/module.prop | head -n1 | tr -d '[:space:]')"
+          MODV="${MODV#v}"
+          DSH_GZ="$(ls -1 dist/dsh-*.erofs.gz 2>/dev/null | head -n1 || true)"
+          if [ -z "$DSH_GZ" ]; then
+            # 频道清单里的 `url` 是 **.zst**（体积小 35%）——上面的下载按它落的盘。
+            # 但**设备侧没有 zstd**（只有 toybox gzip），模块里必须是 .gz，所以在这里转一次：
+            #   · sha256_raw（解压后的内容哈希）**不变**，模块落地时校验的就是它；
+            #   · sha256_gz 由 mkmodule 从转出来的文件重算，所以重新压缩是安全的。
+            DSH_ZST="$(ls -1 dist/dsh-*.erofs.zst 2>/dev/null | head -n1 || true)"
+            if [ -n "$DSH_ZST" ]; then
+              command -v zstd >/dev/null 2>&1 || sudo apt-get install -y -qq zstd
+              DSH_GZ="${DSH_ZST%.zst}.gz"
+              echo "把 $(basename "$DSH_ZST") 转成 gzip（设备侧只认 gzip）"
+              zstd -dc "$DSH_ZST" | gzip -9 > "$DSH_GZ"
+            fi
+          fi
+          if [ -z "$DSH_GZ" ]; then
+            {
+              echo ""
+              echo "- ⚠️ **本次没有产出默认模块（full）**：频道清单里没有 dsh 层产物。"
+              echo "  默认名只给自带 DSH 的包，所以这次只发 bare（见 ⑤ publish 的模块卡片）。"
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::warning::频道里没有 dsh 层（dist/dsh-*.erofs.{gz,zst}）→ 本次不产出默认模块"
+            exit 0
+          fi
+          bash module/mkmodule.sh --variant full --version "$MODV" --dsh-layer "$DSH_GZ" \
+               --dsh-sums dist/SHA256SUMS.layers.txt
+          ls -l dist/sunsetlinux-module-*.zip
+          {
+            echo ""
+            echo "- ✅ 默认模块已打包（自带 DSH）：$(basename "$(ls -1 dist/sunsetlinux-module-*.zip | head -n1)")"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 上传默认模块制品（供 ⑤ publish 收进发布）
+        uses: actions/upload-artifact@v4
+        with:
+          name: module-zip-full
+          path: |
+            dist/sunsetlinux-module-*.zip
+            dist/sunsetlinux-module-*.zip.sha256
+          retention-days: 7
+          if-no-files-found: warn
 
       - name: 上传制品（供人工取用/排障）
         uses: actions/upload-artifact@v4

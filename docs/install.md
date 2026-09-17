@@ -206,9 +206,18 @@ su -c 'sh /data/adb/modules/sunsetlinux/bin/oneshot-setup.sh --run'
    无事可做、`/data/sunsetlinux/bin/linuxctl` 永远不会出现、App 也就无法控制环境：
 
    ```bash
-   bash module/mkmodule.sh            # 版本取自 module/module.prop
-   # 产物：dist/sunsetlinux-module-<版本>.zip（+ .sha256）
+   # APK 里内嵌的那种（不带 DSH；DSH 之后用 `linuxctl dsh install` 一条指令从频道装）
+   bash module/mkmodule.sh --variant bare      # 版本取自 module/module.prop
+   # 产物：dist/sunsetlinux-module-<版本>-bare.zip（+ .sha256）
+
+   # 默认版本（**自带 DSH**，装完零下载；需要频道的 dsh 层文件）：
+   bash module/mkmodule.sh --variant full --dsh-layer dist/dsh-<版本>.erofs.gz \
+        --dsh-sums dist/SHA256SUMS.layers.txt
+   # 产物：dist/sunsetlinux-module-<版本>.zip —— **默认名只给 full**
    ```
+
+   两条硬规则（`docs/module-variants.md` §2.1）：`full` 不给 `--dsh-layer` → **拒绝打包**；
+   `bare` 给了 `--dsh-layer` → 也拒绝。理由是同一个：不许"不带 DSH 却顶着默认名"。
 
    脚本会铺 `bin/`（运行时脚本 + `layer-spec.sh` + `selftest.sh` + 夹具）、
    `lib/`（`detect-mount.sh`）、`webroot/`（模块 WebUI），并在缺失关键项时**拒绝打包**。

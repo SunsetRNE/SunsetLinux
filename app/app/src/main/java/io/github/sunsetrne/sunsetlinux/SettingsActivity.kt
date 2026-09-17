@@ -434,72 +434,81 @@ private fun SettingsScreen(
                 Spacer(Modifier.height(12.dp))
 
                 // 免 root 运行时（proroot 首选 / proot 降级）
-                DshCard(Modifier.fillMaxWidth()) {
-                    Column(Modifier.fillMaxWidth()) {
-                        SectionLabel("免 root 运行时")
-                        Spacer(Modifier.height(10.dp))
-                        ModeRow("自动：优先 proroot，缺件降级 proot", rootlessRuntime == null) {
-                            onPickRootless(null)
-                        }
-                        ModeRow("只用 proroot（缺件会明确报错）", rootlessRuntime == "proroot") {
-                            onPickRootless("proroot")
-                        }
-                        ModeRow("只用 proot（随包 bundle）", rootlessRuntime == "proot") {
-                            onPickRootless("proot")
-                        }
-                        Spacer(Modifier.height(8.dp))
-                        Text(
-                            text = "只影响非 root 模式。proroot ${BuildConfig.PROROOT_VERSION} 是 LD_PRELOAD 实现" +
-                                "（无 ptrace，系统调用密集的负载更快），随 APK 的 nativeLibraryDir 提供；" +
-                                "proot 作为降级实现随包内嵌。",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = TextMuted,
-                        )
-                        val kind = status?.rootlessKind
-                        if (kind != null) {
-                            Spacer(Modifier.height(6.dp))
+                //
+                // ★ 只有**免 root 版**才渲染这一组：Root 版走真 chroot，`SUNSETLINUX_ROOTLESS`
+                //   递过去也没人读；留着它只会让用户以为"这里还能切运行时"（决策 1：
+                //   "root 运行时不再保留任何 proot 降级分支"）。判定收在 EditionPolicy。
+                if (Edition.showsRootlessRuntimeUi) {
+                    DshCard(Modifier.fillMaxWidth()) {
+                        Column(Modifier.fillMaxWidth()) {
+                            SectionLabel("免 root 运行时")
+                            Spacer(Modifier.height(10.dp))
+                            ModeRow("自动：优先 proroot，缺件降级 proot", rootlessRuntime == null) {
+                                onPickRootless(null)
+                            }
+                            ModeRow("只用 proroot（缺件会明确报错）", rootlessRuntime == "proroot") {
+                                onPickRootless("proroot")
+                            }
+                            ModeRow("只用 proot（随包 bundle）", rootlessRuntime == "proot") {
+                                onPickRootless("proot")
+                            }
+                            Spacer(Modifier.height(8.dp))
                             Text(
-                                text = "本次运行实际使用：$kind" +
-                                    (status?.rootlessVersion?.let { " $it" } ?: ""),
+                                text = "proroot ${BuildConfig.PROROOT_VERSION} 是 LD_PRELOAD 实现" +
+                                    "（无 ptrace，系统调用密集的负载更快），随 APK 的 nativeLibraryDir 提供；" +
+                                    "proot 作为降级实现随包内嵌。",
                                 style = MaterialTheme.typography.labelSmall,
-                                color = Accent,
+                                color = TextMuted,
                             )
+                            val kind = status?.rootlessKind
+                            if (kind != null) {
+                                Spacer(Modifier.height(6.dp))
+                                Text(
+                                    text = "本次运行实际使用：$kind" +
+                                        (status?.rootlessVersion?.let { " $it" } ?: ""),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = Accent,
+                                )
+                            }
                         }
                     }
-                }
 
-                Spacer(Modifier.height(12.dp))
+                    Spacer(Modifier.height(12.dp))
+                }
 
                 // 层模式（loop / dir）—— root 模式专用
-                DshCard(Modifier.fillMaxWidth()) {
-                    Column(Modifier.fillMaxWidth()) {
-                        SectionLabel("层模式（root 模式）")
-                        Spacer(Modifier.height(10.dp))
-                        ModeRow("默认 loop：losetup + erofs + upper.img（省磁盘）", layerMode == null || layerMode == "loop") {
-                            onPickLayerMode(null)
-                        }
-                        ModeRow("dir：把层解包成目录，不碰 loop/erofs", layerMode == "dir") {
-                            onPickLayerMode("dir")
-                        }
-                        Spacer(Modifier.height(8.dp))
-                        Text(
-                            text = "loop 省磁盘但要占 loop 设备与 erofs 挂载；dir 完全不碰它们（目录 + overlayfs），" +
-                                "代价是首次解包几分钟、磁盘约 +1.6 GB。真机上 loop/erofs 出问题时切到 dir 即可。",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = TextMuted,
-                        )
-                        status?.layerMode?.let {
-                            Spacer(Modifier.height(6.dp))
+                // ★ 免 root 版不渲染：proot 是把 base 层**解成一棵 rootfs**，没有"层怎么挂"这回事
+                if (Edition.showsLayerModeUi) {
+                    DshCard(Modifier.fillMaxWidth()) {
+                        Column(Modifier.fillMaxWidth()) {
+                            SectionLabel("层模式（root 模式）")
+                            Spacer(Modifier.height(10.dp))
+                            ModeRow("默认 loop：losetup + erofs + upper.img（省磁盘）", layerMode == null || layerMode == "loop") {
+                                onPickLayerMode(null)
+                            }
+                            ModeRow("dir：把层解包成目录，不碰 loop/erofs", layerMode == "dir") {
+                                onPickLayerMode("dir")
+                            }
+                            Spacer(Modifier.height(8.dp))
                             Text(
-                                text = "本次 start 实际使用：$it",
+                                text = "loop 省磁盘但要占 loop 设备与 erofs 挂载；dir 完全不碰它们（目录 + overlayfs），" +
+                                    "代价是首次解包几分钟、磁盘约 +1.6 GB。真机上 loop/erofs 出问题时切到 dir 即可。",
                                 style = MaterialTheme.typography.labelSmall,
-                                color = Accent,
+                                color = TextMuted,
                             )
+                            status?.layerMode?.let {
+                                Spacer(Modifier.height(6.dp))
+                                Text(
+                                    text = "本次 start 实际使用：$it",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = Accent,
+                                )
+                            }
                         }
                     }
-                }
 
-                Spacer(Modifier.height(12.dp))
+                    Spacer(Modifier.height(12.dp))
+                }
 
                 // 端口
                 DshCard(Modifier.fillMaxWidth()) {
@@ -532,7 +541,14 @@ private fun SettingsScreen(
                         Spacer(Modifier.height(6.dp))
                         SwitchRow(
                             title = "开机自启状态服务",
-                            subtitle = "开机后拉起状态观察服务（root 模式的环境仍由 KernelSU 模块启动）",
+                            // ★ 说明按 edition 分岔：免 root 版这句原来写"root 模式的环境仍由
+                            //   KernelSU 模块启动" —— 在他的机器上既没有 KernelSU，也没有
+                            //   另一个 root 模式，提它纯属噪音（决策 1：界面不许留模块痕迹）
+                            subtitle = if (Edition.showsModuleUi) {
+                                "开机后拉起状态观察服务（环境本身由 KernelSU 模块启动）"
+                            } else {
+                                "开机后拉起状态观察服务（免 root 环境需要 App 进程存活）"
+                            },
                             checked = bootStart,
                             onCheckedChange = onBootStart,
                         )
@@ -775,12 +791,23 @@ private fun FreezeExemptionCard(onCopyPackage: () -> Unit) {
             )
             Spacer(Modifier.height(8.dp))
             Text(
-                text = "操作指引：\n" +
-                    "1. 打开 KernelSU / Magisk 管理器 → 模块，找到你安装的后台冻结类模块的设置；\n" +
-                    "2. 在「应用策略 / 白名单」里找到 SunsetLinux（包名 io.github.sunsetrne.sunsetlinux）；\n" +
-                    "3. 策略设为「不冻结 / 白名单」并保存。\n" +
-                    "root 模式下环境本体不依赖 App 进程 —— 即使 App 被冻结，DSH 仍在运行，" +
-                    "只是你看不到状态与通知。",
+                // ★ 操作指引按 edition 分岔：免 root 版的机器上没有 KernelSU/Magisk，
+                //   "打开 KernelSU 管理器 → 模块"是一条走不通的路（而且这句话本身就是模块痕迹）。
+                //   免 root 版该说的是"在这类模块自己的 App/配置里加白名单"。
+                text = if (Edition.showsModuleUi) {
+                    "操作指引：\n" +
+                        "1. 打开 KernelSU / Magisk 管理器 → 模块，找到你安装的后台冻结类模块的设置；\n" +
+                        "2. 在「应用策略 / 白名单」里找到 SunsetLinux（包名 io.github.sunsetrne.sunsetlinux）；\n" +
+                        "3. 策略设为「不冻结 / 白名单」并保存。\n" +
+                        "root 模式下环境本体不依赖 App 进程 —— 即使 App 被冻结，DSH 仍在运行，" +
+                        "只是你看不到状态与通知。"
+                } else {
+                    "操作指引：\n" +
+                        "1. 打开你安装的后台冻结类模块自己的 App / 配置页（这类模块通常带一个管理器）；\n" +
+                        "2. 在「应用策略 / 白名单」里找到 SunsetLinux（包名 io.github.sunsetrne.sunsetlinux）；\n" +
+                        "3. 策略设为「不冻结 / 白名单」并保存。\n" +
+                        "免 root 模式下环境随 App 进程存活 —— App 被冻结，环境就跟着停，所以这一步更要紧。"
+                },
                 style = MaterialTheme.typography.bodySmall,
                 color = TextSecondary,
             )

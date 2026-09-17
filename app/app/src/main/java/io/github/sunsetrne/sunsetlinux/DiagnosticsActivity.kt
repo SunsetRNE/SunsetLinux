@@ -40,6 +40,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.lifecycleScope
 import io.github.sunsetrne.sunsetlinux.core.DshRuntime
+import io.github.sunsetrne.sunsetlinux.core.Edition
 import io.github.sunsetrne.sunsetlinux.core.LinuxCtl
 import io.github.sunsetrne.sunsetlinux.core.LogExport
 import io.github.sunsetrne.sunsetlinux.core.Prefs
@@ -256,10 +257,24 @@ private fun DiagnosticsScreen(
                     Spacer(Modifier.height(8.dp))
                     CheatRow("挂载失败 / overlay / erofs", "内核能力不足或层不完整；看 doctor 的内核能力段。")
                     CheatRow("端口被占用 / EADDRINUSE", "到设置里换端口，再重启环境。")
-                    CheatRow("权限不足 / denied / EPERM", "KernelSU 里的 root 授权可能被回收，重新授权。")
+                    // ★ 这两行的文案按 edition 分岔：免 root 版的机器上没有 KernelSU/模块，
+                    //   在它的排障页里提"去 KernelSU 授权""由模块开机启动"是走不通的指引，
+                    //   而且 §六 的验收判据是"不出现任何「KernelSU 模块」字样"。
+                    if (Edition.showsModuleUi) {
+                        CheatRow("权限不足 / denied / EPERM", "KernelSU 里的 root 授权可能被回收，重新授权。")
+                    } else {
+                        CheatRow("权限不足 / denied / EPERM", "proot 环境里没有真 capabilities；这类报错通常来自环境内没装对应的包或内核不给权限。")
+                    }
                     CheatRow("找不到 linuxctl", "环境未部署：走「重新部署 / 首启引导」。")
                     CheatRow("Web 无响应 / healthy=false", "首次启动初始化较慢，稍等；仍不行看日志区最后几行。")
-                    CheatRow("环境随 App 一起停", "非 root 模式的固有行为；Root 模式由模块开机启动，不受影响。")
+                    CheatRow(
+                        "环境随 App 一起停",
+                        if (Edition.showsModuleUi) {
+                            "非 root 模式的固有行为；Root 模式由模块开机启动，不受影响。"
+                        } else {
+                            "免 root 模式的固有行为：环境随 App 进程存活，请申请电池白名单与冻结豁免。"
+                        },
+                    )
                 }
             }
 

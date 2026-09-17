@@ -81,7 +81,23 @@ object ModuleRelease {
         }
         val ver = o.optString("module_version").trim().ifEmpty { null } ?: return null
         val tag = o.optString("github_release_tag").trim().ifEmpty { null }
-        val name = "sunsetlinux-module-$ver.zip"
+
+        // ★ 默认模块 zip 的文件名：**优先读 index.json 的 `modules.default`**（发布流水线
+        //   新增的字段，见 docs/module-variants.md §四），读不到才退回"按 module_version 拼"。
+        //
+        //   为什么不能只按 `files[]` 里"第一个 sunsetlinux-module-*.zip"找：决策 2 之后
+        //   Release 上有**两个** zip —— 默认的 `sunsetlinux-module-<版本>.zip`（full，自带
+        //   DSH）与 `sunsetlinux-module-<版本>-bare.zip`（不含 DSH）。而字典序里
+        //   `…-bare.zip` 排在 `….zip` **前面**（'-' 0x2D < '.' 0x2E），任何"取第一个"的
+        //   写法都会把 bare 包当成默认推荐给用户 —— 而 bare 是给"APK 已内嵌层 / 想自己控
+        //   DSH 版本"的人用的，装上它 DSH 反而要联网再装一次（§2.6 明确说"绝不把 bare 冒充默认"）。
+        val name = o.optJSONObject("modules")
+            ?.optString("default")?.trim()?.ifEmpty { null }
+            ?: "sunsetlinux-module-$ver.zip"
+        // 兜底匹配时排除 `-bare.zip`：老索引里没有 modules 段、也没有正名字时，宁可
+        // 少一个 sha256（下载会失败并如实报错），也不要拿 bare 的 sha256 去校验默认包
+        // —— 那会得到一个"文件下载成功但校验不过"的假故障。
+        val isDefaultShaped = name.endsWith(".zip") && !name.endsWith("-bare.zip")
 
         var sha: String? = null
         var size: Long? = null
@@ -91,11 +107,14 @@ object ModuleRelease {
             for (i in 0 until files.length()) {
                 val f = files.optJSONObject(i) ?: continue
                 val n = f.optString("name").trim()
-                if (n != name && !(n.startsWith("sunsetlinux-module-") && n.endsWith(".zip"))) continue
+                val exact = n == name
+                val fallback = isDefaultShaped &&
+                    n.startsWith("sunsetlinux-module-") && n.endsWith(".zip") && !n.endsWith("-bare.zip")
+                if (!exact && !fallback) continue
                 sha = f.optString("sha256").trim().ifEmpty { null }
                 size = f.optLong("size").takeIf { it > 0 }
                 url = f.optString("url").trim().ifEmpty { null }
-                if (n == name) break
+                if (exact) break
             }
         }
         // 索引里没带 url（当前就是这样）→ 按 Release tag 拼；连 tag 都没有就退到 latest

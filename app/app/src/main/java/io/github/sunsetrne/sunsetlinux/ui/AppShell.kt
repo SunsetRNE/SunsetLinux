@@ -447,8 +447,10 @@ private fun DrawerBody(
                 style = MaterialTheme.typography.headlineSmall.copy(brush = BrushStart),
             )
             Text(
+                // su 那一截只在 Root 版显示：免 root 版写"无 su"会让用户以为"少了什么、
+                // 该去授权"，而它本来就不需要 su（Edition.needsSu 的语义就是这个）
                 text = "v${BuildConfig.VERSION_NAME} · ${ui.mode.modeLabel}" +
-                    if (ui.suAvailable) " · su 可用" else " · 无 su",
+                    if (!Edition.needsSu) "" else if (ui.suAvailable) " · su 可用" else " · 无 su",
                 style = MaterialTheme.typography.labelSmall,
                 color = TextMuted,
             )
@@ -466,7 +468,13 @@ private fun DrawerBody(
         DrawerItem(Icons.Filled.Refresh, "更新", "频道清单 / 层更新，只下变化的那一层") {
             onNavigate(onOpenUpdates)
         }
-        DrawerItem(Icons.Filled.Refresh, "重新部署 / 首启引导", "选模式、装模块、铺层") {
+        // 说明文字必须按 edition 分岔：免 root 版里"装模块"是一条走不通的路
+        //（那台机器上没有 KernelSU），点了只会一头雾水 —— 真机反馈过
+        DrawerItem(
+            Icons.Filled.Refresh,
+            "重新部署 / 首启引导",
+            if (Edition.showsModuleUi) "装模块、铺层、部署环境" else "铺运行时、铺环境、启动",
+        ) {
             onNavigate(onOpenWelcome)
         }
         DrawerItem(Icons.Filled.Build, "一键诊断 (doctor)", if (ui.doctorRunning) "正在运行…" else "内核能力 / 层完整性 / SELinux") {
@@ -721,11 +729,13 @@ private fun AboutDialog(ui: LauncherViewModel.UiState, onClose: () -> Unit, onEx
                 AboutLine("内嵌内容", BuildConfig.EMBED_PARTS.ifBlank { "无（装环境要联网）" })
                 AboutLine("本版", "${Edition.label}（${Edition.applicationId}）")
                 AboutLine("包名", context.packageName)
-                AboutLine("运行模式", ui.mode.modeLabel + if (ui.suAvailable) "（su 可用）" else "（无 su）")
-                if (Edition.needsKernelSuModule) AboutLine("模块", ui.moduleLabel ?: "检测中…")
+                AboutLine("运行模式", ui.mode.modeLabel + if (!Edition.needsSu) "" else if (ui.suAvailable) "（su 可用）" else "（无 su）")
+                // ★ 模块那一行**只在 Root 版**显示：免 root 版连"模块"两个字都不该出现
+                //   （docs/module-variants.md §一：不探测、不提示、不内嵌）。
+                if (Edition.showsModuleUi) AboutLine("模块", ui.moduleLabel ?: "检测中…")
                 // ★ 免 root 运行时的归属（proroot 许可第 5 条要求 attribution）与实况
-                //   —— 只有免 root 版带 proroot/proot
-                if (!Edition.isRoot) AboutLine(
+                //   —— 只有免 root 版带 proroot/proot；Root 版里印这段等于把另一个 edition 的东西搬过来
+                if (Edition.showsRootlessRuntimeUi) AboutLine(
                     "免 root 运行时",
                     buildString {
                         append("proroot ${BuildConfig.PROROOT_VERSION}（首选）+ proot（降级）")
@@ -738,7 +748,8 @@ private fun AboutDialog(ui: LauncherViewModel.UiState, onClose: () -> Unit, onEx
                     },
                 )
                 AboutLine("环境根", DshPaths.linuxHome(context, ui.mode))
-                AboutLine("层模式", ui.status?.layerMode ?: "—（未启动）")
+                // 层模式（loop / dir）是 root 模式独有的启动方式（proot 是把 base 层解成 rootfs）
+                if (Edition.showsLayerModeUi) AboutLine("层模式", ui.status?.layerMode ?: "—（未启动）")
                 // 内置 DSH（随 APK 冻结）与运行时 DSH（真正在跑的）—— 两者不同不是错误，
                 // 但要让人一眼看到"现在跑的是哪一个"（详情在「更新」页，含一键回滚）。
                 runCatching { DshPin.of(context, ui.status?.layer("dsh")?.version) }.getOrNull()?.let { pin ->
@@ -749,35 +760,38 @@ private fun AboutDialog(ui: LauncherViewModel.UiState, onClose: () -> Unit, onEx
                 Spacer(Modifier.height(10.dp))
                 // ★ 模块更新要"实际可用"：以前只能看到版本号，下一步得自己去 GitHub 找 zip、
                 //   再打开 KernelSU 管理器手装。这里直接下载 + ksud 刷入（重启由用户决定）。
-                // ⚠️ 只有 **Root 版**显示 —— 免 root 版与 KernelSU 模块无关（装了也没用）。
-                if (Edition.needsKernelSuModule) {
+                // ⚠️ 只有 **Root 版**渲染（`Edition.showsModuleUi`）。免 root 版**整块不出现**
+                //   —— 连"本版不使用 KernelSU 模块"这种说明都不要写：提模块本身就是痕迹，
+                //   而 docs/module-variants.md §六 的验收判据是"不出现任何「KernelSU 模块」字样"。
+                if (Edition.showsModuleUi) {
                     ModuleUpdateCard(
                         installedVersion = ui.moduleVersion,
                         installedReadable = ui.moduleReadable,
                     )
-                } else {
+                }
+                Spacer(Modifier.height(10.dp))
+                Text(
+                    text = if (Edition.showsModuleUi) {
+                        "本应用不解析 rootfs、不自行挂载：所有环境操作都只经 linuxctl。" +
+                            "Root 模式下环境由 KernelSU 模块开机启动，与 App 生命周期解耦。"
+                    } else {
+                        "本应用不解析 rootfs、不自行挂载：所有环境操作都只经 linuxctl。" +
+                            "免 root 模式下环境铺在 App 私有目录、随 App 进程存活（卸载 App 即清除）。"
+                    },
+                    style = MaterialTheme.typography.labelSmall,
+                    color = TextMuted,
+                )
+                // proroot 的 attribution 只在免 root 版有意义：Root 版 APK 里根本没有那几个 .so
+                if (Edition.showsRootlessRuntimeUi) {
+                    Spacer(Modifier.height(8.dp))
                     Text(
-                        text = "免 root 版不使用 KernelSU 模块：环境靠 App 内置的宿主脚本 + rootfs（proot/proroot），" +
-                            "所以这里没有模块更新入口。",
+                        text = "免 root 模式的运行时是 proroot（第三方，https://github.com/coderredlab/proroot，" +
+                            "专有许可，未做修改，仅随本 APK 分发；全文见 assets/licenses/proroot-LICENSE.txt）；" +
+                            "它不可用时自动降级到随包的 proot。",
                         style = MaterialTheme.typography.labelSmall,
                         color = TextMuted,
                     )
                 }
-                Spacer(Modifier.height(10.dp))
-                Text(
-                    text = "本应用不解析 rootfs、不自行挂载：所有环境操作都只经 linuxctl。" +
-                        "Root 模式下环境由 KernelSU 模块开机启动，与 App 生命周期解耦。",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = TextMuted,
-                )
-                Spacer(Modifier.height(8.dp))
-                Text(
-                    text = "免 root 模式的运行时是 proroot（第三方，https://github.com/coderredlab/proroot，" +
-                        "专有许可，未做修改，仅随本 APK 分发；全文见 assets/licenses/proroot-LICENSE.txt）；" +
-                        "它不可用时自动降级到随包的 proot。两者都只在非 root 模式生效。",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = TextMuted,
-                )
                 Spacer(Modifier.height(8.dp))
                 Text(
                     text = "本版是「${BuildConfig.EDITION_LABEL}」的内置${BuildConfig.EMBED_LABEL}：" +

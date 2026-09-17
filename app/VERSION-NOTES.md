@@ -26,6 +26,7 @@
 | 0.3.1 | 16 | **修「两个 App 桌面同名」**（真机实测）：0.3.0 只改了 `main/res` 的 app_name，`src/<edition>/res/` 根本不存在，于是 root 版与免 root 版在桌面上都叫 "SunsetLinux"，用户点哪个纯靠猜。现在按 edition 设 `app_name`（`resValue` 取 `variants.json` 的 `editions[].label`）：**SunsetLinux Root** / **SunsetLinux 免root**；并打开 AGP 9 默认关闭的 `buildFeatures.resValues`。同时修一批拆版后过时的文案（"四个组合同一个 App、换组合就是覆盖安装"→ "同 App 内换档位＝覆盖安装；root / 免 root 是两个不同的 App"），Release 说明里那个从 0.2.x 起就不存在的 `sunsetlinux-launcher-debug.apk` 也换成了按 `variants.json` 推出来的真实文件名 |
 | 0.3.2 | 17 | **真机挂载归因 + 修掉三处 bug + 本机能力探测**（模块 **1.0.19**）：① **可写层挂载点不一致** —— `mount_upper_rw` 把 `upper.img` 挂到 `$ROOTFS_DIR/upper`，而 `architecture.md`/`stop.sh`/`linuxctl` 全都按 `$LINUX_HOME/upper` 找它 ⇒ overlay 的 `upperdir`（`$UPPER_DIR/upper`）根本看不到那块 ext4，8 GiB 镜像白挂、还被随后挂在 `$ROOTFS_DIR` 的 overlay 遮住；② **toybox 能力探测谎报** —— 判定表认不出 `Unknown option 'propagation'`（大写 U）与 `bad /etc/fstab`，于是每次启动都先按"支持"去调 `--propagation`/`--make-rprivate`（注定失败，日志里那两行就是这么来的）；③ **overlay 失败没诊断** —— 既不记实际入参，`kernel_hint_log` 的 grep 又把 `overlayfs:` 过滤掉了。新增 `overlay_fs_usable()`（同 fs 两个空目录只读试挂，实测该 fs 能不能当 overlay 的层）+ `probe_loop_io`/`probe_fuse_mount`（`PROBE_VERSION=2` 让老 cmdprobe 失效重探）。**真机结论（都有内核原文）**：这台机 `/data` 的 f2fs 被 overlayfs 一律拒绝（`ovl_dentry_weird` 命中 `DCACHE_OP_HASH/COMPARE`）⇒ dir 模式在这台机不可能；loop 的 I/O 在 `kernel` 域被 SELinux 拒（厂商只读 loop 背 `system_file` 正常、我们的文件连**读**都 FAIL、`chcon system_file` 后读通写仍被拒）⇒ **loop 快路需要一条可选的 `kernel` 域 sepolicy 规则，依旧不需要编/刷内核** |
 | 0.3.3 | 18 | **修整机卡死事故（模块 1.0.20）**：`gather_android_facts`（调 `ndc`/`getprop` 抓 DNS/时区）原本被**内层**（私有 mount/UTS ns）调用 —— 真机实测 `ndc` 打不开 `/dev/binder` 而 SIGABRT，连锁出 5 个 tombstone + `system_app_anr` + `system_server_crash` ⇒ **整机卡死只能重启**。现在抓取只在**父进程**做（未 unshare），内层改调 `install_android_facts()` 只把宿主预抓的文件**拷进** `rootfs/etc/`（`entry.sh` 读的 `/etc/android-resolv.txt` 顺带接通）。另含：`mount_layer` 同条 `local` 自引用修复、`chroot` 前显式给 `PATH`、`entry.sh`/`supervise.sh` shebang 改 `/bin/bash`、`ksud sepolicy` 写法（class 不带冒号）与回归 62 条 |
+| 0.3.6 | 21 | **免 root 版与 KernelSU 模块彻底切割 + 进入即启用内置环境；模块拆成两变体（模块 1.0.23）**。三条决策与设计见 [`docs/module-variants.md`](../docs/module-variants.md)：① 免 root 版不再出现任何模块痕迹（模块卡/模块检测/一键刷模块全短路），打开即自动铺内置环境并落到终端；② root 模块拆 `full`（**默认名**，自带 DSH 层，更新 + 一键回滚到内置版本）与 `bare`（不含 DSH，`linuxctl dsh install` 一条指令从内置官方频道装，验签失败即拒绝），APK 一律内嵌 `bare`；③ 编译只在 CI、发布只由 `main` 触发，`beta` 等分支只存内容 |
 
 ## 0.3.3 —— 整机卡死事故：内层绝不能调用安卓系统工具
 
@@ -521,7 +522,11 @@ docs/specs/BUILD-NOTES.md）：
 |---|---|---|
 | App（四个组合各一份） | `SunsetLinux-<versionName>-<组合>.apk` | `SunsetLinux-0.2.4-ubuntu-proot-dsh.apk` |
 | 离线包（可单独下载/导入） | `SunsetLinux-<versionName>-<组合>.bin` | `SunsetLinux-0.2.4-minimal.bin` |
-| KernelSU 模块 | `sunsetlinux-module-<模块版本>.zip` | `sunsetlinux-module-1.0.9.zip` |
+| KernelSU 模块（**默认**，自带 DSH） | `sunsetlinux-module-<模块版本>.zip` | `sunsetlinux-module-1.0.23.zip` |
+| KernelSU 模块（不含 DSH；APK 内嵌用的就是它） | `sunsetlinux-module-<模块版本>-bare.zip` | `sunsetlinux-module-1.0.23-bare.zip` |
+
+> **默认名只给 `full`**（自带 DSH）。频道里没有 dsh 层时 CI **不产出默认名**，
+> 只发 `-bare` 并在下载页/Release 说明里写明 —— 绝不把不带 DSH 的包冒充默认版本。
 
 组合名（`<组合>`，与 `tools/offline-bundle/variants.json` 里的 id 一一对应）：
 

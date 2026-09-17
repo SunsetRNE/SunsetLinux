@@ -70,6 +70,79 @@ class ModuleUpdateTest {
         assertNull("没有 sha256 也要如实说没有，不能编一个", a.sha256)
     }
 
+    // ───────────────────── 决策 2：Release 上同时有 full 与 -bare 两个 zip
+
+    /** 真机/线上会出现的两个资产（`index.json` 的 `files[]` 顺序与字典序都让 bare 在前）。 */
+    private val twoVariantsJson = """
+        {
+          "schema": 1,
+          "github_release_tag": "v0.3.0",
+          "module_version": "1.0.23",
+          "modules": {
+            "default": "sunsetlinux-module-1.0.23.zip",
+            "variants": ["sunsetlinux-module-1.0.23.zip", "sunsetlinux-module-1.0.23-bare.zip"]
+          },
+          "files": [
+            { "name": "sunsetlinux-module-1.0.23-bare.zip", "size": 102400, "sha256": "bare-bare" },
+            { "name": "sunsetlinux-module-1.0.23.zip", "size": 50000000, "sha256": "full-full" }
+          ]
+        }
+    """.trimIndent()
+
+    @Test
+    fun `有 modules_default 时按它取默认包，绝不拿 bare 凑数`() {
+        val a = ModuleRelease.parse(twoVariantsJson, "stable")!!
+        assertEquals("modules.default 指的就是默认（full）那个包", "sunsetlinux-module-1.0.23.zip", a.name)
+        assertEquals("校验值必须来自默认包，不能是 bare 的", "full-full", a.sha256)
+        assertEquals(50000000L, a.size)
+        assertEquals(
+            "https://github.com/SunsetRNE/SunsetLinux/releases/download/v0.3.0/sunsetlinux-module-1.0.23.zip",
+            a.url,
+        )
+    }
+
+    @Test
+    fun `老索引没有 modules 段：字典序里 bare 在前也不能被当成默认`() {
+        // '-' (0x2D) < '.' (0x2E)：任何"取 files[] 里第一个 sunsetlinux-module-*.zip"的写法
+        // 都会拿到不带 DSH 的 bare 包 —— 那正是 §2.6 说"绝不把 bare 冒充默认"要防的事
+        val json = """
+            { "module_version": "1.0.23", "github_release_tag": "v0.3.0", "files": [
+              { "name": "sunsetlinux-module-1.0.23-bare.zip", "size": 102400, "sha256": "bare-bare" },
+              { "name": "sunsetlinux-module-1.0.23.zip", "size": 50000000, "sha256": "full-full" }
+            ] }
+        """.trimIndent()
+        val a = ModuleRelease.parse(json, "stable")!!
+        assertEquals("sunsetlinux-module-1.0.23.zip", a.name)
+        assertEquals("full-full", a.sha256)
+    }
+
+    @Test
+    fun `索引里只有 bare 时宁可没有 sha256，也不把 bare 的校验值安到默认包名上`() {
+        // 拿 bare 的 sha256 去校验默认包 = "下载成功但校验不过"的假故障，比"没有校验值"更难查
+        val json = """
+            { "module_version": "1.0.23", "files": [
+              { "name": "sunsetlinux-module-1.0.23-bare.zip", "size": 102400, "sha256": "bare-bare" }
+            ] }
+        """.trimIndent()
+        val a = ModuleRelease.parse(json, "stable")!!
+        assertEquals("sunsetlinux-module-1.0.23.zip", a.name)
+        assertNull(a.sha256)
+        assertNull(a.size)
+    }
+
+    @Test
+    fun `modules_default 用了别的文件名时以它为准`() {
+        val json = """
+            { "module_version": "1.0.23", "github_release_tag": "v0.3.0",
+              "modules": { "default": "sunsetlinux-module-1.0.23-full.zip" },
+              "files": [ { "name": "sunsetlinux-module-1.0.23-full.zip", "size": 7, "sha256": "x" } ] }
+        """.trimIndent()
+        val a = ModuleRelease.parse(json, "stable")!!
+        assertEquals("sunsetlinux-module-1.0.23-full.zip", a.name)
+        assertEquals("x", a.sha256)
+        assertTrue("URL 要跟着实际文件名走", a.url.endsWith("/sunsetlinux-module-1.0.23-full.zip"))
+    }
+
     @Test
     fun `刷入脚本要真的能跑：ksud 优先、落 tmp、带 magisk 兜底`() {
         val s = ModuleInstaller.installScript("/data/user/0/io.github.sunsetrne.sunsetlinux/cache/module/sunsetlinux-module-1.0.10.zip", "sunsetlinux-module-1.0.10.zip")

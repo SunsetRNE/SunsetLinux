@@ -11,11 +11,10 @@ import io.github.sunsetrne.sunsetlinux.core.DshRuntime
 import io.github.sunsetrne.sunsetlinux.core.DshStatus
 import io.github.sunsetrne.sunsetlinux.core.ModuleInstaller
 import io.github.sunsetrne.sunsetlinux.core.ModuleStatus
-import io.github.sunsetrne.sunsetlinux.BuildConfig
 import io.github.sunsetrne.sunsetlinux.core.DshPaths
 import io.github.sunsetrne.sunsetlinux.core.Edition
-import io.github.sunsetrne.sunsetlinux.core.OfflineApplier
 import io.github.sunsetrne.sunsetlinux.core.OfflineBundle
+import io.github.sunsetrne.sunsetlinux.core.ProotProvisioner
 import io.github.sunsetrne.sunsetlinux.core.ProotRuntime
 import io.github.sunsetrne.sunsetlinux.core.ProotSetup
 import io.github.sunsetrne.sunsetlinux.core.RootProbe
@@ -92,7 +91,12 @@ class WelcomeState internal constructor(
     var moduleAcknowledged by mutableStateOf(prefs.moduleStepAcknowledged)
         private set
 
-    /** 这次构建内嵌的模块包（null = 没内嵌，界面如实说明并给替代路径）。 */
+    /**
+     * 这次构建内嵌的模块包（null = 没内嵌 / 本版与模块无关）。
+     *
+     * ★ 免 root 版**连读都不读**（`assets/module/module.json` 在 proot 包里根本不存在，
+     * 那是 root 版才内嵌的产物）。判定收在 [Edition.showsModuleUi]，见 EditionPolicy。
+     */
     var bundled by mutableStateOf<BundledModuleInfo?>(null)
         private set
 
@@ -126,7 +130,9 @@ class WelcomeState internal constructor(
     val log: MutableStateFlow<List<String>> = _log
 
     init {
-        bundled = BundledModule.info(context)
+        // 只有 Root 版才有"内嵌模块包"这回事；免 root 版去读它等于白读一次资产
+        // （而且一旦 assets 里真出现了同名文件，免 root 版就会冒出模块 UI —— 所以判定必须在读之前）
+        bundled = if (Edition.showsModuleUi) BundledModule.info(context) else null
         probe()
     }
 
@@ -156,6 +162,9 @@ class WelcomeState internal constructor(
      * 但会立刻重新探测一次模块状态，让界面能显示"已刷入，待重启"。
      */
     fun flashBundledModule() {
+        // 免 root 版不存在这个动作（界面上也没有入口）：再兜一层，避免以后有人从别处调用时
+        // 去读 root 版才有的 assets/module 或起 su —— 那是 docs/module-variants.md §一 要切干净的东西
+        if (!Edition.showsModuleUi) return
         val info = bundled ?: run {
             message = "这个 APK 没有内嵌模块包。请用「关于 → 更新模块」从官方站下载，" +
                 "或把仓库里的 dist/sunsetlinux-module-*.zip 传到手机后用 KernelSU 管理器安装。"
@@ -194,6 +203,8 @@ class WelcomeState internal constructor(
 
     /** 导出内嵌模块包到 `/sdcard/Download/`（给 KernelSU 管理器的本地安装用）。 */
     fun exportBundledModule() {
+        // 同 flashBundledModule：免 root 版没有"模块包"这个概念
+        if (!Edition.showsModuleUi) return
         val info = bundled ?: run {
             message = "这个 APK 没有内嵌模块包，没法导出。"
             return
@@ -224,6 +235,8 @@ class WelcomeState internal constructor(
 
     /** 打开 root 管理器（KernelSU / KernelSU-Next / MMRL / Magisk）。 */
     fun openModuleManager() {
+        // 同 flashBundledModule：免 root 版不该去探测/拉起任何模块管理器
+        if (!Edition.showsModuleUi) return
         if (!BundledModule.openManager(context)) {
             message = "没找到已安装的模块管理器（KernelSU / KernelSU-Next / MMRL / Magisk）。请手动打开它。"
         }
@@ -261,70 +274,27 @@ class WelcomeState internal constructor(
     }
 
     /**
-     * 免 root 的「铺环境」：先装内嵌离线包（若有 proot/base 部件），再跑 `linuxctl provision`。
+     * 免 root 的「铺环境」：宿主脚本 → 内嵌离线包 → `linuxctl provision`。
      *
-     * 为什么两件事绑在一起：proot 模式的 rootfs 需要**解包**出来（`provision`），
+     * 为什么这三件事绑在一起：proot 模式的 rootfs 需要**解包**出来（`provision`），
      * 而"料"要么来自内嵌离线包，要么来自已经装好的 base 层（频道）或本机种子 tar。
-     * 用户只需要说"铺好它"，顺序由这里保证。
+     * 用户只需要说"铺好它"，顺序由 [ProotProvisioner] 保证。
+     *
+     * ⚠️ 这条流水线**只有一份**：免 root 版"打开即启用"（`ui/ProotBootstrapState`）走的是
+     * 同一个 [ProotProvisioner.run]。以前在这里手写的那份如果留在原地，将来改了顺序
+     * （比如"先装包再 provision"的修正）就会只改到手动入口、自动入口继续失败。
      */
     fun provisionProot() {
         if (prootBusy) return
         prootBusy = true
         scope.launch {
-            val home = DshPaths.prootLinuxHome(context)
             val ctl = LinuxCtl(context, EnvMode.PROOT)
-
-            // ① 宿主脚本：provision 本身要靠它，缺了先补（幂等）
-            if (ProotRuntime.isReady(context, home).not()) {
-                append("$ 先铺宿主脚本（provision 需要 bin/linuxctl）")
-                val r = withContext(Dispatchers.IO) {
-                    runCatching { ProotRuntime.ensure(context, home) }
-                        .getOrElse { ProotRuntime.Result(false, emptyList(), it.message, false) }
-                }
-                append(if (r.contractReady) "✓ bin/linuxctl 已就位" else "✗ 宿主脚本未就位：${r.error}")
-                if (!r.contractReady) {
-                    prootBusy = false
-                    proot = withContext(Dispatchers.IO) { ProotSetup.inspect(context) }
-                    return@launch
-                }
-            }
-
-            // ② 内嵌离线包（有就装：它可能带 proot 运行时与 base/runtime/dsh 层）
             val bundle = proot?.embeddedBundle
                 ?: withContext(Dispatchers.IO) { runCatching { OfflineBundle.readHeaderOnly(context) }.getOrNull() }
-            if (bundle != null) {
-                append("$ 安装内嵌离线包（变体 ${bundle.variant}，${bundle.parts.size} 个部件）")
-                val outcome = withContext(Dispatchers.IO) {
-                    OfflineApplier.apply(context, EnvMode.PROOT, bundle) { stage, done, total ->
-                        if (total > 0) append("  $stage  ${done}/${total}") else append("  $stage")
-                    }
-                }
-                append(outcome.log.trimEnd())
-                if (!outcome.ok) {
-                    message = "离线包装到一半失败：${outcome.failedStage?.label ?: "未知阶段"}。" +
-                        "可以先去「更新」页用频道安装，再回来执行 provision。"
-                    prootBusy = false
-                    proot = withContext(Dispatchers.IO) { ProotSetup.inspect(context) }
-                    return@launch
-                }
-            } else {
-                append("· 本包没有内嵌离线包（组合 ${BuildConfig.EMBED_VARIANT}）：" +
-                    "proot 运行时与 base 层需要从频道安装。")
-            }
 
-            // ③ provision：把 base 层/种子解成 rootfs（linuxctl 1.0.17 起支持从 base 层解）
-            if (ctl.exists().not()) {
-                append("✗ 仍然没有 bin/linuxctl，无法执行 provision。")
-                message = "宿主脚本没铺上：这个 APK 可能没内嵌 proot 脚本。"
-                prootBusy = false
-                proot = withContext(Dispatchers.IO) { ProotSetup.inspect(context) }
-                return@launch
+            val outcome = withContext(Dispatchers.IO) {
+                ProotProvisioner.run(context, EnvMode.PROOT, bundle, seedDir = null) { append(it) }
             }
-            append("$ linuxctl provision")
-            val provision = withContext(Dispatchers.IO) {
-                ctl.stream(listOf("provision")) { line -> append(line) }
-            }
-            append(if (provision.ok) "✓ provision 完成" else "✗ provision：${provision.message}")
 
             proot = withContext(Dispatchers.IO) { ProotSetup.inspect(context) }
             provisioned = withContext(Dispatchers.IO) { ctl.exists() }
@@ -333,8 +303,10 @@ class WelcomeState internal constructor(
                 proot?.rootfsReady == true ->
                     "免 root 环境已铺好（rootfs 就位）。回首页点「启动环境」即可。"
                 proot?.hasRootSource == false ->
-                    "还没有可用的 rootfs 来源：去「更新」页从频道安装 base 层（erofs）后再点一次这个按钮。"
-                else -> "provision 没有成功：${provision.message}"
+                    "还没有可用的 rootfs 来源：去「更新」页从频道安装 base 层（erofs）后再点一次这个按钮。" +
+                        if (outcome.ok) "" else "（这次失败在：${outcome.failedStep?.label ?: "未知步骤"}）"
+                else ->
+                    "provision 没有成功：${outcome.error ?: "原因见日志"}"
             }
         }
     }
@@ -370,7 +342,9 @@ class WelcomeState internal constructor(
             } else {
                 RootProbe(RootState.UNKNOWN, "免 root 版不探测 su（也不需要）")
             }
-            val mod = if (Edition.needsKernelSuModule) {
+            // 统一走 Edition.showsModuleUi（与 needsKernelSuModule 等价，见 EditionPolicyTest）：
+            // 切割判定只有一个入口，以后加面板时不会再有人漏掉另一半
+            val mod = if (Edition.showsModuleUi) {
                 withContext(Dispatchers.IO) { DeviceStatus.module(force = true) }
             } else {
                 null
@@ -396,12 +370,17 @@ class WelcomeState internal constructor(
             } else {
                 append("· root：免 root 版不需要 root（不探测 su）")
             }
-            append("· 模块：${mod?.label ?: "免 root 版与 KernelSU 模块无关"}")
+            // ★ 模块那一行只在 Root 版打印：免 root 版的日志里出现"KernelSU 模块"字样，
+            //   正是 docs/module-variants.md §一 要消灭的痕迹（原来的写法还会打印一句
+            //   "免 root 版与 KernelSU 模块无关"—— 提模块本身就是痕迹）。
+            if (Edition.showsModuleUi) {
+                append("· 模块：${mod?.label ?: "检测中…"}")
+            }
             append("· 免 root 就绪度：${ProotSetup.summary(pr)}（缺：${pr.missingLabel.ifEmpty { "无" }}）")
             append("· linuxctl：${if (exists) "已就位" else "缺失（需要部署）"}")
             // 状态后面必须跟"下一步做什么"，否则用户只能猜（这次就是要解决这个）
             probe.hint?.let { append("  → $it") }
-            mod?.hint?.let { append("  → $it") }
+            if (Edition.showsModuleUi) mod?.hint?.let { append("  → $it") }
             if (!exists) append("  ${st.lastError ?: ""}")
         }
     }

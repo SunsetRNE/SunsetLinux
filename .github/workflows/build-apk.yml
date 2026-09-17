@@ -169,7 +169,14 @@ jobs:
                 echo "::error title=Root 版没内嵌模块包::$apk 缺少 assets/module/sunsetlinux-module.zip —— 检查 prep 的模块 zip 制品是否取到"; exit 1; }
               echo "$list" | grep -q 'assets/proot-runtime/' && {
                 echo "::error title=Root 版不该带 proot 脚本::$apk 里有 assets/proot-runtime/（root 模式用不到，白占体积）"; exit 1; }
-              echo "✓ $(basename "$apk")：模块 $(unzip -p "$apk" assets/module/module.json | tr -d '\n')"
+              # ★ 内嵌的必须是 **bare 变体**（docs/module-variants.md §2.6）：full 自带 DSH 层
+              #   （约 48 MB），而 base/full 档 APK 的离线包里已经有 DSH —— 内嵌 full = 塞两遍。
+              mj="$(unzip -p "$apk" assets/module/module.json 2>/dev/null | tr -d '\n' || true)"
+              case "$mj" in
+                *'"variant":"bare"'*) ;;
+                *) echo "::error title=APK 内嵌的模块不是 bare 变体::module.json=${mj:-（读不到）} —— full 自带 DSH 层，不该进 APK"; exit 1 ;;
+              esac
+              echo "✓ $(basename "$apk")：模块 $mj"
               ;;
             proot-*)
               echo "$list" | grep -q 'assets/proot-runtime/linuxctl.sh' || {

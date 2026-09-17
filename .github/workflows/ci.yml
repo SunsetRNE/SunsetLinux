@@ -129,6 +129,13 @@ jobs:
       - name: 断言 — 模块安装脚本文案与沙箱运行（mksh）
         run: node tools/customize-selftest.mjs
 
+      # 模块两变体（full/bare）的**行为级**回归（docs/module-variants.md）：
+      #   打包规则（full 必须有载荷、bare 必须没有、默认名只给 full）、安装时的落地链路、
+      #   以及"一条指令从验签过的频道装 DSH + 可回滚到内置版本"整条走一遍。
+      #   守的是最危险的失败模式：打了不带 DSH 的包却顶着默认名发出去（用户装完起不来）。
+      - name: 断言 — 模块两变体（full/bare）打包 + 内置 DSH 落地 + 一条指令装层
+        run: node tools/module-variant-selftest.mjs
+
       - name: 断言 — shell 语法（全套 .sh）
         run: |
           fail=0
@@ -319,7 +326,10 @@ jobs:
         run: |
           set -euo pipefail
           command -v zip >/dev/null 2>&1 || sudo apt-get install -y -qq zip
-          bash module/mkmodule.sh
+          # ★ APK 内嵌的是 **bare 变体**（docs/module-variants.md §2.6）：
+          #   APK 的 base/full 档已经把 dsh 层放进离线包了，模块再内嵌一份 = 同样的
+          #   48 MB 塞两遍。默认名（不带后缀）只给 full，所以这里必须显式要 bare。
+          bash module/mkmodule.sh --variant bare
           ls -l dist/sunsetlinux-module-*.zip
 
       - name: Android 构建 + 单测（★ 两条一起跑）
@@ -414,8 +424,16 @@ jobs:
               *-root-*)
                 if unzip -l "$apk" | grep -q 'assets/module/sunsetlinux-module.zip'; then
                   echo "✓ $name 带 assets/module/sunsetlinux-module.zip"
+                  # ★ 必须是 **bare 变体**（docs/module-variants.md §2.6）：full 自带 DSH 层
+                  #   （约 48 MB），而 base/full 档 APK 的离线包里已经有 DSH 了 ——
+                  #   内嵌 full 等于同一份内容塞两遍，且会让"换组合=覆盖安装"莫名变大。
+                  mj="$(unzip -p "$apk" assets/module/module.json 2>/dev/null | tr -d '\n' || true)"
+                  case "$mj" in
+                    *'"variant":"bare"'*) echo "✓ $name：内嵌模块是 bare 变体" ;;
+                    *) echo "::error title=APK 内嵌的模块不是 bare 变体::$name 的 module.json=${mj:-（读不到）} —— full 自带 DSH 层，不该进 APK"; fail=1 ;;
+                  esac
                 else
-                  echo "::error title=Root 版没内嵌模块包::$apk 缺少 assets/module/sunsetlinux-module.zip ——「一键刷入内置模块」会退化成未内嵌（构建前跑 module/mkmodule.sh 即可）"
+                  echo "::error title=Root 版没内嵌模块包::$apk 缺少 assets/module/sunsetlinux-module.zip ——「一键刷入内置模块」会退化成未内嵌（构建前跑 module/mkmodule.sh --variant bare 即可）"
                   fail=1
                 fi ;;
               *-proot-*)

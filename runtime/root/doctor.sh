@@ -943,27 +943,38 @@ else
 fi
 
 # ===========================================================================
-head_ "6. proot 降级路线可用性"
-PROOT_BIN=""
-for c in "$LH/bin/proot" /usr/bin/proot /system/bin/proot /data/adb/sunsetlinux/proot; do
-    [ -x "$c" ] && { PROOT_BIN="$c"; break; }
-done
-if [ -n "$PROOT_BIN" ]; then
-    ok "找到 proot：$PROOT_BIN"
-    add_finding ok proot "found $PROOT_BIN"
-else
-    warn "未找到 proot（非 root 降级模式不可用；只影响 proot 模式，不影响 root 模式）"
-    add_finding warn proot "not found"
-fi
-# 非 root 模式下 rootfs 只是普通目录
+head_ "6. proot 降级路线（**本模式已切割，不再降级**）"
+# 决策 1（docs/module-variants.md §一）：root App **锁定**真 chroot + overlayfs，
+# 不再有"没有 su 就降级到 proot"这条路 —— 那条路会去动**另一个环境**（App 私有目录下的
+# proot rootfs），用户以为在修 root 环境，实际动的是别处。免 root 请用免 root 版 App。
+# 这里只如实报一句、不再打 warn：在本模式里"没有 proot"是**预期状态**，不是缺陷。
+info "root 模式不提供 proot 降级；免 root 请使用免 root 版 App（包名 …sunsetlinux.proot）"
+add_finding ok proot "not-applicable（root 模式不降级）"
 if [ -d "$LH/rootfs-proot" ]; then
-    ok "存在 proot 模式的 rootfs 目录：$LH/rootfs-proot"
-else
-    info "无 $LH/rootfs-proot（正常，root 模式不用它）"
+    info "存在 $LH/rootfs-proot（那是免 root 版的东西，本模式不用它）"
 fi
 
 # ===========================================================================
 head_ "7. DSH profile 与插件可解析性（docs/dsh-profile.md §4.2）"
+# 7a) **内置 DSH**（随模块冻结的那份；docs/module-variants.md §2.3）
+#   为什么单独报：用户更新出问题时的第一诉求是"回到装模块时那份"，而"那份在不在、
+#   是哪个版本"只有 etc/dsh-builtin.json 说得清（它也是 rollback dsh 默认目标的来源）。
+if [ -f "$ETC_DIR/dsh-builtin.json" ]; then
+    _bv="$(tr -d ' \n\t' < "$ETC_DIR/dsh-builtin.json" 2>/dev/null | sed -n 's/.*"version":"\([^"]*\)".*/\1/p' | head -n1)"
+    _bf="$(tr -d ' \n\t' < "$ETC_DIR/dsh-builtin.json" 2>/dev/null | sed -n 's/.*"file":"\([^"]*\)".*/\1/p' | head -n1)"
+    [ -n "$_bf" ] || _bf="dsh-$_bv.erofs"
+    if [ -n "$_bv" ] && [ -f "$LAYERS_DIR/$_bf" ]; then
+        ok "内置 DSH：$_bv（随模块冻结 → $LAYERS_DIR/$_bf）"
+        info "回到它：linuxctl rollback dsh（不带 --to 就回内置版本）"
+        add_finding ok dsh_builtin "$_bv"
+    else
+        warn "有内置 DSH 记录（${_bv:-未知}）但层文件不在：$LAYERS_DIR/$_bf"
+        info "重刷模块后重启，或在设备上重展开：linuxctl dsh builtin --force"
+        add_finding warn dsh_builtin "missing-layer"
+    fi
+else
+    info "没有内置 DSH 记录（bare 变体，或模块还没展开）——可用 linuxctl dsh install 从官方频道装"
+fi
 # 注意：宿主机上没有 chroot 进去的 rootfs 内容，所以这里**优先在环境内探**，
 # 环境没起来就直接检查层文件里是否有 profile 路径。
 PROBE_OK=""

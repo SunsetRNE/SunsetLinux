@@ -61,26 +61,30 @@ https://<用户名>.github.io/<仓库名>/stable/channel.json
 
 ## 二、分支模型
 
+> ℹ️ **2026-09-17 起（决策 3，见 [`module-variants.md`](module-variants.md) §三）**：
+> **编译只在 CI 跑，发布只由 `main` 触发**；`beta` 退化成**纯存储**分支
+> （要出 beta 预发布只能手动 `workflow_dispatch` 并选 `channel=beta`）。
+
 | 分支 | 定位 | 推送后发生什么 |
 |---|---|---|
-| `main` | 正式版源码 | 跑全量回归 → 通过则发布到 **`/stable/`** 频道 |
-| `beta` | 预发布源码 | 跑全量回归 → 通过则发布到 **`/beta/`** 频道 |
+| `main` | 正式版源码 + **唯一发布触发点** | 跑全量回归 → 通过则发布到 **`/stable/`** 频道 + Release |
+| `beta` | **纯存储**（预发布内容） | **不编译、不发布**。要出 beta：手动跑 `pipeline.yml` 并把 `channel` 选成 `beta` |
 | `channel` | **只有频道数据**（公有 key/加密私钥备份/说明 + `channel.yml` 本身） | `channel/channel.json` 变化 → 签名 + 独立验签 → 发 gh-pages `/channel/` |
 | `layers` | **层产物的传送带**（orphan；只有分发产物 + `layers-release.yml`） | 建/更新 Release 并存资产，打印 `publish-channel` 用的 base-url（见 §5.3） |
+| `gh-pages` | **发布产物**（`/stable/`、`/beta/`、`/channel/`） | **CI 独占写**（人或 CI 都只往里放内容） |
 | `feat/*`、`fix/*` | 开发 | 只跑**回归门禁**，不发布 |
 
-**合并方向**：`feat/*` → `beta` →（验收后）→ `main`。
-这样 `beta` 天然是"下一版候选"，`main` 是"已验收"。
+**合并方向**：`feat/*` → `main`（验收后直接进主线）；`beta` 需要内容时由人 push 上去（它不再触发任何编译）。
 
 ---
 
 ## 二·五、拓扑：**一条流水线到底 + 两条独立线路**
 
 ```
-pipeline.yml（推 main/beta 时**只有它跑**）           ← 2026-09-16 起
-  ① prep      环境准备：版本 / 由 variants.json 生成编译矩阵 / 打模块 zip ──▶ 制品 module-zip
-  ② bundles   环境准备：内嵌离线包（四个组合各一份 .bin）──────────────▶ 制品 offline-bundles
-  ③ build     编译矩阵（四节点并行，每节点一个组合）──uses──▶ build-apk.yml ──▶ 制品 apk-<组合>
+pipeline.yml（**只有推 main 或手动触发时跑**）           ← 2026-09-17 起
+  ① prep      环境准备：版本 / 由 variants.json 生成编译矩阵 / 打**模块 zip（bare）** ──▶ 制品 module-zip
+  ② bundles   环境准备：内嵌离线包（六个变体各一份 .bin）+ **默认模块（full，自带 DSH）** ──▶ 制品 module-zip-full
+  ③ build     编译矩阵（六节点并行，每节点一个组合）──uses──▶ build-apk.yml ──▶ 制品 apk-<组合>
   ④ gates     回归门禁（shell/node/android 三节点并行）──uses──▶ ci.yml（build_apks=false）
   ⑤ publish   合并 → index.json → 下载页 → gh-pages → Release ──uses──▶ publish.yml
   ⑥ channel   频道发布：channel 分支的签名清单 ——验签——▶ gh-pages /channel/
@@ -92,13 +96,18 @@ pipeline.yml（推 main/beta 时**只有它跑**）           ← 2026-09-16 起
   channel.yml（channel 分支 / 手动）           私钥签名 + 公钥独立验签 + 发 /channel/
 ```
 
+> **模块两变体与"谁内嵌哪一个"**：见 [`module-variants.md`](module-variants.md) §2.6。
+> 一句话：**APK 内嵌 bare**（APK 的 base/full 档已有 dsh 层，别塞两遍）；
+> **Release 上的默认名 `sunsetlinux-module-<版本>.zip` 只给 full**（自带 DSH）；
+> 频道里没有 dsh 层时**不产出默认名**（绝不拿 bare 冒充默认版本），并在 job summary 里说明。
+
 **为什么改成一条**（都是这次真踩到的）：
 
 | 问题 | 以前（三条线靠**时间**对齐） | 现在（靠 `needs`） |
 |---|---|---|
 | 离线包挂 Release | `offline-bundle.yml` 与 `release.yml` 并行跑，前者**等 6 分钟**看 Release 出现没有，等不到就静默不挂（0.2.5 真发生过） | ⑤ publish 统一建 Release + 收 `dist/bundles/*.bin` 一起挂，顺序由 `needs` 保证 |
 | 模块 zip 内嵌 | 模块 zip 是**构建 APK 之后**才打的 → 官方 APK 里没有 `assets/module/`（0.2.12 真发生过，用户点「一键刷入内置模块」看到"未内嵌"） | ① prep 先打模块 zip，③ 每个编译节点都取回来再构建 |
-| APK 编译 | 一个 job 里**顺序**编四个组合（约 4 分钟） | 四个节点**并行**，单组合红不影响其它组合出包 |
+| APK 编译 | 一个 job 里**顺序**编四个组合（约 4 分钟） | 六个节点**并行**，单组合红不影响其它组合出包 |
 | 发布逻辑 | 内联在 `release.yml` 里，无法复用 | 搬到 `publish.yml`（可复用），`pipeline.yml` 与手动兜底的 `release.yml` 共用同一份 |
 | push 双发 | 推 main/beta 会同时跑 `ci.yml`(经 release) 与 `release.yml` | `release.yml`/`ci.yml`/`offline-bundle.yml` 都**不再监听 push**（保留手动/可复用） |
 
@@ -220,6 +229,27 @@ pipeline.yml（推 main/beta 时**只有它跑**）           ← 2026-09-16 起
   （0.94 MiB，就是 proot 本体），一律按 MiB 也会显示成"0 MiB" —— 实测就会被误杀成假红。
   真判据是"与本地同名包严格等大"；拿不到本地包时才退化成"> 4 KiB 不是空壳"。
 
+### 三·三、模块两变体的门禁（`tools/module-variant-selftest.mjs`）
+
+决策 2 把模块拆成 `full`（默认，自带 DSH）与 `bare`（不含 DSH）后，最危险的失败模式是
+**静默冒充**：打了不带 DSH 的包、却顶着默认名发出去 —— 用户装完才发现环境起不来。
+所以这道门禁**不看文本、跑行为**（在临时目录里真的打包、真的落地、真的从验签过的频道装）：
+
+| 断言 | 守什么 |
+|---|---|
+| `full` 必须给 `--dsh-layer`，`bare` 给了就拒绝 | 不许"标 bare 却夹带"、也不许"没层却产出默认名" |
+| zip 里 `full` 有 `dsh/manifest.json` + 载荷、`bare` 没有 | 打包规则与载荷一致性 |
+| 默认名只给 `full`（`bare` 必带 `-bare`） | 下载页/Release 上的"默认"不能是不带 DSH 的那个 |
+| `dsh builtin` 落地：层文件 + `etc/dsh-builtin.json` + `state.json` | 装完重启就能起（回滚目标有据可查） |
+| 载荷被改坏 → `sha256_raw` 不符即拒绝 | 内置层不是"信了就装"，要校验 |
+| `dsh install`（一条指令）→ 验签 → 下载 → 装 → 可回滚到内置版本 | 决策 2 的正道；验签失败必须**拒绝**并说清原因 |
+| 没有 `channels.json` 的 CLI-only 环境也能补出内置官方频道 | 只装模块、不装 App 的用户走的就是这条路 |
+
+- 另外 **APK 内嵌的必须是 `bare` 变体**：`ci.yml` 的独立门禁与 `build-apk.yml` 每个编译
+  节点都会读 `assets/module/module.json` 断言 `"variant":"bare"`（full 自带 48 MB 的 DSH
+  层，而 base/full 档 APK 的离线包里已经有了 —— 内嵌 full 等于塞两遍）。
+- 接在 `ci.yml` 的 `shell` 节点（`node tools/module-variant-selftest.mjs`）。
+
 ---
 
 ## 四、层产物（base/runtime/dsh）：走**独立线路**，且支持增量
@@ -229,7 +259,7 @@ pipeline.yml（推 main/beta 时**只有它跑**）           ← 2026-09-16 起
 
 | 产物 | 触发方式 | 说明 |
 |---|---|---|
-| APK / 模块 zip | 每次推送（beta/main）→ 线路② | 小、快 |
+| APK / 模块 zip（bare + 默认 full） | 推 `main`（或手动 `workflow_dispatch`）→ 线路② | 小、快；层不在这里 |
 | 三层镜像 + channel.json | **手动触发** `layers.yml` → 线路③ | 跑在**自建 arm64 runner** 上；可与①②并行 |
 
 线路③的两个关键设计：

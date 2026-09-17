@@ -746,6 +746,12 @@ layer_version() {
         runtime) printf '%s' "$RUNTIME_VERSION" ;;
         dsh)
             if [ -n "$DSH_VERSION" ]; then printf '%s' "$DSH_VERSION"; return 0; fi
+            # ★ 模块自带的 DSH（docs/module-variants.md §2.3）：它已经在 layers/ 里躺着，
+            #   设备侧**不该再构建一遍**（设备侧构建 DSH 正是 `supervise.sh exit 78`
+            #   的成因：缺 web profile / pnpm / 软链层级）。直接采用它的版本。
+            local bv=""
+            bv="$(builtin_dsh_version)"
+            [ -n "$bv" ] && { printf '%s' "$bv"; return 0; }
             local pj="$BUILD_DIR/usr/local/lib/node_modules/@deepseek-ai/dsh/package.json"
             if [ -f "$pj" ]; then
                 tr -d ' \n\t' < "$pj" | sed -n 's/.*"version":"\([^"]*\)".*/\1/p' | head -n1
@@ -754,6 +760,30 @@ layer_version() {
             printf 'unknown' ;;
         *) printf 'unknown' ;;
     esac
+}
+
+# ---------------------------------------------------------------------------
+# 模块内置的 DSH（`etc/dsh-builtin.json` 是唯一事实源，由 `linuxctl dsh builtin` 落盘）
+#   为什么放在设备侧脚本里也要认它：否则"模块自带了 DSH"这件事只有安装脚本知道，
+#   而真正决定要不要构建 dsh 层的是 device-provision —— 它会把已有的内置层**再建一遍**，
+#   半小时白等，最后还是同一个 exit 78。
+# ---------------------------------------------------------------------------
+builtin_dsh_version() {
+    local f="$LINUX_HOME/etc/dsh-builtin.json" v=""
+    [ -f "$f" ] || return 0
+    v="$(tr -d ' \n\t' < "$f" 2>/dev/null | sed -n 's/.*"version":"\([^"]*\)".*/\1/p' | head -n1)"
+    [ -n "$v" ] && printf '%s' "$v"
+    return 0
+}
+
+builtin_dsh_layer() {
+    local v="" f=""
+    v="$(builtin_dsh_version)"
+    [ -n "$v" ] || return 0
+    f="$LINUX_HOME/layers/$(layer_file_name dsh "$v")"
+    [ -f "$f" ] || f="$LINUX_HOME/layers/dsh-$v.squashfs"
+    [ -f "$f" ] && printf '%s' "$f"
+    return 0
 }
 
 # 本层镜像在本地的实际路径（走 spec 的 layer_file_name，不再内联命名）
@@ -1237,7 +1267,12 @@ EOF
         first=0
     done
     local dshver="null"
-    if [ -n "$DSH_VERSION" ]; then dshver="\"$DSH_VERSION\""; fi
+    # ★ 用 layer_version 而不是 $DSH_VERSION：模块内置 DSH 时 DSH_VERSION 是空的，
+    #   但 state.json 的 dsh_version 必须写出**实际生效**的那个版本（否则 App/doctor
+    #   会显示"未知"，对账功能失效）。
+    local _deff=""
+    _deff="$(layer_version dsh 2>/dev/null || true)"
+    case "$_deff" in ""|unknown) ;; *) dshver="\"$_deff\"" ;; esac
     cat > "$ETC_DIR/state.json" <<EOF
 {
   "schema": 1,
@@ -1414,12 +1449,20 @@ run_stages() {
         chroot_umounts
     fi
     if [ "$SKIP_DSH" != "1" ]; then
-        if [ "$SKIP_BASE" = "1" ] || [ "$SKIP_RUNTIME" = "1" ]; then
-            reject_skip "--skip-base / --skip-runtime"
+        # ★ 模块自带 DSH 时**跳过设备侧构建**（docs/module-variants.md §2.3）：
+        #   内置层已经落在 layers/ 了，再建一遍等于白等半小时，而且设备侧构建的
+        #   DSH 恰恰是起不来的那份（缺 web profile / pnpm / 软链层级）。
+        if [ -n "$(builtin_dsh_layer)" ] && [ "${SUNSETLINUX_FORCE_DSH_BUILD:-0}" != "1" ]; then
+            step "dsh 层由**模块内置**提供（版本 $(builtin_dsh_version)）→ 跳过设备侧构建"
+            log "内置层：$(builtin_dsh_layer)"
+        else
+            if [ "$SKIP_BASE" = "1" ] || [ "$SKIP_RUNTIME" = "1" ]; then
+                reject_skip "--skip-base / --skip-runtime"
+            fi
+            prepare_stage_incremental dsh
+            build_dsh
+            chroot_umounts
         fi
-        prepare_stage_incremental dsh
-        build_dsh
-        chroot_umounts
     fi
 }
 

@@ -503,6 +503,45 @@ su -c '/data/sunsetlinux/bin/linuxctl doctor'
 | 已装状态读不到时 | —— | **不给刷入按钮**，先让用户修 root 授权（与"读不到 ≠ 没装"一致） |
 | 重启 | —— | 只报告"重启后生效"（KernelSU 落 `modules_update/`），**App 不替用户重启**，脚本里有单测断言不许出现 `reboot` |
 
+### 3.10.27 模块拆两变体 + 免 root 彻底切割 + 编译只在 CI（模块 1.0.23 / App 0.3.6）
+
+**背景（真机）**：root 侧挂载链**全通**（upper + 三层 erofs + overlay + entry 被拉起），
+唯一倒下的是 `supervise.sh` 的 **`exit 78`** —— 设备上自建的层缺 DSH 本体与 web profile。
+即：**root 模块只缺 DSH 这一块**。这一轮就是补它，并把边界与发布模型一次定清。
+
+**决策与设计**：[`docs/module-variants.md`](module-variants.md)（三条决策 + 契约 + 验收判据）。
+
+| 决策 | 落地 |
+|---|---|
+| ① **免 root 完全切割** | 免 root 版不再有任何 KernelSU 模块痕迹（模块卡/模块检测/一键刷模块全部短路）；打开即自动"铺运行时 → 铺内置环境 → 启动 → 落到终端"。模块侧也不再牵扯 proot |
+| ② **模块拆两变体** | `mkmodule.sh --variant full\|bare`：`full`（**默认名**，内嵌 `dsh/dsh-<版本>.erofs.gz` + `dsh/manifest.json`）装完重启即可用；`bare` 不含 DSH。硬规则：`full` 不给 `--dsh-layer` **拒绝打包**、`bare` 给了也拒绝 —— 不许"不带 DSH 却顶着默认名" |
+| ② 的落地与更新 | `customize.sh` 安装时调 `linuxctl dsh builtin`（gzip → 校验 `sha256_raw` → 落 `layers/` → 写 `etc/dsh-builtin.json`，幂等）；设备侧 `device-provision.sh` 认这个事实源并**跳过 dsh 构建**（那正是 `exit 78` 的成因）；一条指令 `linuxctl dsh install`（= `update dsh` 无文件参数）走**内置官方频道 + Ed25519 验签**；`rollback dsh` 不带 `--to` 时**优先回内置版本** |
+| ③ **编译只在 CI** | `pipeline.yml` 只由 `main` 触发（`beta` 退化成纯存储，要出 beta 只能手动 dispatch）；`index.json` 加 `built_in_ci`/`builder` 与 `modules` 段；`mkmodule.sh` 在非 CI 环境打印"本地产物不作为发布来源" |
+
+**CI/发布**：① prep 打 `bare`（APK 内嵌它；base/full 档 APK 的离线包已有 dsh，塞两遍没意义）；
+② bundles 用频道里的 dsh 层打**默认模块**（`module-zip-full` 制品）；⑤ publish 两个变体一起发，
+`index.json` 的 `modules.default` 指向 full，下载页两张模块卡片；频道里没有 dsh 层时
+**不产出默认名**，只发 `-bare` 并在 job summary/下载页说明。
+
+**App（免 root 切割 + 进入即启用）**：判定收进 `core/EditionPolicy.kt`（纯函数，两个方向都测），
+`core/ProotBootstrap.kt` 决定"该不该自动启用"，`core/ProotProvisioner.kt` 是**唯一一份**
+"宿主脚本 → 只补缺的内嵌包 → provision"流水线（手动入口与自动入口共用，避免漂移）；
+自动入口在首启路径上跑到 `start` 后直接落「终端」页，失败显示**原始错误** + 重试 + 手动路径。
+单测：`testProotFullDebugUnitTest` / `testRootFullDebugUnitTest` 各 **175/0**（新增 27 条：
+`EditionPolicyTest` 4 / `ProotBootstrapTest` 6 / `EditionSeparationTest` 13 / `ModuleUpdateTest` +4）。
+⚠️ 本机跑 gradle 需要 UTF-8 locale（`LC_ALL=C.utf8 LANG=C.utf8`）：POSIX locale 下中文测试方法名
+会让 kotlinc 报 `InvalidPathException` —— 这是环境问题，CI 已经显式设了 C.UTF-8。
+
+**回归**：新增 `tools/module-variant-selftest.mjs`（**27 条**，进 CI 的 shell 节点）——
+真的打包两个变体、真的落地内置 DSH、真的用一个临时 Ed25519 频道跑通"一条指令装层 + 回滚到内置版"，
+并含四个负例（无层打 full / bare 夹带 / 载荷被改坏 / 清单被改过）。既有门禁全绿：
+root selftest 62/0（bash + mksh）、provision 83/0、oneshot 29/0、customize 16/0、
+shell-compat / contract / cmp-consistency / webroot 64/0 全过。
+
+**下一步（真机验收）**：见 `docs/module-variants.md` §六 —— 装 `full` 模块 → 重启 →
+`layers/dsh-<版本>.erofs` 与 `etc/dsh-builtin.json` 就位 → `linuxctl doctor` 报内置版本 →
+`linuxctl dsh install` 更新 → `linuxctl rollback dsh` 回内置。
+
 ### 3.10.26 内层禁止调用安卓系统工具（真机整机卡死事故；模块 1.0.20 / App 0.3.3）
 
 **现象**：真机跑 start 后**整机卡死**，只能重启。

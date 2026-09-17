@@ -86,7 +86,9 @@ class UiInsetsContractTest {
      * 这样既不误报，也不会因为改写屏幕文件而悄悄失去保护。
      */
     private val delegatesInsets = mapOf(
-        "LauncherActivity.kt" to listOf("ui/AppShell.kt", "ui/BootPlaceholder.kt"),
+        // 免 root 首启那一屏（ProotBootstrapScreen）也是 LauncherActivity 的整屏委托，
+        // 所以它必须一起登记：否则它自己漏了 safeDrawingPadding 也没人拦（内容会被状态栏压住）
+        "LauncherActivity.kt" to listOf("ui/AppShell.kt", "ui/BootPlaceholder.kt", "ui/ProotBootstrapScreen.kt"),
         "WelcomeActivity.kt" to listOf("ui/WelcomeScreen.kt"),
     )
 

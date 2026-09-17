@@ -134,7 +134,10 @@ cd dist && sha256sum -c <(awk 'NF>=3 && $2 ~ /^[0-9]+$/ {print $3"  "$1}' MANIFE
 步骤：
 
 1. 装 APK：`adb install -r dist/sunsetlinux-launcher-debug.apk`
-2. 打包并刷模块：`bash module/mkmodule.sh --version 0.1.0` → 用 KernelSU 管理器安装生成的 zip
+2. 打包并刷模块：`bash module/mkmodule.sh --variant bare --version 0.1.0`
+   （`--variant bare` = 不带 DSH；默认变体 `full` **自带 DSH 层**，必须给
+   `--dsh-layer <dsh-<版本>.erofs.gz>`。详见 [`docs/module-variants.md`](docs/module-variants.md)）
+   → 用 KernelSU 管理器安装生成的 zip
 3. 按 [`docs/smoke-test.md`](docs/smoke-test.md) 在 root 终端跑一次冒烟测试
    （**挂载与安装步骤必须由你执行**，原因见该文档开头）
 

@@ -2,7 +2,9 @@
 
 > 用途：**对话记录可能被删/会被换掉**，所以把"现在到哪了、还剩什么、怎么接着做"落进仓库。
 > 和 `docs/STATUS.md`（项目总账）配合看：STATUS 讲**项目本身**做到什么程度，本文讲**这次协作的落点**。
-> 最后更新：**2026-09-17（收束）**（第 37 条：真机挂载归因 → 一次**整机卡死**事故的修复 → 规则开机自动应用；App 0.3.5 / 模块 1.0.22。**下一轮第一件事：装官方 base/runtime/dsh 三层**，见文末"本轮收束"）
+> 最后更新：**2026-09-17（第 38 轮）**（三条决策落地：**模块拆 `full`/`bare` 两变体**、
+> **免 root 与模块彻底切割**、**编译只在 CI / 发布只由 `main`**；App 0.3.6 / 模块 1.0.23。
+> 设计全文：[`module-variants.md`](module-variants.md)。**下一轮第一件事：真机装 `full` 模块验内置 DSH**，见文末）
 
 ---
 
@@ -685,3 +687,65 @@ I/O error 上 —— 因为重启后规则失效；本次改动正是为了消�
    `/data/system/dropbox`、`/data/tombstones` —— 本轮所有结论都出自这些。
 8. 诊断脚本（开发工作区，未入库）：`真机诊断-挂载.sh`、`真机诊断2-loop与overlay.sh`、
    `真机诊断3-loop归因与fuse.sh`、`真机诊断4-判定表.sh`。
+
+---
+
+## 第 38 轮（2026-09-17）：三条决策落地 —— 模块两变体 / 免 root 切割 / 编译只在 CI
+
+**这一轮补的正是"root 模块只缺 DSH 这一块"**（第 37 轮真机结论：挂载链全通，倒在
+`supervise.sh exit 78` = 设备自建层缺 DSH 本体与 web profile）。
+
+### 决策与设计（全文见 `docs/module-variants.md`）
+
+| # | 决策 | 一句话 |
+|---|---|---|
+| 1 | 免 root 完全切割 | 免 root 版与 KernelSU 模块**彻底无关**；打开即自动启用内置 Ubuntu + 终端 + DSH |
+| 2 | root 模块拆两变体 | `full`（**默认名**，自带 DSH：装完重启即可用、可更新、可一键回滚到内置版）/ `bare`（不含 DSH，`linuxctl dsh install` **一条指令**从内置官方频道装） |
+| 3 | 编译只在 CI | 官方产物一律 GitHub Actions 编译；**发布只由 `main` 触发**；`beta`/`channel`/`layers`/`gh-pages` 只存内容 |
+
+### 接口（改代码前先看这张表）
+
+- 模块 zip：`full` → `sunsetlinux-module-<ver>.zip`（含 `dsh/dsh-<版本>.erofs.gz` + `dsh/manifest.json`）；
+  `bare` → `sunsetlinux-module-<ver>-bare.zip`。**默认名只给 full**。
+- `module.prop` 新增 `variant=full|bare`（管理器忽略未知键；描述里也写明）。
+- 内置版本事实源：`$LINUX_HOME/etc/dsh-builtin.json`（`linuxctl dsh builtin` 写，回滚/doctor 读）。
+- 新命令：`linuxctl dsh {info|builtin|install}`；`linuxctl update dsh`（无文件）= `dsh install`；
+  `linuxctl rollback dsh`（不带 `--to`）优先回内置版本。
+- `update.sh` 新子命令 `install <base|runtime|dsh>`：自己补内置官方频道 → 验签 → 解析（TSV）→ 下载 → 校验 → 安装。
+- `index.json` 新增 `modules`（`default` + `variants`）与 `built_in_ci`/`builder`。
+
+### 这一轮的坑（都已写进代码注释，别再犯）
+
+1. **"静默冒充"必须被硬拦**：`full` 不给 `--dsh-layer`、`bare` 给了 `--dsh-layer` —— 两者都
+   `die`。否则会出现"不带 DSH 的包顶着默认名发出去"，用户装完发现起不来且**没有任何一处报错**。
+2. **默认名与字典序**：`-bare.zip` 在字典序里排在 `.zip` **前面**，所以"取第一个 .zip"会拿到
+   bare —— App 的模块更新改读 `index.json` 的 `modules.default`，下载页也按它标注"默认"。
+3. **APK 内嵌的是 bare**：base/full 档 APK 的离线包已有 dsh 层，模块再内嵌 full = 同样 48 MB 塞两遍；
+   `ci.yml` 与 `build-apk.yml` 都读 `assets/module/module.json` 断言 `"variant":"bare"`。
+4. **设备侧不要再建 dsh 层**：`device-provision.sh` 认 `etc/dsh-builtin.json` 并跳过 dsh 构建
+   （设备侧建出来的那份正是 `exit 78` 的成因）；`state.json` 的 `dsh_version` 改用 `layer_version dsh`
+   取值（否则内置场景下写 null，对账失效）。
+5. **判定要认带版本名的层**：`layers/dsh-<版本>.erofs` 是常态，`customize.sh` 的"有没有层"
+   判定必须同时认 `dsh.erofs` 与 `dsh-*.erofs`（老写法会把已装好的内置层当成没有）。
+6. **CLI-only 也要能用**：模块可以脱离 App 使用，所以"内置官方频道"（URL+公钥）也写进了
+   `runtime/root/update.sh`；`ensure_official_channel` 是**合并**（App 侧同名内置项以代码定义为准，不会重复）。
+7. **`dsh install` 的失败要能分辨**：resolve 现在输出 `RESOLVE<TAB>NONE<TAB>原因`
+   （全频道验签失败 vs 已是最新是两件事），`linuxctl dsh install` 的退出码也跟着 `ok` 走。
+
+### 回归与门禁
+
+App 单测 **175/0 × 2 个变体**（`LC_ALL=C.utf8 LANG=C.utf8 ./gradlew --no-daemon --offline `
+`:app:testProotFullDebugUnitTest` / `:app:testRootFullDebugUnitTest`；POSIX locale 下中文测试名会让
+kotlinc 报 `InvalidPathException`，那是环境问题、CI 已设 C.UTF-8）；
+`node tools/module-variant-selftest.mjs` **27/0**（真打包、真落地、真跑一个临时 Ed25519 频道，
+含 4 个负例）；`tools/customize-selftest.mjs` 16/0；root selftest 62/0（bash+mksh）；
+provision 83/0；oneshot 29/0；shell-compat / contract / cmp-consistency / webroot 64/0 全绿。
+
+### 下一轮第一件事（真机）
+
+1. 装 **`full`** 模块（`sunsetlinux-module-1.0.23.zip`）→ 重启 →
+   看 `layers/dsh-<版本>.erofs` 与 `etc/dsh-builtin.json` 是否就位（`run/provision.log` 里会有
+   "DSH 已由模块内置提供 → 跳过设备侧 dsh 构建"）；
+2. `linuxctl doctor` 应能看到内置 DSH 版本；`linuxctl dsh install` 从官方频道更新；
+   `linuxctl rollback dsh` 回内置；
+3. 免 root：装 `proot-full`，打开 App 应**自动**铺好并落到终端（全流程不出现"模块"两个字）。

@@ -369,18 +369,25 @@ class LinuxCtl(private val context: Context, val mode: EnvMode) {
 
     private fun baseEnv(): Map<String, String> = buildMap {
         put("PATH", "/system/bin:/system/xbin:/data/sunsetlinux/bin")
-        // 免 root 运行时的选择与位置：
-        //   · proroot 的 5 个 .so 只在 **nativeLibraryDir**（随 APK 打的 jniLibs），
-        //     脚本自己是找不到这个路径的 —— 必须由 App 透传，否则只能降级到 proot。
-        //   · 版本号来自 BuildConfig（构建时读 tools/proroot/VENDOR.json），
-        //     status 与日志里要能报出"用的是哪个版本"。
-        runCatching { context.applicationInfo.nativeLibraryDir }
-            .getOrNull()?.takeIf { it.isNotBlank() }
-            ?.let { put("SUNSETLINUX_NATIVE_LIB_DIR", it) }
-        put("SUNSETLINUX_PROROOT_VERSION", BuildConfig.PROROOT_VERSION)
-        Prefs(context).rootlessRuntime?.let { put("SUNSETLINUX_ROOTLESS", it) }
-        // 层模式（loop / dir）：用户可在「设置」里选，脚本读不到 App 的偏好，只能透传
-        Prefs(context).layerMode?.let { put("SUNSETLINUX_LAYER_MODE", it) }
+        // 免 root 运行时的选择与位置 —— **只有 proot 模式才递**（决策 1："root 运行时不再保留
+        // 任何 proot 降级分支"）。root 模式下 `linuxctl` 走真 chroot，`SUNSETLINUX_ROOTLESS`
+        // 递过去也没人读；更糟的是它会让"这个环境还能切运行时"变成一个看得见却无效的旋钮。
+        if (mode == EnvMode.PROOT) {
+            //   · proroot 的 5 个 .so 只在 **nativeLibraryDir**（随 APK 打的 jniLibs），
+            //     脚本自己是找不到这个路径的 —— 必须由 App 透传，否则只能降级到 proot。
+            //   · 版本号来自 BuildConfig（构建时读 tools/proroot/VENDOR.json），
+            //     status 与日志里要能报出"用的是哪个版本"。
+            runCatching { context.applicationInfo.nativeLibraryDir }
+                .getOrNull()?.takeIf { it.isNotBlank() }
+                ?.let { put("SUNSETLINUX_NATIVE_LIB_DIR", it) }
+            put("SUNSETLINUX_PROROOT_VERSION", BuildConfig.PROROOT_VERSION)
+            Prefs(context).rootlessRuntime?.let { put("SUNSETLINUX_ROOTLESS", it) }
+        }
+        // 层模式（loop / dir）：root 模式专用（proot 是把 base 层解成 rootfs，没有"怎么挂"）。
+        // 用户可在「设置」里选，脚本读不到 App 的偏好，只能透传。
+        if (mode == EnvMode.ROOT) {
+            Prefs(context).layerMode?.let { put("SUNSETLINUX_LAYER_MODE", it) }
+        }
         // linuxctl 自己会解析环境根：优先 LINUX_HOME，其次 SUNSETLINUX_APP_FILES。
         // 两个都给上，避免部署侧调整解析顺序时 App 侧失效。
         put("LINUX_HOME", home)

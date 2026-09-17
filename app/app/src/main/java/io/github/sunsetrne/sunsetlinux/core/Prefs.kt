@@ -175,6 +175,24 @@ class Prefs(context: Context) {
         set(value) = sp.edit { putBoolean(KEY_MODULE_STEP, value) }
 
     /**
+     * 免 root 版的「打开即启用内置环境」是否被用户**明确取消**过。
+     *
+     * ## 为什么与 [onboarded] 分开
+     *
+     * 两者的语义不一样，混用会出两种相反的错误：
+     *   · [onboarded] = "首启引导走完了"（自动流程成功时也由它收尾）；
+     *   · 本键 = "用户不想让 App 自动铺，要自己一步步来" —— 只在免 root 版的自动启用页上
+     *     点「手动部署」时置位，并把用户送到首启引导页。
+     *
+     * 若拿 [onboarded] 兼作取消标记：用户"自动失败 → 点手动部署"会被记成"已经引导过"，
+     * 下次冷启动既不再自动试、也不弹引导，面对一个空环境无路可走。
+     * 只要本键还是 false，免 root 版每次冷启动都会重新判一次（见 [ProotBootstrap.decide]）。
+     */
+    var prootBootstrapDeclined: Boolean
+        get() = sp.getBoolean(KEY_PROOT_BOOTSTRAP_DECLINED, false)
+        set(value) = sp.edit { putBoolean(KEY_PROOT_BOOTSTRAP_DECLINED, value) }
+
+    /**
      * DSH 的 npm dist-tag（latest / next / alpha / 自定义版本号）。
      * 为空表示"跟随频道清单里声明的 dsh_npm.dist_tag"。
      */
@@ -230,5 +248,6 @@ class Prefs(context: Context) {
         const val KEY_LOG_FOLLOW = "log_auto_follow"
         const val KEY_ONBOARDED = "onboarded"
         const val KEY_MODULE_STEP = "module_step_ack"
+        const val KEY_PROOT_BOOTSTRAP_DECLINED = "proot_bootstrap_declined"
     }
 }
