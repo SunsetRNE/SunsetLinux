@@ -2,7 +2,7 @@
 
 > 用途：**对话记录可能被删/会被换掉**，所以把"现在到哪了、还剩什么、怎么接着做"落进仓库。
 > 和 `docs/STATUS.md`（项目总账）配合看：STATUS 讲**项目本身**做到什么程度，本文讲**这次协作的落点**。
-> 最后更新：**2026-09-17**（第 37 条：真机挂载归因 —— 三处 bug + "这台机为什么起不来"的三条限制（overlay 拒 f2fs / loop 在 kernel 域被 SELinux 拒 / toybox 选项面）+ 本机能力探测 → App 0.3.2 / 模块 1.0.19）
+> 最后更新：**2026-09-17（收束）**（第 37 条：真机挂载归因 → 一次**整机卡死**事故的修复 → 规则开机自动应用；App 0.3.5 / 模块 1.0.22。**下一轮第一件事：装官方 base/runtime/dsh 三层**，见文末"本轮收束"）
 
 ---
 
@@ -647,3 +647,41 @@ tail -40 /data/sunsetlinux/run/linux.log  # 现在会有内容了：卡在 loop/
 真机状态（11:08 日志）：0.3.3 已确认**不再卡死**（DNS 在父进程采集）；仍倒在 `mount upper` 的
 I/O error 上 —— 因为重启后规则失效；本次改动正是为了消除这个手动步骤。剩下的一关是
 `supervise.sh` 的 `exit 78`（缺 DSH web profile），需要装官方 dsh/runtime 层（App「更新」页最省事）。
+
+## 本轮收束（2026-09-17，换对话框前）——真机三条限制 + 一次卡死事故的收尾
+
+**代码/发布**：`main` = `beta` = `22df066`；Release **v0.3.5**（14 个资产，含 `sunsetlinux-module-1.0.22.zip`
+与 `SunsetLinux-0.3.5-root-full-debug.apk`），模块 **1.0.22**、App **0.3.5（versionCode 20）**。
+门禁：`runtime/root/selftest.sh` **62/0（bash+mksh）**；shell-compat / contract(root+proot) / cmp-consistency / oneshot / provision / detect-mount / customize / webroot 全绿。
+
+**真机状态（2026-09-17 12:39 日志，已逐行核对）**：
+- `mount upper <- … -> /data/sunsetlinux/upper` **成功** —— 模块 1.0.22 的 `service.sh` 在调用 `linuxctl start`
+  前自动 `ksud sepolicy apply` 生效了（**用户不用再手打命令**）。这条规则只放开 kernel 域对
+  `system_data_file` 的**写**（读本来就允许）；
+- 三层 erofs 用 loop 挂上、overlay 参数正确（upper=ext4、lower=erofs）、`install_android_facts` 拷入
+  3 个 Android 事实文件、挂载树 13 项、`entry.sh` 被拉起 ⇒ **挂载链全通**；
+- **唯一剩余**：`entry.sh` 退出 **78** = `supervise.sh` 的前置检查（缺 `/usr/local/bin/dsh` / `node` /
+  **`$DSH_HOME/profiles/web/package.json`**）⇒ **层内容问题**：本机的层是**设备上自建**的，缺 DSH web
+  profile（doctor §7 早已记录）。
+
+**下一轮第一件事（用户侧，已交代）**：装官方 **base / runtime / dsh** 三层（App「更新」页官方频道最省事，
+或 `下一步-真机部署.md` 的 curl + `linuxctl update`）→ `linuxctl start`（规则、挂载、诊断都已自动）。
+判据：`run/ready` 出现、`linuxctl status` 的 `"state":"running"`、DSH 在 `http://127.0.0.1:3080`；
+若仍 78，**`run/last-error` 就是 `supervise.sh` 写下的原文原因**。
+
+**本轮事故与坑（合并清单，别再犯）**：
+1. **内层（私有 mount/UTS ns）严禁调用安卓系统工具**（`ndc`/`getprop`）—— 2026-09-17 造成**整机卡死**：
+   `ndc` SIGABRT（打不开 `/dev/binder`）→ 5 个 tombstone + `system_app_anr` + `system_server_crash`。
+   抓取只能在**父进程**；内层用 `install_android_facts` 只拷贝。回归：selftest 两条文本断言锁死。
+2. `ksud sepolicy check/patch/apply` 的规则语法：**class 不带冒号** —— `allow kernel system_data_file file write;`
+   （带冒号的 `.te` 写法全都 parse 失败）；且它是**运行时会话级**的（重启失效）⇒ 必须由模块每次开机打
+   （开关：`/data/sunsetlinux/etc/sepolicy-loop.disabled`）。
+3. 改设备上的脚本要**先 `cp` 保权限位**再原地重写（`awk > 新文件` + `mv` 会丢 +x → `exec: Permission denied`）。
+4. `chroot` 前必须自己给 `PATH`（否则 `#!/usr/bin/env bash` 用安卓 PATH → `env: 'bash': No such file`，rc=127）。
+5. 同一条 `local` 里不能自引用（`local a=1 b=$a` → `parameter not set`，mksh/bash 一样）。
+6. overlayfs 拒绝 f2fs（`ovl_dentry_weird` 命中 `DCACHE_OP_HASH/COMPARE`）⇒ **dir 模式在这台机上不可能**；
+   这是内核规则，不是策略能改的。
+7. 设备侧**只读**核对优先：`run/{cmdprobe,start.log,linux.log,last-error,service.log}`、`/proc/mounts`、
+   `/data/system/dropbox`、`/data/tombstones` —— 本轮所有结论都出自这些。
+8. 诊断脚本（开发工作区，未入库）：`真机诊断-挂载.sh`、`真机诊断2-loop与overlay.sh`、
+   `真机诊断3-loop归因与fuse.sh`、`真机诊断4-判定表.sh`。
