@@ -2,7 +2,29 @@
 
 > 用途：**对话记录可能被删/会被换掉**，所以把"现在到哪了、还剩什么、怎么接着做"落进仓库。
 > 和 `docs/STATUS.md`（项目总账）配合看：STATUS 讲**项目本身**做到什么程度，本文讲**这次协作的落点**。
-> 最后更新：**2026-09-17（第 39 轮）**（两件事：**§3.10.31 环境内 dsh.url 写错目录**（App 永远
+> 最后更新：**2026-09-17（第 40 轮）**（本轮：**§3.10.34 真机批注改 UI**（操作卡置顶 · 一键/分步二选一 ·
+> 终端紧凑化/避让胶囊/身份行随状态自动变）、**§3.10.35 源独立成页**（npm 默认修成官方 · 新增 Python 源 ·
+> 设置页 986→514 行拆出「频道管理 / 冻结与省电」）+ **gh-pages 合成一次推送**（Pages 构建 2~3 条 → 1 条）；
+> App **0.3.9** / 模块 **1.0.29**，流水线 `1004e30` 全绿）
+>
+> **★ 下一轮第一件事（真机交接，按优先级；都还没修，别当成已完成）**：
+> 1. **App 报「频道 签名校验失败，已拒绝该频道」**（0.3.9，22:5x 之后；App 0.3.8 时还是"已是最新"）。
+>    **发布侧已核实无问题**：线上 `channel.json/.sig/.pub` 与 `channel` 分支逐字节一致，用
+>    `tools/channel/verify.mjs --pub … --in … --sig …` 验签通过、层 sha256 复算也过 ⇒ 问题在 **App 侧**。
+>    第一嫌疑：本轮把「频道管理」搬到 `ui/ChannelsPane.kt` 时，官方频道的**公钥/签名获取路径**或内嵌公钥被动过。
+>    查法：找 App 验签实现取的是内嵌公钥还是线上 `.pub`、有没有缓存；`OfficialChannelContractTest` 是否只搬了断言没搬常量。
+> 2. **`nsenter: Unknown option 'wd=/data/sunsetlinux/rootfs'`**（「源与镜像 → 验证当前生效值」两张图都报）。
+>    `linuxctl` 的 `run_in_env` 写的是 `--wd="$ROOTFS_DIR"`（带等号），设备上的 **toybox nsenter 不认**这种写法
+>    ⇒ **终端 `attach` 与 `exec` 在这台机上必然失败**。修法：`--wd "$ROOTFS_DIR"`（或 `-w`）+ 一条回归断言。
+> 3. **「root 已授权 + linuxctl 已就位，但模块状态未知（经 su 读取失败）」**（欢迎页/环境检测）：自相矛盾，
+>    要拉一次 su 那步的原始 stderr 再定位（可能只是刚更新 App/模块后授权需重新确认）。
+> 4. **DSH Web 是桌面版落地页**（"探索未至之境 / 选择工作区"）：移动版界面来自**第三方插件 `dsh-web-mobile`**
+>    （见 `rootfs/profiles/web-profile/package.json` 的 bundles：`@deepseek-ai/dsh-base` + `@deepseek-ai/dsh-web-app`
+>    + `dsh-web-mobile` + `dsh-task-notifier`）。所以要么是环境里 `$DSH_HOME/profiles/web` 或它的 `node_modules`
+>    没就位（`supervise.sh` 会先检查并在缺失时退 78），要么是离线环境下装不上这些 bundle 而退化成桌面版。
+>    查法：`linuxctl exec -- sh -c 'cat /root/.dsh/profiles/web/package.json; ls /root/.dsh/profiles/web'`。
+>
+> （另：手机上的老问题仍在 —— 残留 dsh **pid 4898** 占着 `127.0.0.1:3080`，装 1.0.29 后**重启一次**即可清掉。）
 > "登录地址还没写出来"）、**§3.10.32 环境与 DSH 拆开启动**（`--no-dsh` · `dsh start|stop` · 互斥判定 ·
 > 终端只要求环境在跑）；App **0.3.8** / 模块 **1.0.29**。**下一轮第一件事：真机装 1.0.29 + App 0.3.8，验
 > 「操作卡置顶 · 一键/分步切换与运行中锁定 · 终端不被胶囊盖住 · 身份行连上才出现」这一串**，见文末）
