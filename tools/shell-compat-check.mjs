@@ -30,6 +30,7 @@
  *   | `${BASH_SOURCE[0]}` | 被 busybox ash 解析时 `syntax error: bad substitution`（脚本一行都不跑） | 只有"用裸 `sh` 发起"时才会撞到，本地用 bash 跑一直是对的 |
  *   | `bash start.sh` | 设备上没有 bash → 挂载这一步永远失败 | 本地/CI 的 bash 让它看起来完全正常 |
  *   | 裸 `sh <脚本>` | 模块自启的 PATH 里 `sh` 是 busybox ash，解析不了设备侧脚本 | 同上 |
+ *   | nsenter `--wd=` | `nsenter: Unknown option 'wd=…'` → attach/exec **整条不执行** | 宿主/CI 的 nsenter 是 util-linux（有 `-w`），设备的 `/system/bin/nsenter` 是 toybox（**没有**）；本地永远撞不到 |
  *
  *   还有一类**语法闸门永远管不了**的：`x=()` 在 mksh 里**不是空数组**，
  *   `set -u` 下展开 `"${x[@]}"` 会 `parameter not set`（真机第二次失败的原因）。
@@ -204,6 +205,146 @@ function shellKind(rel) {
   return first;
 }
 
+// ---- nsenter 的**选项面** ---------------------------------------------------
+// 设备上的 `/system/bin/nsenter` 是 **toybox**（实测 `--help` 为 Toybox 0.8.12-android），
+// 选项表比宿主/CI 的 util-linux **窄**，而且**错一个选项不是降级、是整条命令不执行**：
+//
+//   | 选项 | 设备实际结果（实测） |
+//   |---|---|
+//   | `--wd=/path` / `--wd /path` / `-w /path` | `Unknown option 'wd=…'` ← 2026-09-17 真机：attach/exec 必然失败 |
+//   | `--mount=/path`（等号） | ✅ 认（`-m=/path` 也认） |
+//   | `--mount /path`（空格） | `need -t or =filename` |
+//   | `-m -u`（裸 ns 选项） | 只在**同时给了 `-t PID`** 时可用（从该 pid 取 ns） |
+//
+// cwd 不需要 `--wd`：`chroot NEWROOT` 自己会 chdir 进新根（实测：从 /tmp 起
+// `chroot <rootfs> /usr/bin/env -i /bin/pwd` 打印 `/`），而那就是唯一要求。
+const NSENTER_LONG = new Set([
+  '--all', '--no-fork', '--target', '--cgroup', '--ipc', '--mount',
+  '--net', '--pid', '--uts', '--user', '--help',
+]);
+const NSENTER_SHORT = new Set(['-a', '-F', '-t', '-C', '-i', '-m', '-n', '-p', '-u', '-U', '-h']);
+const NSENTER_PATH_OPTS = new Set([
+  '--cgroup', '--ipc', '--mount', '--net', '--pid', '--uts', '--user',
+  '-C', '-i', '-m', '-n', '-p', '-u', '-U',
+]);
+const NSENTER_CWD_OPTS = new Set(['-w', '--wd', '--workdir', '--chdir']);
+
+/** 把 `\` 续行拼成"逻辑行"（选项常被拆到下一物理行，逐行扫会漏），返回 {line, text}。 */
+function logicalLines(text) {
+  const out = [];
+  let buf = '';
+  let start = 0;
+  text.split('\n').forEach((raw, i) => {
+    if (buf === '') start = i + 1;
+    const cont = /\\\s*$/.test(raw);
+    buf += cont ? `${raw.replace(/\\\s*$/, ' ')}` : raw;
+    if (!cont) { out.push({ line: start, text: buf }); buf = ''; }
+  });
+  if (buf) out.push({ line: start, text: buf });
+  return out;
+}
+
+function nsenterOptionsInText(text) {
+  const hits = [];
+  for (const { line, text: whole } of logicalLines(text)) {
+    if (/^\s*#/.test(whole)) continue;                    // 整行注释
+    const re = /\$\{?NSENTER\}?|\bnsenter\b/g;
+    let m;
+    while ((m = re.exec(whole))) {
+      let rest = whole.slice(m.index + m[0].length);
+      // `"$NSENTER" …`：变量自己的**收尾引号**要先吃掉，否则下面的 token 匹配一个都进不去
+      // （这个洞真出现过：真实代码里全部写成 `"$NSENTER"`，闸门于是空转、变异测试变绿）。
+      rest = rest.replace(/^["'](?=\s)/, '');
+      let hasTarget = false;
+      for (let guard = 0; guard < 32; guard++) {
+        // 一个 token 可以是"好几段拼起来的"（`--mount="/proc/…/ns/mnt"`）—— 引号内必须继续吃，
+        // 否则 token 在 `--mount=` 处被引号截断，同一行后面的 `--wd=` 永远扫不到
+        // （第一版就是这么空转的：变异测试全绿，闸门自检才把它揪出来）。
+        const tm = /^\s+((?:"[^"]*"|'[^']*'|[^\s"'])+)/.exec(rest);
+        if (!tm) break;
+        rest = rest.slice(tm[0].length);
+        const bare = tm[1].replace(/^["']|["']$/g, '');
+        if (!bare.startsWith('-')) break;                 // 非选项 = 要被执行的命令，nsenter 参数到此为止
+        const eq = bare.indexOf('=');
+        const name = eq === -1 ? bare : bare.slice(0, eq);
+        const hasValue = eq !== -1;
+        if (NSENTER_CWD_OPTS.has(name)) {
+          hits.push({
+            line,
+            text: whole.trim().slice(0, 160),
+            why: '设备的 nsenter 是 **toybox**（0.8.12-android 实测），**没有 cwd 选项**：' +
+                 '`--wd=X` / `--wd X` / `-w X` 一律 `Unknown option`（真机原话 ' +
+                 '`nsenter: Unknown option \'wd=/data/sunsetlinux/rootfs\'`）⇒ attach/exec **整条不执行**。' +
+                 'cwd 不用传：`chroot NEWROOT` 自己会 chdir 进新根（实测 chroot 后 `pwd` = `/`）。',
+          });
+          break;
+        }
+        if (!NSENTER_LONG.has(name) && !NSENTER_SHORT.has(name)) {
+          hits.push({
+            line,
+            text: whole.trim().slice(0, 160),
+            why: `设备 nsenter（toybox 0.8.12-android，实测 --help）不认选项 ${name}。` +
+                 '可用：-a -F -t PID -C -i -m -n -p -u -U（ns 文件写成 =path）。' +
+                 '错一个选项 = 整条命令不执行，不是降级。',
+          });
+          break;
+        }
+        if (name === '-t' || name === '--target') { hasTarget = true; continue; }
+        if (NSENTER_PATH_OPTS.has(name) && !hasValue && !hasTarget) {
+          hits.push({
+            line,
+            text: whole.trim().slice(0, 160),
+            why: `ns 参数 ${name} 必须写成**等号**形式（toybox：\`need -t or =filename\`），` +
+                 `或先给 \`-t PID\` 再写裸选项：请写成 ${name}=/proc/<pid>/ns/…`,
+          });
+          break;
+        }
+      }
+    }
+  }
+  return hits;
+}
+
+function nsenterOptionScan(rel) {
+  return nsenterOptionsInText(readFileSync(join(REPO, rel), 'utf8'));
+}
+
+/**
+ * **闸门自检**：闸门自己也得证明"它会红"。
+ * 起因：这个 nsenter 扫描器第一版在真实代码上**一直是空转的**（`"$NSENTER"` 的收尾引号
+ * 把 token 解析卡死），当轮变异测试全绿 —— 与 §六「能解析 ≠ 函数真的存在」同一类事故。
+ * 所以固定几组"必须被抓到 / 必须不被误报"的样本，跑不过就直接判闸门失效（退出 1）。
+ */
+const NSENTER_FIXTURES = [
+  { bad: true, why: '真机原样（带引号的 $NSENTER + --wd=）',
+    text: '"$NSENTER" --mount="/proc/$nspid/ns/mnt" --wd="$ROOTFS_DIR" chroot "$ROOTFS_DIR" /bin/true' },
+  { bad: true, why: '--wd 空格形式', text: '$NSENTER --wd /data/x /bin/true' },
+  { bad: true, why: '-w 短选项', text: 'nsenter -w /data/x /bin/true' },
+  { bad: true, why: '未知长选项', text: 'nsenter --fake=1 /bin/true' },
+  { bad: true, why: 'ns 参数用空格分隔（toybox: need -t or =filename）',
+    text: '"$NSENTER" --mount "/proc/1/ns/mnt" /bin/true' },
+  { bad: true, why: '续行拆开的 --wd（逐行扫会漏）',
+    text: '"$NSENTER" --mount="/proc/1/ns/mnt" \\\n    --wd=/data/x chroot /data/x /bin/true' },
+  { bad: false, why: '真实用法（linuxctl attach/exec）',
+    text: '"$NSENTER" --mount="/proc/$nspid/ns/mnt" --uts="/proc/$nspid/ns/uts" \\\n     chroot "$ROOTFS_DIR" /usr/bin/env -i HOME=/root "$@"' },
+  { bad: false, why: '真实用法（stop.sh：后面跟 umount 的 -l，不能误报）',
+    text: '"$NSENTER" --mount="/proc/$NSPID/ns/mnt" "$UMOUNT" -l "$target" 2>/dev/null && return 0' },
+  { bad: false, why: '-t PID + 裸 ns 选项（toybox 认）', text: 'nsenter -t 1234 -m -u -i -p -n /bin/true' },
+  { bad: false, why: '注释里提到 --wd', text: '# 修法：把 --wd="$ROOTFS_DIR" 删掉（toybox 没有 cwd 选项）' },
+];
+
+function nsenterSelfCheck() {
+  const failed = [];
+  for (const f of NSENTER_FIXTURES) {
+    const got = nsenterOptionsInText(f.text).length > 0;
+    if (got !== f.bad) {
+      failed.push(`${f.bad ? '漏报' : '误报'}：${f.why} → ${JSON.stringify(f.text.slice(0, 80))}`);
+    }
+  }
+  return failed;
+}
+
+
 // ---- 1) 设备侧：硬性要求 ---------------------------------------------------
 for (const dir of DEVICE_SIDE) {
   for (const rel of shFiles(dir)) {
@@ -223,6 +364,13 @@ for (const dir of DEVICE_SIDE) {
         if (BASH_SOURCE_OK[rel] && /BASH_SOURCE\[/.test(h.text)) continue;
         problems.push(
           `${rel}:${h.line} 命中"mksh 解析得过、真机照死"的陷阱：${h.text}\n       ${h.why}`,
+        );
+      }
+      // nsenter 的选项面（设备是 toybox，宿主/CI 是 util-linux）—— 与上面同源：
+      // 宿主上有、设备上没有的选项，本地怎么跑都是绿的。
+      for (const h of nsenterOptionScan(rel)) {
+        problems.push(
+          `${rel}:${h.line} nsenter 选项不被设备（toybox）接受：${h.text}\n       ${h.why}`,
         );
       }
       if (VERBOSE) notations.push(`${rel} ✅ ${shellKind(rel)}`);
@@ -270,6 +418,12 @@ for (const rel of allDeviceFiles) {
       `（Android 上没有 bash；环境内脚本才允许 bash，且需登记进 ENV_SIDE）`,
     );
   }
+}
+
+// ---- 0) 闸门自检：它会红吗？ -------------------------------------------------
+// （先跑这个：如果扫描器本身失效，"全部通过"是假绿 —— 2026-09-17 真发生过一次。）
+for (const f of nsenterSelfCheck()) {
+  problems.push(`闸门自检失败（nsenter 选项面扫描器失效）：${f}`);
 }
 
 // ---- 输出 ------------------------------------------------------------------

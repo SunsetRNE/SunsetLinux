@@ -352,14 +352,14 @@ spawn_dsh_in_env() { # spawn_dsh_in_env <port>
     [ -n "$sid" ] || warnl "找不到 setsid：DSH 可能随这次 su 会话一起被挂断"
     if [ -n "$sid" ]; then
         "$sid" "$NSENTER" --mount="/proc/$nspid/ns/mnt" --uts="/proc/$nspid/ns/uts" \
-            --wd="$ROOTFS_DIR" chroot "$ROOTFS_DIR" /usr/bin/env -i \
+            chroot "$ROOTFS_DIR" /usr/bin/env -i \
             HOME=/root DSH_HOME=/root/.dsh \
             PATH=/opt/node/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
             TERM="${TERM:-xterm-256color}" LANG="${LANG:-C.UTF-8}" \
             /opt/sunsetlinux/supervise.sh --port "$port" >>"$LOGFILE" 2>&1 </dev/null &
     else
         "$NSENTER" --mount="/proc/$nspid/ns/mnt" --uts="/proc/$nspid/ns/uts" \
-            --wd="$ROOTFS_DIR" chroot "$ROOTFS_DIR" /usr/bin/env -i \
+            chroot "$ROOTFS_DIR" /usr/bin/env -i \
             HOME=/root DSH_HOME=/root/.dsh \
             PATH=/opt/node/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
             TERM="${TERM:-xterm-256color}" LANG="${LANG:-C.UTF-8}" \
@@ -873,6 +873,18 @@ cmd_status() {
 # ---------------------------------------------------------------------------
 # attach / exec —— nsenter 进环境的 mount+UTS ns，再 chroot
 #   no PID ns（内核实测无 CONFIG_PID_NS），所以只能靠 nsenter 拿 mount/uts。
+#
+# ⚠️ **不要给 nsenter 传 cwd 选项**（这里历史上有过 `--wd="$ROOTFS_DIR"`）。
+#   设备上的 nsenter 是 **toybox**（0.8.12-android，实测 `/system/bin/nsenter --help`）：
+#   它**根本没有 cwd 选项** —— `--wd=X` / `--wd X` / `-w X` 全是
+#   `nsenter: Unknown option 'wd=…'`（真机原话：`Unknown option 'wd=/data/sunsetlinux/rootfs'`），
+#   于是 attach / exec 在这台机上**必然失败**（2026-09-17 真机两处报错）。
+#   cwd 也不需要它：`chroot NEWROOT` 自己会 chdir 进新根（实测：从 /tmp 起
+#   `chroot <rootfs> /usr/bin/env -i /bin/pwd` 打印 `/`），而这正是唯一的要求
+#   （chroot 后 cwd 必须在环境内，否则 cwd 悬空、相对路径与 pwd 全废）。
+#   另一条 toybox 约束：ns 参数必须写成**等号**形式 `--mount=/path`（`-m=/path` 亦可），
+#   空格分隔会被判 `need -t or =filename`。
+#   闸门：tools/shell-compat-check.mjs 的「nsenter 选项面」检查（对照设备 `nsenter --help`）。
 # ---------------------------------------------------------------------------
 run_in_env() {
     local interactive="$1"; shift
@@ -889,14 +901,14 @@ run_in_env() {
         # --mount/--uts 进入环境 ns；chroot 用宿主二进制（静态路径已在 ns 内可见）
         if [ "$interactive" = 1 ]; then
             exec "$NSENTER" --mount="/proc/$nspid/ns/mnt" --uts="/proc/$nspid/ns/uts" \
-                 --wd="$ROOTFS_DIR" chroot "$ROOTFS_DIR" /usr/bin/env -i \
+                 chroot "$ROOTFS_DIR" /usr/bin/env -i \
                  HOME=/root DSH_HOME=/root/.dsh \
                  PATH=/opt/node/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
                  TERM="${TERM:-xterm-256color}" LANG="${LANG:-C.UTF-8}" \
                  "$@"
         else
             "$NSENTER" --mount="/proc/$nspid/ns/mnt" --uts="/proc/$nspid/ns/uts" \
-                 --wd="$ROOTFS_DIR" chroot "$ROOTFS_DIR" /usr/bin/env -i \
+                 chroot "$ROOTFS_DIR" /usr/bin/env -i \
                  HOME=/root DSH_HOME=/root/.dsh \
                  PATH=/opt/node/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
                  TERM="${TERM:-xterm-256color}" LANG="${LANG:-C.UTF-8}" \

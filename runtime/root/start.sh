@@ -685,7 +685,12 @@ cleanup_stale_loops() {
 # 更激进的 -fy（自动大改用户数据风险太高，交给用户跑 linuxctl reset）。
 e2fsck_preen() {
     local fsck=""
-    for fsck in /system/bin/e2fsck "$ROOTFS_DIR/sbin/e2fsck" "$ROOTFS_DIR/usr/sbin/e2fsck"; do
+    # 候选顺序里**第一位是覆盖点** `$SUNSETLINUX_E2FSCK`（与 SUNSETLINUX_EROFS_EXTRACT 同类）。
+    # 为什么必须有它：真机上 /system/bin/e2fsck **一定存在**，而绝对路径排在 PATH 前面 ——
+    # 自测放的桩永远轮不到，于是 selftest 里"失败后先清 loop 再 e2fsck -p"这条断言在设备上
+    # **必然假红**（2026-09-17 实测：真 e2fsck 去跑 0 字节的 upper.img → rc=8 → 走 return 1）。
+    # 留空时行为与以前完全一致（跳过空候选继续往下走）。
+    for fsck in "${SUNSETLINUX_E2FSCK:-}" /system/bin/e2fsck "$ROOTFS_DIR/sbin/e2fsck" "$ROOTFS_DIR/usr/sbin/e2fsck"; do
         [ -x "$fsck" ] || continue
         log "e2fsck -p $UPPER_IMG（自动修日志/孤立 inode，工具：$fsck）"
         if "$fsck" -p "$UPPER_IMG" >>"$DAEMON_LOG" 2>&1; then

@@ -629,8 +629,12 @@ uh="$TMP/upper-harness.sh"
 for fn in kernel_hint cleanup_stale_loops e2fsck_preen mount_upper_rw; do
     grep -q "^$fn()" "$uh" || bad "抽取 $fn 失败（函数被改名了？）"
 done
+# 给 e2fsck 一个**覆盖点**（SUNSETLINUX_E2FSCK）再跑：真机上 /system/bin/e2fsck 真实存在，
+# 而绝对路径候选排在 PATH 前面 → 测到的会是真二进制（在 0 字节 upper.img 上必然 rc=8），
+# 桩一次都调不到 ⇒ "自愈顺序"这条断言在设备上假红、在 CI 上却绿（2026-09-17 实测到）。
 uout="$(
     PATH="$UE/bin:$PATH" \
+    SUNSETLINUX_E2FSCK="$UE/bin/e2fsck" \
     MOUNT="$UE/bin/mount" UMOUNT="$UE/bin/mount" \
     LH="$UE" LINUX_HOME="$UE" UPPER_DIR="$UE/upper" ROOTFS_DIR="$UE/rootfs" RUN_DIR="$UE/run" \
     DAEMON_LOG="$UE/run/start.log" UPPER_IMG="$UE/upper.img" LAYERS_DIR="$UE/layers" \
@@ -1120,6 +1124,27 @@ if [ -r "/proc/$$/ns/mnt" ]; then
         *"run/dsh.url 不存在 —— App 拿不到"*) bad "doctor 把 env-only 误报成「运行中却缺 dsh.url」" ;;
         *) ok "doctor 没把 env-only 误报成故障" ;;
     esac
+fi
+
+head_ "nsenter 的选项面（对照设备上的**真实二进制**）"
+# 为什么单独测这一条：真机的 `/system/bin/nsenter` 是 **toybox**，选项面比宿主/CI 的
+# util-linux 窄，而且"错一个选项"不是降级、是**整条命令不执行**。2026-09-17 真机事故：
+# linuxctl 的 attach/exec 写了 `--wd="$ROOTFS_DIR"`，toybox 直接
+# `Unknown option 'wd=/data/sunsetlinux/rootfs'` ⇒ 终端永远进不去环境。
+# 静态闸门在 tools/shell-compat-check.mjs（自带"会红吗"自检）；本条是行为级对照，
+# 拿设备上真正的二进制验一遍我们实际用的写法。
+# 判据只看**选项解析**：No such file / Operation not permitted 都算解析通过
+# （非 root 或 ns 文件不可见时必然如此），只有 Unknown option / need -t or =filename 才算失败。
+if [ -x /system/bin/nsenter ]; then
+    _ns_err="$(/system/bin/nsenter --mount="/proc/$$/ns/mnt" --uts="/proc/$$/ns/uts" \
+        /system/bin/true 2>&1 >/dev/null || true)"
+    case "$_ns_err" in
+        *"Unknown option"*|*"need -t or =filename"*)
+            bad "设备 nsenter 不接受我们用的写法（--mount=/path --uts=/path）：$_ns_err" ;;
+        *) ok "设备 nsenter 接受 --mount=/path --uts=/path（$(printf '%s' "$_ns_err" | head -n1)）" ;;
+    esac
+else
+    skip_ "本机没有 /system/bin/nsenter（CI/开发机正常）"
 fi
 
 printf '\n=========================================\n'
