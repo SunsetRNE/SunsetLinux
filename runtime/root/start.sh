@@ -1110,13 +1110,16 @@ gather_android_facts() {
     mkdir -p "$ETC_DIR" 2>/dev/null || true
 
     # --- ① ndc resolver getresolvers ---
-    if [ -x /system/bin/ndc ]; then
+    # ★ ndc 默认不用：它经 binder 找 netd，真机实测（2026-09-17）会 SIGABRT
+    #   "Binder driver '/dev/binder' could not be opened"，父进程调用同样 abort。
+    #   要试可设 SUNSETLINUX_ALLOW_NDC=1；DNS 走 getprop/resolv.conf/路由表/entry 兜底。
+    if [ -n "${SUNSETLINUX_ALLOW_NDC:-}" ] && [ -x /system/bin/ndc ]; then
         raw="$(/system/bin/ndc resolver getresolvers 2>/dev/null || true)"
         dns="$(printf '%s' "$raw" | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' 2>/dev/null | sort -u | tr '\n' ' ' || true)"
         [ -n "$dns" ] && log "DNS 取自 ndc resolver getresolvers：$dns"
     fi
     # --- ② ndc resolver getnetdns（默认网络 id 通常是 0/100）---
-    if [ -z "$dns" ] && [ -x /system/bin/ndc ]; then
+    if [ -n "${SUNSETLINUX_ALLOW_NDC:-}" ] && [ -z "$dns" ] && [ -x /system/bin/ndc ]; then
         local netid
         for netid in 0 100 101 1; do
             raw="$(/system/bin/ndc resolver getnetdns "$netid" 2>/dev/null || true)"

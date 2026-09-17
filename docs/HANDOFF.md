@@ -624,3 +624,14 @@ tail -40 /data/sunsetlinux/run/linux.log  # 现在会有内容了：卡在 loop/
 5. `chroot` 前要自己给 `PATH`：否则 `#!/usr/bin/env bash` 用的是安卓 PATH → `env: 'bash': No such file or directory`（rc=127）。
 6. 同一条 `local` 里不能自引用：`local a=1 b=$a` → `a: parameter not set`（mksh/bash 一样）。
 7. **A 路线的技术验证已成功**（写权限放开后：upper 挂上、三层 erofs 挂上、overlay 成型、`entry.sh` 跑起来 rc=78）—— 剩下的是"环境内不许碰安卓系统服务"。
+
+## 第 37 轮再补（2026-09-17 02:30）：0.3.3 真机验证通过 + 最后一关
+
+- **0.3.3 在真机上确认安全**：开机自启那次 start 里，DNS/时区是在**父进程**（"启动守护进程"之前）
+  采集的（见 `run/linux.log`），内层不再出现 `ndc`；整机**没有再次卡死**，只有"loop 写不进 + dir 不可用"两句人话。
+- **最后一关 = `supervise.sh` 的前置检查退 `exit 78`**（4 处：缺 `/usr/local/bin/dsh`、缺 `node`、
+  缺 `$DSH_HOME/profiles/web/package.json`、profile bundle 解析不了）——原因会写进 **`run/last-error`**。
+  与 `docs/HANDOFF.md` 早先记的一致：**设备上自建的层缺 DSH web profile 与 pnpm**（doctor §7），
+  需要从频道/Release 装官方 `dsh`/`runtime` 层。
+- 顺带修：`stop.sh` 引用未定义的 `UPPER_IMG`（我的登记表改动暴露的）、`gather_android_facts` 里
+  `ndc` 改为**默认不用**（`SUNSETLINUX_ALLOW_NDC=1` 才试）。

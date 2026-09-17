@@ -23,6 +23,7 @@ RUN_DIR="$LH/run"
 LAYERS_DIR="$LH/layers"
 LAYERS_MNT="$LH/layers-mnt"
 UPPER_DIR="$LH/upper"
+UPPER_IMG="$LH/upper.img"   # 残留检查里会用到（真机 01:44 报过 UPPER_IMG: parameter not set）
 ROOTFS_DIR="$LH/rootfs"
 
 SUPERVISOR_PID_FILE="$RUN_DIR/supervisor.pid"
