@@ -503,6 +503,48 @@ su -c '/data/sunsetlinux/bin/linuxctl doctor'
 | 已装状态读不到时 | —— | **不给刷入按钮**，先让用户修 root 授权（与"读不到 ≠ 没装"一致） |
 | 重启 | —— | 只报告"重启后生效"（KernelSU 落 `modules_update/`），**App 不替用户重启**，脚本里有单测断言不许出现 `reboot` |
 
+### 3.10.39 流水线优化：把 40 分钟里那 35 分钟的"发布"压下来（1+2+3 + 参数校验 + 没改的不重发）
+
+**先实测，再动手**（用户要求"给选择 + 说清后果"，所以先把每一步的真实耗时拉出来）：
+
+| 阶段 | 耗时 | 说明 |
+|---|---|---|
+| ① 环境准备 / ② 离线包 / ④ 三路门禁 | 0.1 / 0.7 / 2.0 min | ②④ 与编译并行 |
+| ③ 编译（6 节点并行） | 每个 2.2~2.9 min | 墙钟约 3 min |
+| ⑤ **发布** | **35 min（占 85%）** | 内部：gh-pages 推送 **101 s**；**Release 上传 1998 s 还没结束** |
+
+上传量：6 个 APK（≈590 MB）+ 6 个 `.bin`（≈660 MB）+ 模块 zip（50 MB）≈ **1.3 GB**。
+慢的放大器是 GitHub 资产服务的 500（`Error creating asset temp dir`）—— `gh` 失败要**整包重传**。
+
+三条改造（都按用户选的 1+2+3）：
+
+| # | 改法 | 省什么 | 依据 |
+|---|---|---|---|
+| 1 | **`.bin` 不再进 gh-pages**（只挂 Release） | 每次少推 660 MB（~80 s），更关键是**止住分支膨胀**（`keep_files` 只增不删 ⇒ 每个版本往 gh-pages 再添 660 MB，早晚撞 Pages 的 1 GB 限制） | 先核查消费方：下载页的"离线包"链接全部指向 `releases/download/<tag>/…`；App 用的是 APK 内嵌 `assets/offline-bundle.bin`；`index.json` 只存文件名 ⇒ **站点上那份没有任何消费方** |
+| 2 | Release 上传**最多 3 路并发**（每个资产仍 4 次退避重试；已存在且 name+size+sha256 一致的**跳过**） | 上传墙钟约压到 1/3；重跑不再重传 660 MB | 2026-09-18 那次 500 已经证明了"重试"必要、"逐个串行"太慢 |
+| 3 | **变更集判定**驱动编译与发布：`tools/ci-changeset.mjs`（纯函数 + 39 条回归），`push` 只跑门禁，**版本号 = 发布意图** | 文档/CI-only 的 push 从 40 min → **约 3 min**；只改模块时不再重打离线包（`build_bundles=false`） | 版本没变却要求发布 ⇒ **参数非法直接拒**（别白跑 35 分钟）；改了产物相关文件却没升版本 ⇒ 警告但不发布 |
+
+新增/保留的手动参数（都进 `workflow_dispatch`，且都**被校验**）：
+`channel`、`embed_bundles`、`force_build`、`force_publish`、`cleanup_pages`。
+
+**两条"实跑才发现"的坑**（都写进了注释/回归）：
+
+1. **离线包文件名带 App 版本**（`index.json` 的 `bundle` = `SunsetLinux-<appver>-<组合>.bin`）⇒
+   **App 版本一变就必须重打离线包**。第一版判定只按"离线包输入有没有变"来决定，实跑 CLI 时才发现
+   会把新版本的 `.bin` 整个漏掉（新 Release 上一个都没有）。回归里专门钉了这条（③b）。
+2. **YAML 块标量里内联 python 的续行不能顶格**：`python3 -c "…
+try: …"` 那种写法里，
+   顶格的 `try:` 会**提前结束块标量**，YAML 直接 `mapping values are not allowed here`。
+   改成单行 `-c`（注释里留了原因）。
+
+> 还差一步（需要点一次或手动推）：**清掉 gh-pages 上历史那些 `.bin`** —— 新发布不再往里放，
+> 但老版本推进去的还在（`keep_files` 不会删）。已加 `cleanup_pages` 输入（勾上跑一次即可），
+> 实现用**部分克隆**（`--filter=blob:none --no-checkout`）——那些文件有几 GB，完整 clone 又慢又费流量，
+> 而删除只动树对象、根本不需要 blob。
+
+回归：`tools/ci-changeset-selftest.mjs` **39/0**（含"没改就不发/不编"、"参数非法要拒"、"拿不到基线就保守"）；
+`pipeline.yml` 7 段 shell、`publish.yml` 12 段 shell 全部过 `bash -n`，两份 YAML 过 `yaml.safe_load`。
+
 ### 3.10.38 「分步启动」之后的**假故障文案**：把按设计的正常状态报成了故障（App 0.3.11）
 
 真机截图（2026-09-18 01:05）：按「分步启动 → 仅启动环境」起来之后，屏幕上同时出现三处"像坏了"的显示 ——

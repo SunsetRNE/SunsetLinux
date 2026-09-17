@@ -157,6 +157,9 @@ jobs:
       - name: 断言 — 三方版本比较一致性（WebUI / update.sh / 发布工具）
         run: node tools/cmp-consistency.mjs
 
+      - name: 断言 — 流水线变更集判定（"该不该编译/发布" + 参数校验）
+        run: node tools/ci-changeset-selftest.mjs
+
       - name: 断言 — status JSON 契约（冻结 schema §3.1）
         run: |
           node tools/contract-check.mjs --cmd 'bash runtime/root/linuxctl.sh status'

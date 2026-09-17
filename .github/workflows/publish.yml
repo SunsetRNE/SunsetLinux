@@ -50,6 +50,10 @@ on:
         description: '发布通道：auto（按分支）/ stable / beta'
         type: string
         default: auto
+      cleanup_pages:
+        description: '清理 gh-pages 上历史的 .bin（一次性维护；2026-09-18 起新发布不再往站点放 .bin）'
+        type: string
+        default: 'false'
   # 手动兜底：只重发一次（不重新编译），用于"构建产物已经在了、只是发布那步失败"
   workflow_dispatch:
     inputs:
@@ -58,6 +62,10 @@ on:
         type: choice
         options: [auto, stable, beta]
         default: auto
+      cleanup_pages:
+        description: '清理 gh-pages 上历史的 .bin（每个版本 660 MB，早期版本把它们也推进了站点）'
+        type: boolean
+        default: false
 
 # ⚠️ 这里**刻意不放工作流级的 concurrency**：本文件是**可复用工作流**，
 #    工作流级 concurrency 在"被调用"时会被 GitHub 拒掉（表现是调用方那个 job
@@ -593,8 +601,15 @@ jobs:
           SITE=dist/_site
           DIR="${{ steps.ch.outputs.dir }}"
           rm -rf "$SITE"; mkdir -p "$SITE/$DIR"
-          # 通道目录：除 APK 之外全拷（APK 只挂 Release，见下面 exclude_assets 的注释）
-          find dist/_publish -maxdepth 1 -type f -not -name '*.apk' -exec cp -v {} "$SITE/$DIR/" \;
+          # 通道目录：拷贝时要**排除 .bin**（2026-09-18 改）。
+          #   APK 只挂 Release（内嵌后单文件可到 114 MB，超 Pages 的 100 MB 限制）；
+          #   离线包 .bin 同理**只挂 Release**：实测没有任何消费方读站点上那份 ——
+          #     下载页的"离线包"链接指向 `releases/download/<tag>/…`（见下面 bundle_base），
+          #     App 用的是 APK 内嵌的 assets/offline-bundle.bin，index.json 只存文件名。
+          #   而每个版本 660 MB 的 .bin 塞进 gh-pages 会：① 每次发布多推 660 MB（~80 s）；
+          #   ② **每个版本往分支里再添 660 MB**（keep_files 只增不删）→ 早晚撞 Pages 的 1 GB 限制。
+          #   历史的那些 .bin 由 cleanup_pages 输入清一次（见文件末尾那一步）。
+          find dist/_publish -maxdepth 1 -type f -not -name '*.apk' -not -name '*.bin' -exec cp -v {} "$SITE/$DIR/" \;
           # 频道清单：**站点根**的 /channel/（不是 <通道>/channel/），验签不过就不带；
           # 不带 = gh-pages 上旧的频道目录原样保留（keep_files 只增不删），不会被清成空目录。
           if [ "${{ steps.chan.outputs.include }}" = "1" ]; then
@@ -746,46 +761,44 @@ jobs:
             gh release create "$TAG" --draft --title "$TITLE" --notes-file dist/_release-notes.md
           fi
 
-          # ② 资产**逐个上传 + 重试**，已在 Release 上且**内容一致**的直接跳过。
-          #    真因（0.3.10 那次 CI 日志原文）：
-          #      `新建 Release v0.3.10` →（17 分钟后）`HTTP 422 … name=…proot-base.bin`
-          #      → `ReleaseAsset.name already exists`
-          #    也就是 gh 在"一次 create 带 15 个资产"时**自己重传了同一个资产**（第一次其实
-          #    已在服务端成功、客户端超时后重试）⇒ 撞名 422 ⇒ 整条发布红掉。
-          #    所以：① 逐个传、失败重试；② `--clobber` 让"重传撞名"变成覆盖而不是报错；
-          #    ③ 已经有且一致的跳过（重跑少传 ~660 MB，也少一次踩同一个坑的机会）。
-          #    ⚠️ 不吞错误：四次都失败仍然报红，并把 gh 的原文打出来。
-          ERR="$(mktemp)"
-          FAILED=""
-          SKIPPED=0
+          # ② 资产：**跳过已一致的**，剩下的**最多 3 路并发**上传（每个资产 4 次退避重试）。
+          #    为什么并发：1.3 GB 串行上传实测 33 分钟（GitHub 资产服务偶尔 500，gh 会整包重传，
+          #    更是雪上加霜）；3 路并发把墙钟压到约 1/3。为什么仍要重试：500 是服务端的、会自愈。
+          #    ⚠️ 不吞错误：某个资产 4 次都失败 → 报红并列出它（重跑很便宜，已一致的会被跳过）。
+          TMP="$(mktemp -d)"
           HAVE="$(gh release view "$TAG" --json assets \
                   -q '.assets[] | "\(.name)\t\(.size)\t\(.digest // "")"' 2>/dev/null || true)"
+          printf '%s\n' $ASSETS > "$TMP/list.txt"
           # shellcheck disable=SC2086
-          for f in $ASSETS; do
-            n="${f##*/}"
-            sz="$(stat -c '%s' "$f" 2>/dev/null || echo '?')"
-            # gh 报的 digest 形如 `sha256:…`；拿不到 digest 的资产一律重传（不比大小就跳过）
-            dig="sha256:$(sha256sum "$f" | awk '{print $1}')"
-            if [ -n "$HAVE" ] && printf '%s\n' "$HAVE" | grep -qxF "$(printf '%s\t%s\t%s' "$n" "$sz" "$dig")"; then
-              echo "  已在 Release 上且内容一致，跳过 $n（$sz B）"
-              SKIPPED=$((SKIPPED + 1))
-              continue
+          cat > "$TMP/one.sh" <<'SH'
+          #!/usr/bin/env bash
+          # 用法：one.sh <tag> <tmpdir> <have> <file>
+          set -uo pipefail
+          TAG="$1"; TMP="$2"; HAVE="$3"; f="$4"
+          n="${f##*/}"
+          sz="$(stat -c '%s' "$f" 2>/dev/null || echo '?')"
+          dig="sha256:$(sha256sum "$f" | awk '{print $1}')"
+          if [ -n "$HAVE" ] && printf '%s\n' "$HAVE" | grep -qxF "$(printf '%s\t%s\t%s' "$n" "$sz" "$dig")"; then
+            echo "  跳过（Release 上已一致）：$n"
+            exit 0
+          fi
+          for try in 1 2 3 4; do
+            if gh release upload "$TAG" "$f" --clobber 2>"$TMP/err.$n"; then
+              echo "  已上传：$n（$sz B，第 $try 次成功）"
+              exit 0
             fi
-            ok=""
-            for try in 1 2 3 4; do
-              if gh release upload "$TAG" "$f" --clobber 2>"$ERR"; then ok=1; break; fi
-              echo "::warning::上传 $n 第 $try 次失败：$(tail -n1 "$ERR" 2>/dev/null)"
-              sleep $((try * 10))
-            done
-            if [ -n "$ok" ]; then
-              echo "  已上传 $n（$sz B）"
-            else
-              echo "::error::资产上传失败（已重试 4 次）：$n —— $(tail -n1 "$ERR" 2>/dev/null)"
-              FAILED="$FAILED $n"
-            fi
+            echo "::warning::上传 $n 第 $try 次失败：$(tail -n1 "$TMP/err.$n" 2>/dev/null)"
+            sleep $((try * 10))
           done
-          rm -f "$ERR"
-          echo "资产处理完成：跳过 $SKIPPED 个（已在且一致）"
+          echo "::error::资产上传失败（已重试 4 次）：$n —— $(tail -n1 "$TMP/err.$n" 2>/dev/null)"
+          printf '%s\n' "$n" > "$TMP/fail.$n"
+          exit 1
+          SH
+          chmod +x "$TMP/one.sh"
+          # -P 3：最多 3 个并发；-n 1：一次一个文件。失败由 fail.* 文件兜住（xargs 的退出码不稳）。
+          xargs -a "$TMP/list.txt" -d '\n' -P 3 -n 1 "$TMP/one.sh" "$TAG" "$TMP" "$HAVE" || true
+          FAILED="$(ls "$TMP"/fail.* 2>/dev/null | sed 's|.*/fail\.||' | tr '\n' ' ' || true)"
+          rm -rf "$TMP"
           [ -z "$FAILED" ] || { echo "::error::以下资产没能上传：$FAILED"; exit 1; }
 
           # ③ 资产齐了才**发布**（`--draft=false` 幂等）。
@@ -818,6 +831,35 @@ jobs:
             done
           fi
           echo "- Release：https://github.com/$REPO/releases/tag/$TAG" >> "$GITHUB_STEP_SUMMARY"
+
+      # ── 可选：清掉 gh-pages 上历史的 .bin（一次性维护）────────────────────────
+      #   2026-09-18 之前发布的版本把离线包 .bin 也推进了站点，**每个版本 660 MB**
+      #   （keep_files 只增不删）→ 早晚撞 Pages 的 1 GB 限制。新发布已不再放（见上面
+      #   那个 find 的注释），这里负责把历史那些清掉。手动触发时勾 cleanup_pages 即可。
+      #   ⚠️ 用**部分克隆**（--filter=blob:none --no-checkout）：gh-pages 上光 .bin 就有几 GB，
+      #      完整 clone 又慢又费流量；删除只动树对象，根本不需要那些 blob。
+      - name: 清理 gh-pages 上历史的 .bin（可选）
+        if: ${{ inputs.cleanup_pages == 'true' || inputs.cleanup_pages == true }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          W="$(mktemp -d)"
+          git clone --depth=1 --filter=blob:none --no-checkout --branch gh-pages \
+            "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "$W"
+          cd "$W"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          n="$(git ls-tree -r --name-only HEAD | grep -c '\.bin$' || true)"
+          if [ "${n:-0}" -eq 0 ]; then
+            echo "gh-pages 上没有 .bin，无需清理"
+            exit 0
+          fi
+          echo "要清掉 $n 个 .bin（离线包只挂 Release，站点上那份没有任何消费方）"
+          git ls-tree -r --name-only HEAD | grep '\.bin$' | xargs -r git rm --cached -q --
+          git commit -q -m "cleanup: 移除站内历史的 .bin（${n} 个；离线包只挂 Release）"
+          git push -q origin HEAD:gh-pages
+          echo "已清理 $n 个 .bin"
 
       # 失败时把"最后跑的那一步 + 它输出里的报错行"带成注释。
       # 注释是匿名可读的（check-runs/annotations），日志不是 —— 手机上排查 CI 全靠它。
