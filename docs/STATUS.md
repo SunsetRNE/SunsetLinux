@@ -537,10 +537,17 @@ try: …"` 那种写法里，
    顶格的 `try:` 会**提前结束块标量**，YAML 直接 `mapping values are not allowed here`。
    改成单行 `-c`（注释里留了原因）。
 
-> 还差一步（需要点一次或手动推）：**清掉 gh-pages 上历史那些 `.bin`** —— 新发布不再往里放，
-> 但老版本推进去的还在（`keep_files` 不会删）。已加 `cleanup_pages` 输入（勾上跑一次即可），
-> 实现用**部分克隆**（`--filter=blob:none --no-checkout`）——那些文件有几 GB，完整 clone 又慢又费流量，
-> 而删除只动树对象、根本不需要 blob。
+> **gh-pages 历史 `.bin` 已经清掉了**（2026-09-18，一次性，不需要再点）：分支 tip 上原有
+> **83 个 `.bin`**（跨十几个版本，约 5 GB —— `keep_files` 只增不删的后果），已用一个"只删文件、
+> 不下载任何 blob"的提交清空（tip `98fd9a2`，203 → 120 个文件）。顺带保留了 `cleanup_pages` 输入，
+> 以后要是又有人往里塞大文件，勾一下就能清。
+>
+> ★ 清理过程本身有两个坑，都写进了 `publish.yml` 的注释：
+> ① 部分克隆里 **`git commit` 会刷新工作区**（而 `--no-checkout` 下文件都不在）⇒ 触发**懒拉取**，
+>    实测 `fatal: could not fetch <blob> from promisor remote`；
+> ② **`git write-tree` 默认要求对象齐全** ⇒ 同样会去拉那几个 GB。
+>    正确姿势是纯 plumbing：`read-tree` → `update-index --force-remove` → **`write-tree --missing-ok`**
+>    → `commit-tree` → `push <commit>:refs/heads/gh-pages`。
 
 回归：`tools/ci-changeset-selftest.mjs` **39/0**（含"没改就不发/不编"、"参数非法要拒"、"拿不到基线就保守"）；
 `pipeline.yml` 7 段 shell、`publish.yml` 12 段 shell 全部过 `bash -n`，两份 YAML 过 `yaml.safe_load`。

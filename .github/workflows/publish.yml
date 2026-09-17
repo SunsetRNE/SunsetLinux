@@ -844,22 +844,33 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+          # ★ 两道保险，都是实测踩出来的：
+          #   ① 用**部分克隆**（--filter=blob:none --no-checkout）：历史 .bin 有几 GB，
+          #      完整 clone 又慢又费流量，而"删文件"根本不需要它们的 blob；
+          #   ② 用 **plumbing + `write-tree --missing-ok`**，而不是 `git rm --cached` + `git commit`：
+          #      `git commit` 会去刷新工作区（部分克隆里文件都不在），`git write-tree` 默认要求
+          #      对象齐全 —— 两者都会触发**懒拉取**，把几 GB 的 blob 拉回来（实测：`git commit`
+          #      直接 fatal: could not fetch <blob> from promisor remote）。`--missing-ok` 正是
+          #      为这种"树里引用了本地没有的对象"准备的。
+          export GIT_NO_LAZY_FETCH=1
           W="$(mktemp -d)"
           git clone --depth=1 --filter=blob:none --no-checkout --branch gh-pages \
             "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "$W"
           cd "$W"
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           n="$(git ls-tree -r --name-only HEAD | grep -c '\.bin$' || true)"
           if [ "${n:-0}" -eq 0 ]; then
             echo "gh-pages 上没有 .bin，无需清理"
             exit 0
           fi
-          echo "要清掉 $n 个 .bin（离线包只挂 Release，站点上那份没有任何消费方）"
-          git ls-tree -r --name-only HEAD | grep '\.bin$' | xargs -r git rm --cached -q --
-          git commit -q -m "cleanup: 移除站内历史的 .bin（${n} 个；离线包只挂 Release）"
-          git push -q origin HEAD:gh-pages
-          echo "已清理 $n 个 .bin"
+          echo "要清掉 $n 个 .bin（离线包只挂 Release，站点那份没有任何消费方）"
+          git ls-tree -r --name-only HEAD | grep '\.bin$' > "$W/bins.txt"
+          export GIT_INDEX_FILE="$W/cleanup-index"
+          git read-tree HEAD
+          git update-index --force-remove --stdin < "$W/bins.txt"
+          TREE="$(git write-tree --missing-ok)"
+          NEW="$(git commit-tree "$TREE" -p HEAD -m "cleanup: 移除站内 ${n} 个历史 .bin（离线包只挂 Release）")"
+          git push -q origin "$NEW:refs/heads/gh-pages"
+          echo "已清理 $n 个 .bin（新提交 $NEW）"
 
       # 失败时把"最后跑的那一步 + 它输出里的报错行"带成注释。
       # 注释是匿名可读的（check-runs/annotations），日志不是 —— 手机上排查 CI 全靠它。
