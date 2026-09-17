@@ -61,6 +61,7 @@ import io.github.sunsetrne.sunsetlinux.core.DshRuntime
 import io.github.sunsetrne.sunsetlinux.core.EnvState
 import io.github.sunsetrne.sunsetlinux.core.LinuxCtl
 import io.github.sunsetrne.sunsetlinux.core.Prefs
+import io.github.sunsetrne.sunsetlinux.core.StartControls
 import io.github.sunsetrne.sunsetlinux.core.stripToken
 import io.github.sunsetrne.sunsetlinux.ui.theme.MonoFamily
 import io.github.sunsetrne.sunsetlinux.ui.theme.TextMuted
@@ -142,17 +143,16 @@ fun DshWebPane(
                         tokenUrl = token
                     }
 
-                    st == EnvState.RUNNING -> {
-                        state = WebLoadState.ERROR
-                        errorText = "环境已在运行，但登录地址还没写出来（run/dsh.url 尚未就绪）。稍后点「重新登录」重试。"
-                    }
-
                     else -> {
+                        // 文案走纯函数：仅环境方式下"等一等就好"是错的（DSH 根本没起，等多久都没有）
                         state = WebLoadState.ERROR
-                        errorText = buildString {
-                            append("环境当前不是运行状态（").append(st.label).append("），无法打开 DSH 界面。")
-                            if (!err.isNullOrBlank()) append("\n").append(err)
-                        }
+                        errorText = StartControls.dshPaneNotOpenText(
+                            envRunning = st == EnvState.RUNNING,
+                            dshRunning = status.dshRunning,
+                            isEnvOnly = status.isEnvOnly,
+                            envStateLabel = st.label,
+                            lastError = err,
+                        )
                     }
                 }
             }

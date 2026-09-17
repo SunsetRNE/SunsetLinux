@@ -55,6 +55,7 @@ import io.github.sunsetrne.sunsetlinux.core.EnvMode
 import io.github.sunsetrne.sunsetlinux.core.EnvState
 import io.github.sunsetrne.sunsetlinux.core.Hint
 import io.github.sunsetrne.sunsetlinux.core.HintTarget
+import io.github.sunsetrne.sunsetlinux.core.StartControls
 import io.github.sunsetrne.sunsetlinux.core.StartMode
 import io.github.sunsetrne.sunsetlinux.core.formatBytes
 import io.github.sunsetrne.sunsetlinux.core.isStartModeLocked
@@ -586,11 +587,15 @@ private fun OperationCard(
                 ActionTile(
                     icon = Icons.Filled.Home,
                     label = "打开 DSH",
-                    supporting = when {
-                        ui.canOpenWeb -> ui.status?.displayUrl ?: "WebView"
-                        ui.state == EnvState.RUNNING -> "正在获取登录地址…"
-                        else -> "环境未运行"
-                    },
+                    // 文案走纯函数（StartControls.openDshSupporting）：以前这里在"仅环境 + DSH 没起"
+                    // 时永远显示「正在获取登录地址…」，看上去像卡住（真机截图）。
+                    supporting = StartControls.openDshSupporting(
+                        canOpenWeb = ui.canOpenWeb,
+                        displayUrl = ui.status?.displayUrl,
+                        envRunning = ui.state == EnvState.RUNNING,
+                        dshRunning = ui.status?.dshRunning,
+                        isEnvOnly = ui.status?.isEnvOnly,
+                    ),
                     enabled = ui.canOpenWeb,
                     onClick = onOpenWeb,
                     modifier = Modifier.weight(1f),

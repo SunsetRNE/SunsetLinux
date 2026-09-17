@@ -1,6 +1,7 @@
 package io.github.sunsetrne.sunsetlinux.core
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Assume.assumeTrue
@@ -218,5 +219,43 @@ class DiagnoserTest {
             FailureKind.MISSING,
             Diagnoser.classify("缺少层文件 /data/sunsetlinux/layers/dsh.erofs"),
         )
+    }
+
+    // ── 分步启动：仅环境方式下"DSH 没起"是**按设计**的正常状态，不许报成故障 ──
+    // 2026-09-18 真机截图：副标题「健康检查（Web 未响应）」，用户以为分步启动坏了。
+    @Test
+    fun `仅环境方式且 DSH 没跑时不报 Web 未响应`() {
+        val status = DshStatus.unavailable("测试用状态").copy(
+            state = EnvState.RUNNING,
+            dshHealthy = false,
+            dshRunningReported = false,
+            envMode = EnvRunMode.ENV_ONLY,
+        )
+        val stage = Diagnoser.stage(status, provisioned = true, suAvailable = true, mode = EnvMode.ROOT)
+        assertEquals("环境运行中（仅环境：DSH 未启动）", stage)
+        assertFalse("仅环境方式下 DSH 没跑是设计如此，不能说 Web 未响应：$stage", stage.contains("未响应"))
+    }
+
+    @Test
+    fun `一键启动模式下 DSH 无响应仍然要报出来（别把两种模式混为一谈）`() {
+        val status = DshStatus.unavailable("测试用状态").copy(
+            state = EnvState.RUNNING,
+            dshHealthy = false,
+            dshRunningReported = false,
+            envMode = EnvRunMode.FULL,
+        )
+        assertEquals(
+            "健康检查（Web 未响应）",
+            Diagnoser.stage(status, provisioned = true, suAvailable = true, mode = EnvMode.ROOT),
+        )
+    }
+
+    @Test
+    fun `仅环境方式但 DSH 在跑时按健康度说`() {
+        val ok = DshStatus.unavailable("测试用状态").copy(
+            state = EnvState.RUNNING, dshHealthy = true, dshRunningReported = true,
+            envMode = EnvRunMode.ENV_ONLY,
+        )
+        assertEquals("运行中", Diagnoser.stage(ok, true, true, EnvMode.ROOT))
     }
 }

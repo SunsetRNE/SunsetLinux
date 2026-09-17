@@ -73,7 +73,15 @@ object Diagnoser {
         return when (st.state) {
             EnvState.STOPPED -> "已停止（可启动）"
             EnvState.STARTING -> "启动（正在拉起 Node 与 DSH Web）"
-            EnvState.RUNNING -> if (st.dshHealthy == false) "健康检查（Web 未响应）" else "运行中"
+            // ⚠️ 先判"仅环境"：拆开启动之后"环境 running"不再蕴含"DSH running"。
+            //    真机反馈（2026-09-18 截图）：点完「仅启动环境」，副标题写着
+            //    「健康检查（Web 未响应）」—— 那是把**按设计还没起 DSH** 的正常状态
+            //    报成了故障，用户以为分步启动坏了。这里改成如实说"DSH 未启动"。
+            EnvState.RUNNING -> when {
+                st.isEnvOnly && !st.dshRunning -> "环境运行中（仅环境：DSH 未启动）"
+                st.dshHealthy == false -> "健康检查（Web 未响应）"
+                else -> "运行中"
+            }
             EnvState.STOPPING -> "停止"
             EnvState.ERROR -> failureStage(st.lastError)
             EnvState.UNKNOWN -> if (st.lastError == null) "读取状态" else failureStage(st.lastError)

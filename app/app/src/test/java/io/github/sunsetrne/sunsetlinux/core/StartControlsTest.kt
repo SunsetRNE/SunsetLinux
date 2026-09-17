@@ -154,4 +154,60 @@ class StartControlsTest {
             }
         }
     }
+
+    // ── 「打开 DSH」的两处文案（真机截图：仅环境方式下显示成"卡住"）──────────────
+    // 2026-09-18 用户截图：点完「仅启动环境」，卡片写「正在获取登录地址…」永远不变，
+    // 副标题写「健康检查（Web 未响应）」⇒ 用户以为分步启动坏了。这两句话必须按"为什么
+    // 打不开"说清楚，所以做成纯函数在这里穷举。
+
+    @Test
+    fun `打开 DSH 的副标题在仅环境+DSH 没跑时必须叫人去点启动 DSH`() {
+        val s = StartControls.openDshSupporting(
+            canOpenWeb = false, displayUrl = null,
+            envRunning = true, dshRunning = false, isEnvOnly = true,
+        )
+        assertEquals("DSH 未启动：点「启动 DSH」", s)
+        assertFalse("不能再说「正在获取…」（DSH 没起，永远等不到）：$s", s.contains("正在获取"))
+    }
+
+    @Test
+    fun `打开 DSH 的副标题四种状态各说各话`() {
+        assertEquals(
+            "环境未运行",
+            StartControls.openDshSupporting(false, null, envRunning = false, dshRunning = false, isEnvOnly = null),
+        )
+        // DSH 在跑但 url 还没写出来 —— 这才是真的"正在获取"
+        assertEquals(
+            "正在获取登录地址…",
+            StartControls.openDshSupporting(false, null, envRunning = true, dshRunning = true, isEnvOnly = true),
+        )
+        // 能打开时显示地址
+        assertEquals(
+            "127.0.0.1:3080",
+            StartControls.openDshSupporting(true, "127.0.0.1:3080", true, true, true),
+        )
+        // full 模式但 DSH 不在跑（例如崩了）：照样指向「启动 DSH」
+        assertEquals(
+            "DSH 未在运行：点「启动 DSH」",
+            StartControls.openDshSupporting(false, null, envRunning = true, dshRunning = false, isEnvOnly = false),
+        )
+    }
+
+    @Test
+    fun `DSH 面板打不开时的文案：仅环境方式不能写成「还没写出来」`() {
+        val only = StartControls.dshPaneNotOpenText(
+            envRunning = true, dshRunning = false, isEnvOnly = true,
+            envStateLabel = "运行中", lastError = null,
+        )
+        assertTrue("要说清是「仅启动环境」导致的没有地址：$only", only.contains("仅启动环境"))
+        assertTrue("要告诉用户下一步点哪：$only", only.contains("启动 DSH"))
+        assertFalse("不能说「尚未就绪/稍后重试」那种等一等就好：$only", only.contains("尚未就绪"))
+        // 真的只是"还没写出来"时保留原来的口气
+        val pending = StartControls.dshPaneNotOpenText(true, true, true, "运行中", null)
+        assertTrue("DSH 在跑但没 url 时才是「还没写出来」：$pending", pending.contains("尚未就绪"))
+        // 环境没跑
+        val stopped = StartControls.dshPaneNotOpenText(false, false, false, "已停止", "缺层文件")
+        assertTrue("环境没跑要说状态：$stopped", stopped.contains("已停止"))
+        assertTrue("有 last_error 就带上：$stopped", stopped.contains("缺层文件"))
+    }
 }

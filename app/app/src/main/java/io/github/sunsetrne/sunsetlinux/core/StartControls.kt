@@ -156,5 +156,54 @@ data class StartControls(
                 )
             }
         }
+
+        /**
+         * 「打开 DSH」卡片的副标题（纯函数，便于穷举单测）。
+         *
+         * 真机反馈（2026-09-18 截图）：点完「仅启动环境」，这张卡片就一直写着
+         * **「正在获取登录地址…」** —— 可 DSH 根本没起，那句话**永远等不到结果**，
+         * 用户以为界面卡住了。改成按"为什么打不开"如实说：
+         *   · 环境没跑 → 环境未运行
+         *   · 仅环境方式且 DSH 没跑 → 明确告诉他点「启动 DSH」
+         *   · DSH 在跑但 url 还没写出来 → 那才是真的"正在获取"，等一下就好
+         */
+        fun openDshSupporting(
+            canOpenWeb: Boolean,
+            displayUrl: String?,
+            envRunning: Boolean,
+            dshRunning: Boolean?,
+            isEnvOnly: Boolean?,
+        ): String = when {
+            canOpenWeb -> displayUrl ?: "WebView"
+            !envRunning -> "环境未运行"
+            dshRunning == true -> "正在获取登录地址…"
+            isEnvOnly == true -> "DSH 未启动：点「启动 DSH」"
+            else -> "DSH 未在运行：点「启动 DSH」"
+        }
+
+        /**
+         * DSH 面板里"打不开"时的一句人话（纯函数）。
+         *
+         * 同样来自那张截图：仅环境方式下点「打开 DSH」，面板报的是
+         * 「环境已在运行，但登录地址还没写出来（run/dsh.url 尚未就绪）」——
+         * 那是"等一等就好"的口气，而**这次根本没打算起 DSH**，等多久都不会有。
+         */
+        fun dshPaneNotOpenText(
+            envRunning: Boolean,
+            dshRunning: Boolean?,
+            isEnvOnly: Boolean?,
+            envStateLabel: String,
+            lastError: String?,
+        ): String = when {
+            !envRunning -> buildString {
+                append("环境当前不是运行状态（").append(envStateLabel).append("），无法打开 DSH 界面。")
+                if (!lastError.isNullOrBlank()) append("\n").append(lastError)
+            }
+            dshRunning != true && isEnvOnly == true ->
+                "这次是「仅启动环境」：环境在跑，但 DSH 没启动，所以没有登录地址。\n" +
+                    "回启动页点「启动 DSH」把它接上，再回来打开。"
+            else ->
+                "环境已在运行，但登录地址还没写出来（run/dsh.url 尚未就绪）。稍后点「重新登录」重试。"
+        }
     }
 }
