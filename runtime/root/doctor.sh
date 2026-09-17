@@ -839,7 +839,9 @@ if [ ! -f "$UPPER_IMG" ]; then
     add_finding fail upper_missing "$UPPER_IMG 不存在"
 else
     usize="$(stat -c '%s' "$UPPER_IMG" 2>/dev/null || echo 0)"
-    ok "upper.img 存在（表观 $(( usize / 1024 / 1024 / 1024 )) GiB，稀疏）"
+    # ★ 别用 mksh 的算术算 GiB：它是 **32 位**，`8589934592 / …` 一步就越界 ——
+    #   8 GiB 的 upper.img 会显示成"表观 0 GiB"（真机 2026-09-17 实测就是这样）。awk 用双精度。
+    ok "upper.img 存在（表观 $(awk -v b="$usize" 'BEGIN{printf "%.1f", b/1073741824}') GiB，稀疏）"
 
     if env_running; then
         info "环境在运行：跳过可写层试挂（避免干扰运行中的 overlay；要试先 stop）"

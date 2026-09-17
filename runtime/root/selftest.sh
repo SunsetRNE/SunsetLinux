@@ -522,11 +522,30 @@ esac
 #   · 不许出现 upper_mountable 的 fail；
 #   · 读写探针必须给出 ok（说明探针真的跑了，不是被跳过而"碰巧不报错"）。
 # ---------------------------------------------------------------------------
+head_ "KB→字节换算不许用 32 位算术（footprint 报告目录大小）"
+# 真机同款根因（2026-09-17）：mksh 的 $(( )) 是 32 位有符号，`k * 1024` 一旦超过 2 GiB
+# 就环绕成负数 —— 8 GiB 的 upper.img、上 GB 的 rootfs 目录都会显示成怪值/负数。
+# 这里用桩 du 喂一个"3000000 KB"（= 3,072,000,000 字节 > 2^31），断言换算结果正确。
+FBD="$TMP/fakebin-du"; mkdir -p "$FBD"
+printf '%s\n' '#!/bin/sh' 'echo 3000000' > "$FBD/du"
+chmod +x "$FBD/du"
+mkdir -p "$TMP/fp-dir"
+_fp_src="$(sed -n '/^_fp_size()/,/^}/p' "$SELF_DIR/linuxctl.sh")"
+_fp_bytes="$(PATH="$FBD:$PATH" "$SH_BIN" -c "${_fp_src}
+_fp_size '$TMP/fp-dir'" 2>/dev/null || true)"
+case "$_fp_bytes" in
+    3072000000) ok "3000000 KB → 3072000000 字节（32 位算术会得负数）" ;;
+    *) bad "KB→字节换算错了：得到 '$_fp_bytes'，期望 3072000000" ;;
+esac
+
 head_ "doctor §3 的假警报回归（只读挂不上、读写正常）"
 UL="$TMP/doctor-upper-env"
 mkdir -p "$UL/run" "$UL/etc" "$UL/layers"
-# 假镜像：doctor 只看文件存在与大小，不解析内容（ext4 校验走 e2fsck，CI 上通常没有）
-dd if=/dev/zero of="$UL/upper.img" bs=1024 count=4 2>/dev/null
+# 假镜像：**8 GiB 稀疏**（真机 upper.img 就是这个尺寸）——顺带回归"表观 GiB"那个 32 位溢出：
+# 旧写法 `$(( usize / 1024 / 1024 / 1024 ))` 在 mksh 下把 8 GiB 算成 **0 GiB**（真机实测）。
+if ! truncate -s 8G "$UL/upper.img" 2>/dev/null; then
+    dd if=/dev/zero of="$UL/upper.img" bs=1024 count=4 2>/dev/null
+fi
 UB="$TMP/fakebin-upper"; mkdir -p "$UB"
 # 桩：只对 `-o loop,ro` 报错（真机就是"只读挂不上、读写正常"）
 printf '%s\n' '#!/bin/sh' \
@@ -536,8 +555,14 @@ printf '%s\n' '#!/bin/sh' 'exit 0' > "$UB/umount"
 chmod +x "$UB/mount" "$UB/umount"
 # 接缝：doctor 默认用 /system/bin/mount（设备侧权威），容器里没有 → 用桩；
 # SUNSETLINUX_LOOP_DEV_OK=1 再强制走一遍探针（CI 没有 loop 设备）
-ujson="$(SUNSETLINUX_MOUNT="$UB/mount" SUNSETLINUX_UMOUNT="$UB/umount" SUNSETLINUX_LOOP_DEV_OK=1 \
-         LINUX_HOME="$UL" "$SH_BIN" "$SELF_DIR/doctor.sh" 2>/dev/null | tail -n1 || true)"
+uall="$(SUNSETLINUX_MOUNT="$UB/mount" SUNSETLINUX_UMOUNT="$UB/umount" SUNSETLINUX_LOOP_DEV_OK=1 \
+        LINUX_HOME="$UL" "$SH_BIN" "$SELF_DIR/doctor.sh" 2>/dev/null || true)"
+ujson="$(printf '%s\n' "$uall" | tail -n1)"
+case "$uall" in
+    *"表观 8.0 GiB"*) ok "表观大小用 awk 算（mksh 的 32 位算术会把 8 GiB 算成 0 GiB）" ;;
+    *"表观 0 GiB"*)   bad "表观大小被 32 位算术算成 0 GiB（真机同款；别用 shell 算术除字节数）" ;;
+    *) printf '  [skip] 表观 GiB 断言跳过（这个环境建不出 8 GiB 稀疏文件）\n' ;;
+esac
 case "$ujson" in
     *'"level":"fail","id":"upper_mountable"'*)
         bad "只读探针的失败被当成了 fail（真机第四起假警报）：$(printf '%s' "$ujson" | grep -o '"id":"upper_mountable"[^}]*}' | head -1)" ;;

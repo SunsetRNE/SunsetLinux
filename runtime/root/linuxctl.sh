@@ -918,7 +918,9 @@ shrink_image() {
     [ "$new_mb" -lt 64 ] 2>/dev/null && new_mb=64
 
     local cur_mb
-    cur_mb=$(( $(dsh_size_of "$UPPER_IMG" || echo 0) / 1048576 ))
+    # ★ 同上：字节数可能超过 2^31（8 GiB 的 upper.img 就是），mksh 的 32 位算术会直接环绕，
+    #   于是 cur_mb 变成 0、"已是最小"被误判。用 awk 做这个除法（双精度，安全）。
+    cur_mb="$(awk -v b="$(dsh_size_of "$UPPER_IMG" || echo 0)" 'BEGIN{printf "%d", b/1048576}')"
     if [ "$new_mb" -ge "$cur_mb" ] 2>/dev/null; then
         log "镜像已是最小（$cur_mb MiB），无需收缩"
         return 0
@@ -1481,14 +1483,21 @@ cmd_dsh_builtin() {
     fi
 
     # 空间检查：解压后 ≈ size_raw（拿不到就按 320 MB 估），至少留 300 MB 余量
-    local avail_kb="" need_b=0
+    #
+    # ★★ **只在 KB 这一档做比较，绝不乘成字节**（真机事故，2026-09-17）：
+    #   设备侧跑的是 mksh（/system/bin/sh），它的 `$(( ))` 是 **32 位有符号**整数。
+    #   写成 `[ $(( avail_kb * 1024 )) -lt "$need_b" ]` 时，空闲多的机器会溢出成负数：
+    #       632669468 KB（603 GiB 空闲）× 1024 = 647853535232 → 环绕成 **-686526464**
+    #   → 被判成"空间不足"，而 needed 只有 620 MB。用户装 full 模块时就是这么被挡住的。
+    #   （本机 mksh 也能复现：`mksh -c 'echo $((632669468 * 1024))'` → -686526464。）
+    local avail_kb="" need_kb=0
     avail_kb="$(df -k "$LAYERS_DIR" 2>/dev/null | awk 'NR==2{print $4}' | tr -dc '0-9')"
     case "$size_raw" in ''|*[!0-9]*) size_raw=0 ;; esac
-    if [ "$size_raw" -gt 0 ]; then need_b="$size_raw"; else need_b=$((320 * 1024 * 1024)); fi
-    need_b=$(( need_b + 300 * 1024 * 1024 ))
+    if [ "$size_raw" -gt 0 ]; then need_kb=$(( size_raw / 1024 )); else need_kb=$(( 320 * 1024 )); fi
+    need_kb=$(( need_kb + 300 * 1024 ))
     if [ -n "$avail_kb" ] && [ "$avail_kb" -gt 0 ]; then
-        if [ $(( avail_kb * 1024 )) -lt "$need_b" ]; then
-            emit "{\"ok\":false,\"error\":\"空间不足，无法展开内置 DSH 层\",\"available_kb\":$avail_kb,\"needed_kb\":$(( need_b / 1024 )),\"hint\":\"清理 cache/ 或 snapshots/ 后重试：linuxctl dsh builtin --force\"}"
+        if [ "$avail_kb" -lt "$need_kb" ]; then
+            emit "{\"ok\":false,\"error\":\"空间不足，无法展开内置 DSH 层\",\"available_kb\":$avail_kb,\"needed_kb\":$need_kb,\"hint\":\"清理 cache/ 或 snapshots/ 后重试：linuxctl dsh builtin --force\"}"
             return 1
         fi
     fi
@@ -1691,7 +1700,10 @@ _fp_size() { # _fp_size <路径> → 字节；目录用 du（toybox 兼容 -k）
     [ -e "$p" ] || { printf '0'; return; }
     if [ -d "$p" ]; then
         k="$(du -sk "$p" 2>/dev/null | awk '{print $1}')"
-        printf '%s' $(( ${k:-0} * 1024 ))
+        # ★ 用 awk 做 KB→字节：mksh 的算术是 32 位，`k * 1024` 在超过 2 GiB 的目录上会溢出
+        #   （upper.img 表观 8 GiB、rootfs 上 GB 都是常态）→ 报出来的大小会变成负数/怪值。
+        #   awk 用双精度浮点，这个量级精确无虞。同样的坑 2026-09-17 在空间检查上真机爆过一次。
+        printf '%s' "$(awk -v k="${k:-0}" 'BEGIN{printf "%.0f", k*1024}')"
     else
         dsh_size_of "$p" 2>/dev/null || printf '0'
     fi

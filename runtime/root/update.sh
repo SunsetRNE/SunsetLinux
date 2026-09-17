@@ -482,6 +482,15 @@ cmd_apply() {
     local raw="$DL_DIR/${layer}-${version}.erofs"
 
     # --- 落盘前检查可用空间（裸镜像可能 200 MB 级，压缩包另计）---
+    #
+    # ★★ **只在 KB 这一档比较，绝不乘成字节**（真机事故，2026-09-17）：
+    #   设备侧是 mksh，它的 `$(( ))` 是 **32 位有符号**整数 —— `avail_kb * 1024` 在
+    #   空闲多的机器上会环绕成负数（632669468 KB × 1024 → -686526464），于是"空间充足"
+    #   被判成"可用空间不足"。同一个 bug 先在 `linuxctl dsh builtin` 上被真机逮到
+    #   （装 full 模块时 customize.sh 报空间不足），这里是同一份写法的另一处 ——
+    #   而 `linuxctl dsh install`（一条指令从频道装）走的正是这里，会一样被挡住。
+    # 顺带把对外报的键改成 `*_kb`：原来的 `available_bytes` 语义已经不成立（App 不解析它们，
+    # 源码里没有任何消费方）。
     local need=0 avail_kb
     if [ -n "$want_sha" ] && [ -f "$CHANNELS_JSON" ]; then
         # 尽量取 raw 大小；取不到就用"压缩包的 4 倍"做保守估计
@@ -490,13 +499,12 @@ cmd_apply() {
     avail_kb="$(df -P "$DL_DIR" 2>/dev/null | awk 'NR==2 {print $4}')"
     case "${avail_kb:-}" in ''|*[!0-9]*) avail_kb=0 ;; esac
     if [ "$avail_kb" -gt 0 ]; then
-        local avail_b=$(( avail_kb * 1024 ))
-        local need_b="${UPDATE_NEED_BYTES:-0}"
+        local need_kb=$(( ${UPDATE_NEED_BYTES:-0} / 1024 ))
         # 至少要有 500MB 余量，避免把 /data 写满导致系统异常
-        local floor_b=$(( 500 * 1024 * 1024 ))
-        [ "$need_b" -lt "$floor_b" ] && need_b="$floor_b"
-        if [ "$avail_b" -lt "$need_b" ]; then
-            emit "{\"ok\":false,\"error\":\"可用空间不足\",\"available_bytes\":$avail_b,\"needed_bytes\":$need_b,\"hint\":\"清理 snapshots/ 或 cache/ 后重试\"}"
+        local floor_kb=$(( 500 * 1024 ))
+        [ "$need_kb" -lt "$floor_kb" ] && need_kb="$floor_kb"
+        if [ "$avail_kb" -lt "$need_kb" ]; then
+            emit "{\"ok\":false,\"error\":\"可用空间不足\",\"available_kb\":$avail_kb,\"needed_kb\":$need_kb,\"hint\":\"清理 snapshots/ 或 cache/ 后重试\"}"
             return 1
         fi
     fi

@@ -257,6 +257,56 @@ r = sh([ctl, 'dsh', 'builtin', '--module-dir', brokenMod], {
 if (r.status !== 0 && /sha256/.test(r.stdout)) ok('负例：载荷被改坏 → sha256 不符，拒绝落地');
 else bad(`负例没拦住：rc=${r.status} stdout=${r.stdout}`);
 
+// ── ②a 空间检查不许把 KB 乘成字节（mksh 的算术是 **32 位**）────────────────────
+// 【真机事故，2026-09-17】装 full 模块时 customize.sh 报：
+//     {"ok":false,"error":"空间不足，无法展开内置 DSH 层",
+//      "available_kb":632669468,"needed_kb":634880}
+// 明明有 603 GB 空闲，needed 只有 620 MB。根因：mksh（设备侧 /system/bin/sh 就是它）
+// 的 `$(( ))` 是 **32 位有符号**整数，`avail_kb * 1024` 直接溢出成负数：
+//     632669468 * 1024 = 647853535232 → 32 位环绕 → **-686526464** → 小于 need_b → 报"空间不足"。
+// 同款写法在 `update.sh cmd_apply` 里也有一份（`dsh install` 的必经之路），一起修。
+// 这里用桩 `df` 复现"空闲巨大"的正常机器：脚本必须**装得下去**（而不是算成负数）。
+{
+  const r = makeLayer(root, LAYER_V1);
+  const hugeHome = join(root, 'lh-huge');
+  mkdirSync(join(hugeHome, 'layers'), { recursive: true });
+  const stub = join(root, 'fakebin-df');
+  mkdirSync(stub, { recursive: true });
+  // 桩 df：Available 列给一个"正常大机器"的值（603 GiB 空闲）
+  //   `df -k <dir>` 的输出格式：第 2 行第 4 列是 Available(KB)
+  writeFileSync(join(stub, 'df'), '#!/bin/sh\nprintf "%s\\n" "Filesystem 1K-blocks Used Available Use% Mounted on" "/dev/block/dm-1 900000000 100000 632669468 12% /data"\n');
+  execFileSync('bash', ['-c', `chmod +x ${JSON.stringify(join(stub, 'df'))}`]);
+
+  // 模块目录（带 dsh 载荷）
+  const hugeMod = join(root, 'moddir-huge');
+  mkdirSync(join(hugeMod, 'dsh'), { recursive: true });
+  cpSync(join(modDir, 'dsh'), join(hugeMod, 'dsh'), { recursive: true });
+  cpSync(join(modDir, 'module.prop'), join(hugeMod, 'module.prop'));
+
+  // ★ 用 **mksh** 跑（设备侧就是它）：bash 是 64 位，这个 bug 在 bash 下根本复现不了
+  const mksh = spawnSync('mksh', ['-c', 'echo ok'], { encoding: 'utf8' });
+  const shell = mksh.status === 0 ? 'mksh' : 'bash';
+  for (const [avail, expectOk, tag] of [['huge', true, '空闲 603 GB'], ['tiny', false, '空闲 1 MB']]) {
+    const st2 = join(root, `fakebin-${avail}`);
+    mkdirSync(st2, { recursive: true });
+    const availKb = avail === 'huge' ? '632669468' : '1024';
+    writeFileSync(join(st2, 'df'), `#!/bin/sh\nprintf "%s\\n" "Filesystem 1K-blocks Used Available Use% Mounted on" "/dev/block/dm-1 900000000 100000 ${availKb} 12% /data"\n`);
+    execFileSync('bash', ['-c', `chmod +x ${JSON.stringify(join(st2, 'df'))}`]);
+    const home = join(root, `lh-${avail}`);
+    mkdirSync(join(home, 'layers'), { recursive: true });
+    const out = spawnSync(shell, [ctl, 'dsh', 'builtin', '--module-dir', hugeMod], {
+      encoding: 'utf8', cwd: REPO,
+      env: { ...process.env, PATH: `${st2}:${process.env.PATH}`, LINUX_HOME: home, LINUXCTL_KERNEL_FS_OVERRIDE: 'erofs' },
+    });
+    const line = (out.stdout || '').trim().split('\n').pop() || '';
+    const json = (() => { try { return JSON.parse(line); } catch { return {}; } })();
+    if (expectOk && json.ok === true) ok(`空间检查（${tag}）：装得下去（${shell}）`);
+    else if (!expectOk && json.ok !== true && /空间不足/.test(line)) ok(`空间检查（${tag}）：如实拒绝（${shell}）`);
+    else bad(`空间检查（${tag}）判断错误（shell=${shell}）：${line || out.stderr}`);
+  }
+  if (r) { /* 上面 makeLayer 只是复用夹具，不再打包 */ }
+}
+
 // ── ②b CI 侧那道「APK 内嵌的必须是 bare」闸门：必须先去掉空白再匹配 ──────────
 // 【真事故，0.3.6 首跑】三个 root 变体全红，报"APK 内嵌的模块不是 bare 变体"，
 // 而 module.json 明明是 `"variant": "bare"`。原因：Gradle 写出的 JSON 冒号后**有空格**，

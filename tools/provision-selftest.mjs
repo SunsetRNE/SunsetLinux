@@ -232,6 +232,16 @@ printf 'nodisk|%s\\n' "$(autoprovision_decision 0 1 0 1 '')"
   ok(!/(^|[^\w./-])sh\s+["'$]/.test(code.replace(/\/system\/bin\/sh/g, '')),
     'service.sh 里没有裸 `sh` 发起（busybox ash 解析不了设备侧脚本）');
   ok(/device-provision.sh --seeds/.test(code), '跳过时会把"手动怎么跑"写进日志');
+  // ★ 内置 DSH 的自愈（真机 2026-09-17）：full 模块的内置 DSH 层是在**安装时**由
+  //   customize.sh 展开的，那次失败（当时是空间检查的 32 位算术 bug）之后没有第二次机会，
+  //   用户看到的就是"装了 full 模块、重启照样起不来"。所以 service.sh 必须能在开机时补一次
+  //   —— 条件是两个（有载荷 + 还没有内置记录），且**脱离 boot 进程**（解压约 200 MB）。
+  ok(/dsh\/manifest\.json/.test(code) && /dsh-builtin\.json/.test(code),
+    'service.sh 会在"安装时没展开成功"后于开机补一次内置 DSH');
+  ok(/dsh builtin --module-dir/.test(code), '自愈走的是 linuxctl dsh builtin（唯一实现，不另写解压逻辑）');
+  const dhIdx = code.indexOf('dsh builtin --module-dir');
+  const dhWin = code.slice(Math.max(0, dhIdx - 400), dhIdx);
+  ok(/setsid/.test(dhWin), '内置 DSH 的展开脱离 boot 进程（不阻塞开机）');
 }
 
 // ---------------------------------------------------------------------------

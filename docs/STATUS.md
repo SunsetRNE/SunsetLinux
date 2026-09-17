@@ -503,6 +503,47 @@ su -c '/data/sunsetlinux/bin/linuxctl doctor'
 | 已装状态读不到时 | —— | **不给刷入按钮**，先让用户修 root 授权（与"读不到 ≠ 没装"一致） |
 | 重启 | —— | 只报告"重启后生效"（KernelSU 落 `modules_update/`），**App 不替用户重启**，脚本里有单测断言不许出现 `reboot` |
 
+### 3.10.29 **32 位算术**事故：空闲 603 GB 被判成"空间不足"（模块 1.0.25）
+
+**真机实测（装 full 模块时，customize.sh 的输出）**：
+
+```
+- 本包含内置 DSH（变体 full）：展开到 /data/sunsetlinux/layers/
+! 内置 DSH 没展开成功（原因见下）
+  {"ok":false,"error":"空间不足，无法展开内置 DSH 层",
+   "available_kb":632669468,"needed_kb":634880}
+```
+
+空闲 **603 GiB**、需要 **620 MB**，却报空间不足。
+
+**根因**：设备侧是 `mksh`（`/system/bin/sh`），它的 `$(( ))` 是 **32 位有符号**整数。
+`[ $(( avail_kb * 1024 )) -lt "$need_b" ]` 把 KB 乘成字节时直接环绕：
+
+```
+632669468 * 1024 = 647853535232  →  32 位环绕 →  -686526464  →  小于 need_b  →  "空间不足"
+```
+
+本机 `mksh -c 'echo $((632669468 * 1024))'` 同样给 `-686526464`（**bash 是 64 位，本地用 bash 跑永远测不出来**）。
+
+**修法（全仓库同类一次改干净）**：
+
+| 位置 | 原来的写法 | 现在 |
+|---|---|---|
+| `linuxctl dsh builtin` 空间检查 | `avail_kb * 1024` 与字节比较 | **只在 KB 档比较**（`avail_kb` vs `need_kb`） |
+| `update.sh cmd_apply` 空间检查（`dsh install` 必经） | 同上（**预存的老 bug**，会把"一条指令装层"也挡掉） | 同上；对外改报 `available_kb`/`needed_kb`（无消费方，安全） |
+| `doctor §3` 表观大小 | `usize / 1024 / 1024 / 1024` → 8 GiB 显示成 **0 GiB**（真机输出里就是它） | 用 `awk` 算（双精度） |
+| `shrink_image` 的 `cur_mb` | `字节 / 1048576`（8 GiB 会环绕成 0 → 误判"已是最小"） | 用 `awk` 算 |
+| `footprint` 的 `_fp_size` | `k * 1024`（>2 GiB 的目录会变负数） | 用 `awk` 算 |
+
+**回归**：`runtime/root/selftest.sh` **64 → 66**（新增"KB→字节换算"与"表观 8.0 GiB"，两处都
+在 mksh 下才会红）；`tools/module-variant-selftest.mjs` **31 → 33**（用桩 `df` 复现"空闲 603 GB"，
+**显式用 mksh 跑**并断言装得下去，另含"空闲 1 MB 必须如实拒绝"的反例）；
+`tools/provision-selftest.mjs` **83 → 86**（新断言：service.sh 必须能开机补一次内置 DSH 展开、
+走 `linuxctl dsh builtin`、且脱离 boot 进程）。
+
+**顺带补的自愈**：`module/service.sh` 现在会在"模块里有 DSH 载荷、但 `etc/dsh-builtin.json` 还不存在"
+时，于开机后用 `setsid` 补跑一次 `linuxctl dsh builtin` —— 安装时那次失败不再等于"永久失败"。
+
 ### 3.10.28 doctor §3 假警报：只读挂不上被当成 fail（模块 1.0.24）
 
 **真机实测（用户手机，装完 1.0.23 后跑 doctor）**：§3 同时打出
