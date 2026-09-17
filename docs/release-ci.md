@@ -254,6 +254,12 @@ pipeline.yml（**只有推 main 或手动触发时跑**）           ← 2026-09
   而那句报错里印出来的 module.json 明明写着 `"variant": "bare"`）。
   现在 `tr -d ' \n\t'` 之后再匹配，并且 `tools/module-variant-selftest.mjs` 有一条第②b 断言
   钉住"这道闸门必须先去掉空白"，防止以后有人"顺手简化"回去。
+- ⚠️ **清单校验一律不许走管道**：`unzip -l x | grep -q 模式` 在 `set -o pipefail` 下是
+  **偶发假红** —— `grep -q` 一命中就退出，写端（unzip/echo）可能吃 SIGPIPE(141)，整条管道非 0，
+  于是"正常包"被判成坏包。0.3.6 首跑就是这么红的：`mkmodule.sh` 报"zip 里没有 module.prop"，
+  而包里明明有它，且**同一段代码上一次运行还是绿的**。现在 `mkmodule.sh`、`build-apk.yml`、
+  `ci.yml` 的 ZIP 清单断言全部改成"清单读进变量 + `case` 匹配"（无管道、无子进程、
+  也不受 unzip 退出码影响）；`tools/module-variant-selftest.mjs` 的第①b 断言（3 条）钉住这一点。
 - 接在 `ci.yml` 的 `shell` 节点（`node tools/module-variant-selftest.mjs`）。
 
 ---

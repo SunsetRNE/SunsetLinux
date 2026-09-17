@@ -737,7 +737,7 @@ I/O error 上 —— 因为重启后规则失效；本次改动正是为了消�
 App 单测 **175/0 × 2 个变体**（`LC_ALL=C.utf8 LANG=C.utf8 ./gradlew --no-daemon --offline `
 `:app:testProotFullDebugUnitTest` / `:app:testRootFullDebugUnitTest`；POSIX locale 下中文测试名会让
 kotlinc 报 `InvalidPathException`，那是环境问题、CI 已设 C.UTF-8）；
-`node tools/module-variant-selftest.mjs` **28/0**（真打包、真落地、真跑一个临时 Ed25519 频道，
+`node tools/module-variant-selftest.mjs` **31/0**（真打包、真落地、真跑一个临时 Ed25519 频道，
 含 4 个负例）；`tools/customize-selftest.mjs` 16/0；root selftest 62/0（bash+mksh）；
 provision 83/0；oneshot 29/0；shell-compat / contract / cmp-consistency / webroot 64/0 全绿。
 

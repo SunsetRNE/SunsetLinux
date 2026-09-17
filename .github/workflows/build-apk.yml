@@ -143,12 +143,16 @@ jobs:
           tools/ndk-build-pty.sh --check
           fail=0
           for apk in $(find app/app/build/outputs/apk -name '*.apk'); do
-            if unzip -l "$apk" | grep -q 'lib/arm64-v8a/libsunsetlinux_pty.so'; then
-              echo "✓ $(basename "$apk") 带 libsunsetlinux_pty.so"
-            else
-              echo "::error::$apk 缺少 libsunsetlinux_pty.so —— 终端会退回行缓冲（Ctrl-C/vim 不可用）"
-              fail=1
-            fi
+            # ★ 不用 `unzip -l "$apk" | grep -q`：set -o pipefail 下 grep 命中即退会让 unzip
+            #   吃 SIGPIPE(141) → 正常 APK 被判成缺这个 .so（0.3.6 首跑已在别处踩过同款假红）。
+            apklist="$(unzip -l "$apk" 2>/dev/null || true)"
+            case "$apklist" in
+              *'lib/arm64-v8a/libsunsetlinux_pty.so'*)
+                echo "✓ $(basename "$apk") 带 libsunsetlinux_pty.so" ;;
+              *)
+                echo "::error::$apk 缺少 libsunsetlinux_pty.so —— 终端会退回行缓冲（Ctrl-C/vim 不可用）"
+                fail=1 ;;
+            esac
           done
           exit $fail
 
@@ -162,12 +166,15 @@ jobs:
           set -euo pipefail
           apk="$(find app/app/build/outputs/apk -name '*.apk' | head -1)"
           [ -n "$apk" ] || { echo "::error::${{ inputs.variant }} 没有产出 APK"; exit 1; }
-          list="$(unzip -l "$apk")"
+          list="$(unzip -l "$apk" 2>/dev/null || true)"
+          # ★ 不用 `echo "$list" | grep -q 模式`：set -o pipefail 下 grep 提前退出会让
+          #   echo 吃 SIGPIPE → 正常 APK 被判成缺资源（0.3.6 首跑在 mkmodule 里踩过同款）。
+          list_has() { case "$1" in *"$2"*) return 0 ;; *) return 1 ;; esac; }
           case "${{ inputs.variant }}" in
             root-*)
-              echo "$list" | grep -q 'assets/module/sunsetlinux-module.zip' || {
+              list_has "$list" 'assets/module/sunsetlinux-module.zip' || {
                 echo "::error title=Root 版没内嵌模块包::$apk 缺少 assets/module/sunsetlinux-module.zip —— 检查 prep 的模块 zip 制品是否取到"; exit 1; }
-              echo "$list" | grep -q 'assets/proot-runtime/' && {
+              list_has "$list" 'assets/proot-runtime/' && {
                 echo "::error title=Root 版不该带 proot 脚本::$apk 里有 assets/proot-runtime/（root 模式用不到，白占体积）"; exit 1; }
               # ★ 内嵌的必须是 **bare 变体**（docs/module-variants.md §2.6）：full 自带 DSH 层
               #   （约 48 MB），而 base/full 档 APK 的离线包里已经有 DSH —— 内嵌 full = 塞两遍。
@@ -181,9 +188,9 @@ jobs:
               echo "✓ $(basename "$apk")：模块 $mj"
               ;;
             proot-*)
-              echo "$list" | grep -q 'assets/proot-runtime/linuxctl.sh' || {
+              list_has "$list" 'assets/proot-runtime/linuxctl.sh' || {
                 echo "::error title=免 root 版缺宿主脚本::$apk 缺少 assets/proot-runtime/linuxctl.sh —— 免 root 模式靠它铺 bin/linuxctl"; exit 1; }
-              echo "$list" | grep -q 'assets/module/sunsetlinux-module.zip' && {
+              list_has "$list" 'assets/module/sunsetlinux-module.zip' && {
                 echo "::error title=免 root 版不该带模块包::$apk 里有 assets/module/（与 KernelSU 模块无关）"; exit 1; }
               echo "✓ $(basename "$apk")：proot 宿主脚本已内嵌（proot 运行时/层由离线包或频道提供）"
               ;;

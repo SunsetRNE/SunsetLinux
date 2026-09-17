@@ -397,12 +397,16 @@ jobs:
           tools/ndk-build-pty.sh --check
           fail=0
           for apk in $(find app/app/build/outputs/apk -name '*.apk'); do
-            if unzip -l "$apk" | grep -q 'lib/arm64-v8a/libsunsetlinux_pty.so'; then
-              echo "✓ $(basename "$apk") 带 libsunsetlinux_pty.so"
-            else
-              echo "::error::$apk 缺少 libsunsetlinux_pty.so —— 终端会退回行缓冲（Ctrl-C/vim 不可用）"
-              fail=1
-            fi
+            # ★ 不用 `unzip -l "$apk" | grep -q`：set -o pipefail 下 grep 命中即退会让 unzip
+            #   吃 SIGPIPE(141) → 正常 APK 被判成缺这个 .so（0.3.6 首跑已在别处踩过同款假红）。
+            apklist="$(unzip -l "$apk" 2>/dev/null || true)"
+            case "$apklist" in
+              *'lib/arm64-v8a/libsunsetlinux_pty.so'*)
+                echo "✓ $(basename "$apk") 带 libsunsetlinux_pty.so" ;;
+              *)
+                echo "::error::$apk 缺少 libsunsetlinux_pty.so —— 终端会退回行缓冲（Ctrl-C/vim 不可用）"
+                fail=1 ;;
+            esac
           done
           exit $fail
 
@@ -418,11 +422,17 @@ jobs:
           # 没产出（本机手编/门禁不带包）时脚本自己降级成提示。
           REQ=""
           if compgen -G 'dist/bundles/*.bin' >/dev/null 2>&1; then REQ=--require; fi
+          # ★ 不要写 `unzip -l "$apk" | grep -q 模式`：本步骤是 set -o pipefail，
+          #   `grep -q` 一命中就退出，unzip 可能吃 SIGPIPE(141) → 把一个**正常 APK**
+          #   判成"没内嵌"。0.3.6 首跑已经在 mkmodule 里踩过同款假红。
+          #   改成把清单读进变量、用 case 做字符串匹配（无管道、无子进程）。
+          list_has() { case "$1" in *"$2"*) return 0 ;; *) return 1 ;; esac; }
           for apk in $(find app/app/build/outputs/apk -name '*.apk'); do
             name="$(basename "$apk")"
+            apklist="$(unzip -l "$apk" 2>/dev/null || true)"
             case "$name" in
               *-root-*)
-                if unzip -l "$apk" | grep -q 'assets/module/sunsetlinux-module.zip'; then
+                if list_has "$apklist" 'assets/module/sunsetlinux-module.zip'; then
                   echo "✓ $name 带 assets/module/sunsetlinux-module.zip"
                   # ★ 必须是 **bare 变体**（docs/module-variants.md §2.6）：full 自带 DSH 层
                   #   （约 48 MB），而 base/full 档 APK 的离线包里已经有 DSH 了 ——
@@ -439,7 +449,7 @@ jobs:
                   fail=1
                 fi ;;
               *-proot-*)
-                if unzip -l "$apk" | grep -q 'assets/proot-runtime/linuxctl.sh'; then
+                if list_has "$apklist" 'assets/proot-runtime/linuxctl.sh'; then
                   echo "✓ $name 带 assets/proot-runtime/linuxctl.sh"
                 else
                   echo "::error title=免 root 版缺宿主脚本::$apk 缺少 assets/proot-runtime/linuxctl.sh"

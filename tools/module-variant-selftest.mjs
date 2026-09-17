@@ -150,6 +150,30 @@ r = sh(['module/mkmodule.sh', '--variant', 'bare', '--version', MODULE_VER, '--d
 if (r.status !== 0) ok('负例：bare 给 --dsh-layer → 拒绝打包');
 else bad('bare 带载荷竟然打出来了');
 
+// ── ①b 打包/CI 的 zip 清单校验**不许走管道**（pipefail 假红）────────────────────
+// 【真事故，0.3.6 首跑】`unzip -l "$OUT" | grep -q module.prop` 在 `set -o pipefail` 下
+// 是**偶发假红**：`grep -q` 一命中就退出 → unzip 可能吃 SIGPIPE(141) → 整条管道非 0 →
+// 报"zip 里没有 module.prop"，而包里明明有它。同一段代码前一次运行还是绿的。
+// 本项目在 linuxctl 里早踩过同款（那里已改成 case 匹配）；这次轮到打包脚本与 CI 断言。
+{
+  // 只看**非注释行**：注释里正好写着"不要这么写"（那是给后来人看的），不能算违规
+  const code = (t) => t.split('\n').filter((l) => !/^\s*#/.test(l)).join('\n');
+  const mk = code(readFileSync(join(REPO, 'module/mkmodule.sh'), 'utf8'));
+  if (!/unzip -l[^\n|]*\|\s*grep/.test(mk)) {
+    ok('mkmodule.sh 的 zip 清单校验没有用管道（读进变量 + case）');
+  } else {
+    bad('mkmodule.sh 又出现 `unzip -l … | grep`：pipefail 下会偶发假红（见 0.3.6 首跑）');
+  }
+  for (const f of ['.github/workflows/build-apk.yml', '.github/workflows/ci.yml']) {
+    const t = code(readFileSync(join(REPO, f), 'utf8'));
+    if (/unzip -l[^\n]*\|\s*grep/.test(t) || /echo "\$list"\s*\|\s*grep/.test(t)) {
+      bad(`${f} 里还有 \`… | grep -q\` 形式的 APK 资源断言（pipefail 假红风险）`);
+    } else {
+      ok(`${f} 的 APK 资源断言用 list_has（不走管道）`);
+    }
+  }
+}
+
 // ── ② 落地链路：dsh builtin ─────────────────────────────────────────────────
 console.log('\n② 落地链路（linuxctl dsh builtin）');
 

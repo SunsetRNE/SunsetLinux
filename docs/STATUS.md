@@ -532,7 +532,7 @@ su -c '/data/sunsetlinux/bin/linuxctl doctor'
 ⚠️ 本机跑 gradle 需要 UTF-8 locale（`LC_ALL=C.utf8 LANG=C.utf8`）：POSIX locale 下中文测试方法名
 会让 kotlinc 报 `InvalidPathException` —— 这是环境问题，CI 已经显式设了 C.UTF-8。
 
-**回归**：新增 `tools/module-variant-selftest.mjs`（**28 条**，进 CI 的 shell 节点）——
+**回归**：新增 `tools/module-variant-selftest.mjs`（**31 条**，进 CI 的 shell 节点）——
 真的打包两个变体、真的落地内置 DSH、真的用一个临时 Ed25519 频道跑通"一条指令装层 + 回滚到内置版"，
 并含四个负例（无层打 full / bare 夹带 / 载荷被改坏 / 清单被改过）。既有门禁全绿：
 root selftest 62/0（bash + mksh）、provision 83/0、oneshot 29/0、customize 16/0、

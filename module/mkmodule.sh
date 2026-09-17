@@ -360,21 +360,41 @@ rm -f "$OUT"
 [ -f "$OUT" ] || die "打包失败"
 
 # 校验 zip 内确实有 libproot 之外的必备项
-command -v unzip >/dev/null 2>&1 && {
-    unzip -l "$OUT" | grep -q 'module.prop'      || die "zip 里没有 module.prop"
-    unzip -l "$OUT" | grep -q 'bin/linuxctl.sh'  || die "zip 里没有 bin/linuxctl.sh"
-    unzip -l "$OUT" | grep -q 'bin/layer-spec.sh'|| die "zip 里没有 bin/layer-spec.sh"
+# ★ **不要写 `unzip -l "$OUT" | grep -q 模式`**：本脚本是 `set -o pipefail`，
+#   `grep -q` 一命中就退出，unzip 可能吃 SIGPIPE(141)；反过来 unzip 因为一句无关的
+#   warning 返回非 0 也会把管道判成失败 —— 两种都会把**正常包**说成坏包。
+#   真事故（0.3.6 首跑）：同一个包、同一段代码，一次绿一次红，报"zip 里没有 module.prop"，
+#   而包里明明有它。本项目在 linuxctl 里也踩过同一个坑（见那里的注释）。
+#   改法：把清单读进变量，用 case 做字符串匹配（无管道、无子进程、也不看 unzip 的退出码）。
+if command -v unzip >/dev/null 2>&1; then
+    ZIP_LIST="$(unzip -l "$OUT" 2>/dev/null || true)"
+    _zip_has() { # <成员路径> <人话说明>
+        case "$ZIP_LIST" in
+            *"$1"*) return 0 ;;
+            *)
+                printf '[mkmodule] zip 里没有 %s（%s）\n' "$1" "$2" >&2
+                printf '[mkmodule] 实际清单（前 30 行）：\n' >&2
+                printf '%s\n' "$ZIP_LIST" | sed -n '1,30p' >&2 || true
+                die "打包结果不完整：缺 $1"
+                ;;
+        esac
+    }
+    _zip_has 'module.prop'        '模块标识文件'
+    _zip_has 'bin/linuxctl.sh'    '主入口脚本'
+    _zip_has 'bin/layer-spec.sh'  '层规格事实源'
     # ★ KernelSU 只在模块根找 webroot/index.html：缺了 WebUI 入口就没了
-    unzip -l "$OUT" | grep -q 'webroot/index.html' || die "zip 里没有 webroot/index.html（KernelSU 的 WebUI 入口）"
-    unzip -l "$OUT" | grep -q 'lib/detect-mount.sh' || die "zip 里没有 lib/detect-mount.sh（挂载实现探测）"
+    _zip_has 'webroot/index.html' 'KernelSU 的 WebUI 入口'
+    _zip_has 'lib/detect-mount.sh' '挂载实现探测'
     # ★ 变体自洽：full 必须有载荷、bare 必须没有（"冒充默认版本"在这里就被拦下）
     if [ "$VARIANT" = "full" ]; then
-        unzip -l "$OUT" | grep -q 'dsh/manifest.json' || die "full 变体里没有 dsh/manifest.json（载荷丢了）"
-        unzip -l "$OUT" | grep -q "dsh/$DSH_FILE"     || die "full 变体里没有 dsh/$DSH_FILE（载荷丢了）"
+        _zip_has 'dsh/manifest.json' 'DSH 载荷清单'
+        _zip_has "dsh/$DSH_FILE"     'DSH 载荷本体'
     else
-        unzip -l "$OUT" | grep -q 'dsh/' && die "bare 变体里出现了 dsh/（标 bare 却夹带 DSH）"
+        case "$ZIP_LIST" in
+            *'dsh/'*) die "bare 变体里出现了 dsh/（标 bare 却夹带 DSH）" ;;
+        esac
     fi
-}
+fi
 
 # 「本地构建」标记：与 mkmodule 的警告配套（仅记录，不阻断）
 if [ "${GITHUB_ACTIONS:-}" != "true" ]; then
