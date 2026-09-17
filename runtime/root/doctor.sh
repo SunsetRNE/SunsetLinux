@@ -772,52 +772,103 @@ done
 
 # ===========================================================================
 head_ "3. 可写层 upper.img"
+
+# ---------------------------------------------------------------------------
+# 可写层探针：**与 start.sh 的 mount_upper_rw 同口径**，而且只留**一个**结论。
+#
+# 为什么改（真机 2026-09-17，用户手机的 doctor 实测）：
+#   原来的写法是"先只读试挂、再读写试挂"，两个结果各自成为一条 finding。真机上出现
+#   `-o loop,ro` 失败、`-o loop,rw` 成功 → 报告同时打：
+#       [fail] upper.img 挂不上（可能不是 ext4，或 loop 设备不可用，或已坏）
+#       [ok]   upper.img 可**读写**挂载（ext4, loop, rw）—— 与 start.sh 的第一步一致
+#   自相矛盾，用户完全无从下手（而且 fail 会把整份自检判成"未通过"）。
+#   真正决定"环境能不能起来"的只有**读写**这一条（start.sh 做的也是它），所以：
+#     · 读写探针 = 唯一结论；失败时再补一次显式 losetup（本机 toybox 的 -o loop 不可靠）；
+#     · 只读探针降级为**诊断**：只在读写也失败时才跑，报 info，不产生 finding。
+#   doctor 仍然**只读**：不跑 e2fsck -p、不清残留 loop、不动 state.json；探针自己建过
+#   的 loop 设备自己拔掉（不留垃圾给下一次 start）。
+# ---------------------------------------------------------------------------
+_UP_PROBE_DEV=""   # 探针自己建的 loop（用完必须拔）
+_UP_RW_HOW=""      # 成功时用的方式（写进日志，排障用）
+_UP_RW_ERR=""      # 失败时的内核线索
+
+_doctor_loop_visible() {
+    [ -w /dev ] && return 0
+    [ -e /dev/block/loop-control ] && return 0
+    # 测试接缝：CI 容器里没有 loop 设备，用它强制走一遍探针（与 SUNSETLINUX_KCONFIG_FILE 同理）
+    [ "${SUNSETLINUX_LOOP_DEV_OK:-}" = "1" ] && return 0
+    return 1
+}
+
+_doctor_kernel_hint() {
+    dmesg 2>/dev/null | grep -iE 'loop|ext4|jbd2' | tail -n 2 | tr '\n' ' '
+}
+
+# 读写探针：① toybox -o loop,rw,noatime → ② 显式 losetup + mount
+# 成功 0 / 失败 1；成功时若用了 losetup 会把设备记在 _UP_PROBE_DEV（调用方负责卸载+拔掉）
+_doctor_probe_upper_rw() {
+    local t="$1" dev=""
+    _UP_RW_HOW=""; _UP_RW_ERR=""
+    mkdir -p "$t" 2>/dev/null || { _UP_RW_ERR="无法创建试挂点 $t"; return 1; }
+
+    if "$MOUNT" -t ext4 -o loop,rw,noatime "$UPPER_IMG" "$t" 2>/dev/null; then
+        _UP_RW_HOW="mount -o loop,rw,noatime"
+        return 0
+    fi
+    _UP_RW_ERR="$(_doctor_kernel_hint)"
+
+    # 显式 losetup：本机实测 toybox 的 `-o loop` 偶尔不可靠，而两步走能归因到具体哪一步
+    dev="$(losetup -f --show "$UPPER_IMG" 2>/dev/null || true)"
+    if [ -n "$dev" ]; then
+        if "$MOUNT" -t ext4 -o rw,noatime "$dev" "$t" 2>/dev/null; then
+            _UP_PROBE_DEV="$dev"
+            _UP_RW_HOW="显式 losetup $dev"
+            return 0
+        fi
+        losetup -d "$dev" 2>/dev/null || true
+    fi
+    _UP_RW_ERR="$(_doctor_kernel_hint)"
+    return 1
+}
+
 if [ ! -f "$UPPER_IMG" ]; then
     bad "$UPPER_IMG 不存在（执行 provision）"
     add_finding fail upper_missing "$UPPER_IMG 不存在"
 else
     usize="$(stat -c '%s' "$UPPER_IMG" 2>/dev/null || echo 0)"
     ok "upper.img 存在（表观 $(( usize / 1024 / 1024 / 1024 )) GiB，稀疏）"
-    # 只读试挂：挂到临时目录，立刻卸载（绝不改内容）
-    if [ -w /dev ] || [ -e /dev/block/loop-control ]; then
+
+    if env_running; then
+        info "环境在运行：跳过可写层试挂（避免干扰运行中的 overlay；要试先 stop）"
+    elif ! _doctor_loop_visible; then
+        warn "看不到 loop 设备，跳过可挂性测试"
+    else
         TMPMNT="$(mktemp -d 2>/dev/null || echo /tmp/sunsetlinux-doctor-mnt)"
         mkdir -p "$TMPMNT"
-        if "$MOUNT" -t ext4 -o loop,ro "$UPPER_IMG" "$TMPMNT" 2>/dev/null; then
-            ok "upper.img 可挂载（ext4, loop, ro）"
-            add_finding ok upper_mountable "可挂载"
-            "$UMOUNT" "$TMPMNT" 2>/dev/null || "$UMOUNT" -l "$TMPMNT" 2>/dev/null || warn "试挂点卸载失败：$TMPMNT"
+        if _doctor_probe_upper_rw "$TMPMNT"; then
+            ok "upper.img 可**读写**挂载（ext4, rw；方式：$_UP_RW_HOW）—— 与 start.sh 的第一步一致"
+            add_finding ok upper_mountable_rw "$_UP_RW_HOW"
+            "$UMOUNT" "$TMPMNT" 2>/dev/null || "$UMOUNT" -l "$TMPMNT" 2>/dev/null || true
+            if [ -n "$_UP_PROBE_DEV" ]; then
+                losetup -d "$_UP_PROBE_DEV" 2>/dev/null || true   # 拔掉我们自己建的 loop
+            fi
         else
-            bad "upper.img 挂不上（可能不是 ext4，或 loop 设备不可用，或已坏）"
-            add_finding fail upper_mountable "挂载失败"
+            # 读写挂不上 → 这才是真 fail；再补一次**只读**试挂当诊断（只读能挂说明问题在"写"）
+            bad "upper.img **读写挂不上** → linuxctl start 会卡在「挂载 upper」"
+            add_finding fail upper_mountable_rw "${_UP_RW_ERR:-挂载失败}"
+            if "$MOUNT" -t ext4 -o loop,ro "$UPPER_IMG" "$TMPMNT" 2>/dev/null; then
+                info "只读能挂、读写挂不上 → 问题在「写」这一侧（SELinux 域权限 / 残留 loop / ext4 日志）"
+                "$UMOUNT" "$TMPMNT" 2>/dev/null || "$UMOUNT" -l "$TMPMNT" 2>/dev/null || true
+            else
+                info "只读也挂不上 → 更像镜像本身或 loop 设备的问题（见 §1d 的残留清单）"
+            fi
+            info "内核侧原因只以 'I/O error' 的形式返回，看原文：dmesg | grep -iE 'loop|ext4|jbd2' | tail -20"
+            info "start.sh 还会多做两步（doctor 只读、不替你做）：① 清掉指向本镜像的残留 loop ② e2fsck -p"
+            info "对应命令：linuxctl stop（清残留）→ linuxctl start；实在不行：设置 → 层模式 → dir（全程不碰 loop/upper.img）"
         fi
         rmdir "$TMPMNT" 2>/dev/null || true
-    else
-        warn "看不到 loop 设备，跳过可挂性测试"
     fi
-    # ★ 读写试挂：这才是 start.sh 真正做的那一步（`-o loop,rw,noatime`）。
-    #
-    # 为什么必须单独试一次：真机上出现过**只读能挂、读写挂不上（mount 只报 'I/O error'）**，
-    # 于是 §3 说"可挂载"、§8 说"挂载 upper 失败" —— 报告自相矛盾，用户完全无从下手。
-    # 读写试挂会写一次超级块（挂载计数），所以：环境在跑时**跳过**（不去打扰运行中的 overlay），
-    # 只在停机状态下做，挂完立刻卸载 —— 与 linuxctl start 的第一步等价，不引入新状态。
-    if env_running; then
-        info "环境在运行：跳过读写试挂（避免干扰运行中的 overlay；要试先 stop）"
-    elif [ -w /dev ] || [ -e /dev/block/loop-control ]; then
-        TMPMNT2="$(mktemp -d 2>/dev/null || echo /tmp/sunsetlinux-doctor-mnt-rw)"
-        mkdir -p "$TMPMNT2"
-        if "$MOUNT" -t ext4 -o loop,rw,noatime "$UPPER_IMG" "$TMPMNT2" 2>/dev/null; then
-            ok "upper.img 可**读写**挂载（ext4, loop, rw）—— 与 start.sh 的第一步一致"
-            add_finding ok upper_mountable_rw "可读写挂载"
-            "$UMOUNT" "$TMPMNT2" 2>/dev/null || "$UMOUNT" -l "$TMPMNT2" 2>/dev/null || warn "试挂点卸载失败：$TMPMNT2"
-        else
-            bad "upper.img **只读能挂、读写挂不上** → linuxctl start 必然卡在「挂载 upper」"
-            add_finding fail upper_mountable_rw "rw 挂载失败"
-            info "内核侧的原因（ext4 写超级块 / 日志恢复失败）只会以 'I/O error' 的形式返回，"
-            info "所以要同时看 dmesg：dmesg | grep -iE 'loop|ext4|jbd2' | tail -20"
-            info "两个已知去处：① 清掉残留 loop（下方 §1d 会点名）后重试；② 「设置 → 层模式」切 dir（全程不碰 loop/upper.img）"
-        fi
-        rmdir "$TMPMNT2" 2>/dev/null || true
-    fi
+
     if have e2fsck; then
         _fsck_out="$(e2fsck -fn "$UPPER_IMG" 2>&1)"
         _fsck_rc=$?

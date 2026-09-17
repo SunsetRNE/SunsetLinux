@@ -503,6 +503,29 @@ su -c '/data/sunsetlinux/bin/linuxctl doctor'
 | 已装状态读不到时 | —— | **不给刷入按钮**，先让用户修 root 授权（与"读不到 ≠ 没装"一致） |
 | 重启 | —— | 只报告"重启后生效"（KernelSU 落 `modules_update/`），**App 不替用户重启**，脚本里有单测断言不许出现 `reboot` |
 
+### 3.10.28 doctor §3 假警报：只读挂不上被当成 fail（模块 1.0.24）
+
+**真机实测（用户手机，装完 1.0.23 后跑 doctor）**：§3 同时打出
+
+```
+[fail] upper.img 挂不上（可能不是 ext4，或 loop 设备不可用，或已坏）
+[ok]   upper.img 可**读写**挂载（ext4, loop, rw）—— 与 start.sh 的第一步一致
+```
+
+**根因**：§3 把"只读试挂（`-o loop,ro`）"和"读写试挂（`-o loop,rw`）"做成了**两条并列结论**。
+这台机上只读那条失败、读写那条成功（真正决定环境能不能起来的只有后者 —— `start.sh` 走的就是它），
+于是报告自相矛盾，还把整份自检判成"未通过"（3 项 fail 里这一项是纯噪声）。
+
+**修法**：§3 只留**一个**结论 —— 与 `start.sh` 的 `mount_upper_rw` 同口径的读写探针
+（① `-o loop,rw,noatime` → ② 显式 `losetup` 兜底）；只读探针降级为**诊断信息**
+（只在读写也失败时才跑，报 info，不产生 finding）。doctor 仍然只读：不跑 `e2fsck -p`、
+不清残留 loop，探针自己建的 loop 自己拔掉。新增测试接缝 `SUNSETLINUX_LOOP_DEV_OK=1`
+（CI 容器没有 loop 设备，用它强制走探针）。回归 **62 → 63 条**（bash + mksh 各 63/0）。
+
+> 同一轮真机的另外两项 fail（`dsh 层内没有 /root/.dsh/profiles/**`、`rc=78`）是**同一个真问题**：
+> 层是设备侧自建的那份（`dsh-0.1.5-rc.1.erofs`，缺 web profile）。修法是装官方层的 dsh
+> —— 一条指令 `linuxctl dsh install`（或装自带 DSH 的 `full` 模块）。
+
 ### 3.10.27 模块拆两变体 + 免 root 彻底切割 + 编译只在 CI（模块 1.0.23 / App 0.3.6）
 
 **背景（真机）**：root 侧挂载链**全通**（upper + 三层 erofs + overlay + entry 被拉起），

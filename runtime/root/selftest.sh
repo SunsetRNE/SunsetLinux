@@ -508,6 +508,43 @@ case "$djson2" in
     *'"id":"pnpm","detail":"missing"'*) bad "假阴性未修：runtime 层里明明有 pnpm 却报 missing（$_ldiag）" ;;
     *) bad "pnpm 检查没有给出可判定结论（$_ldiag）" ;;
 esac
+# ---------------------------------------------------------------------------
+# 真机事故回归（2026-09-17，第四起）：doctor 把"只读挂不上"当成 fail，而读写其实是好的
+#
+# 真机 doctor 里同时出现：
+#     [fail] upper.img 挂不上（可能不是 ext4，或 loop 设备不可用，或已坏）
+#     [ok]   upper.img 可**读写**挂载（ext4, loop, rw）—— 与 start.sh 的第一步一致
+# 在用户手机上，`mount -o loop,ro` 失败、`mount -o loop,rw,noatime` 成功 —— 而真正决定
+# "环境能不能起来"的只有后者（start.sh 走的就是它）。旧写法把只读探针也做成一条 finding，
+# 于是报告自相矛盾，还把整份自检判成"未通过"。
+#
+# 这里用一个"只对 -o loop,ro 报错"的假 mount 复现那个环境，断言：
+#   · 不许出现 upper_mountable 的 fail；
+#   · 读写探针必须给出 ok（说明探针真的跑了，不是被跳过而"碰巧不报错"）。
+# ---------------------------------------------------------------------------
+head_ "doctor §3 的假警报回归（只读挂不上、读写正常）"
+UL="$TMP/doctor-upper-env"
+mkdir -p "$UL/run" "$UL/etc" "$UL/layers"
+# 假镜像：doctor 只看文件存在与大小，不解析内容（ext4 校验走 e2fsck，CI 上通常没有）
+dd if=/dev/zero of="$UL/upper.img" bs=1024 count=4 2>/dev/null
+UB="$TMP/fakebin-upper"; mkdir -p "$UB"
+printf '%s\n' '#!/bin/sh' \
+    'case "$*" in *loop,ro*) echo "mount: Invalid argument" >&2; exit 1 ;; esac' \
+    'exit 0' > "$UB/mount"
+printf '%s\n' '#!/bin/sh' 'exit 0' > "$UB/umount"
+chmod +x "$UB/mount" "$UB/umount"
+# SUNSETLINUX_LOOP_DEV_OK=1：CI 容器里没有 loop 设备，用它强制走一遍探针（测试接缝）
+ujson="$(PATH="$UB:$PATH" SUNSETLINUX_LOOP_DEV_OK=1 LINUX_HOME="$UL" "$SH_BIN" "$SELF_DIR/doctor.sh" 2>/dev/null | tail -n1 || true)"
+case "$ujson" in
+    *'"level":"fail","id":"upper_mountable'*)
+        bad "只读探针失败被当成 fail（真机第四起假警报）：$(printf '%s' "$ujson" | grep -o '"id":"upper_mountable[^}]*}' | head -1)" ;;
+    *'"level":"ok","id":"upper_mountable_rw"'*)
+        ok "只读挂不上、读写正常时不再报 fail（§3 只认与 start.sh 同口径的读写探针）" ;;
+    *'"schema":1'*)
+        bad "doctor 没有给出 upper_mountable_rw 结论（探针被跳过了？接缝没生效）" ;;
+    *) bad "doctor 没有输出可解析的 JSON：$(printf '%s' "$ujson" | head -c 120)" ;;
+esac
+
 # 反例：路径真的不在时，必须仍然是 fail（不能为了"不误报"把检查做成永远通过）
 printf '%s\n' '#!/bin/sh' 'echo "<E> erofs: read inode failed @ x"' > "$FB/dump.erofs"
 chmod +x "$FB/dump.erofs"
