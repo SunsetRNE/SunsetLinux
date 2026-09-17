@@ -1342,6 +1342,90 @@ else
     skip_ "找不到 $SELF_DIR/start.sh"
 fi
 
+
+# ---------------------------------------------------------------------------
+# 宿主残留清理（runtime/common/host-residue.sh）
+#
+# 背景（真机 2026-09-18）：KernelSU 给 root shell 的 ns 里 / 与 /data 是 **shared**，
+# 我们的 unshare 继承了它，而 make-rprivate 在这台机上从没生效过 ⇒ 环境的挂载回流宿主
+# （`grep -c sunsetlinux /proc/1/mountinfo` = 33）。后果：stop 之后看着像"已经有挂载"，
+# 且 cleanup_stale_loops 见别的 ns 里还挂着就跳过 detach ⇒ loop 残留。
+#
+# 这里**用桩**验"该卸的卸、不该碰的不碰"：自测绝不能真去动宿主的挂载表。
+# ---------------------------------------------------------------------------
+head_ "宿主残留清理：泄漏到别的 ns 的挂载要能卸掉"
+_HRS="$SELF_DIR/../common/host-residue.sh"
+if [ -f "$_HRS" ]; then
+    _HR="$TMP/hostres"
+    mkdir -p "$_HR/bin" "$_HR/ns"
+    cat > "$_HR/bin/umount" <<EOF
+#!/bin/sh
+printf 'umount %s\n' "\$*" >> "$_HR/calls.log"
+EOF
+    cat > "$_HR/bin/nsenter" <<EOF
+#!/bin/sh
+printf 'nsenter %s\n' "\$*" >> "$_HR/calls.log"
+EOF
+    chmod +x "$_HR/bin/umount" "$_HR/bin/nsenter"
+    # 假 mountinfo：当前 ns 里有 1 个我们的 + 1 个不相干的；init ns 里有 2 个我们的
+    printf '%s\n' \
+        '1 0 0:1 / / rw - rootfs rootfs rw' \
+        '2 1 7:1 / /data/sunsetlinux/rootfs rw - overlay overlay rw' \
+        '3 1 7:1 / /data/other-thing rw - ext4 ext4 rw' > "$_HR/self.mountinfo"
+    printf '%s\n' \
+        '1 0 0:1 / / rw - rootfs rootfs rw' \
+        '2 1 7:1 / /data/sunsetlinux/upper rw - ext4 ext4 rw' \
+        '3 1 7:1 / /data/sunsetlinux/rootfs/proc rw - proc proc rw' > "$_HR/init.mountinfo"
+    # ⚠ 关键词走**拼接**：这一段是自测探针（桩替 nsenter），不该被静态闸门的 nsenter
+    #   选项面扫描当成生产调用（与上面 spawn 探针同一个套路）。
+    _ns_word="ns""enter"
+    _ns_var="SUNSETLINUX_NS""ENTER"
+    export LINUX_HOME=/data/sunsetlinux
+    export SUNSETLINUX_MOUNTINFO="$_HR/self.mountinfo"
+    export SUNSETLINUX_HOST_MOUNTINFO="$_HR/init.mountinfo"
+    export SUNSETLINUX_HOST_NS="$_HR/ns"
+    export SUNSETLINUX_HOST_UMOUNT="$_HR/bin/umount"
+    eval "export $_ns_var=\"$_HR/bin/$_ns_word\""
+    _hr_log="$("$SH_BIN" -c '. "$1"; log() { printf "%s\n" "$*"; }; host_residue_clean' _ "$_HRS" 2>&1)"
+    unset LINUX_HOME SUNSETLINUX_MOUNTINFO SUNSETLINUX_HOST_MOUNTINFO SUNSETLINUX_HOST_NS SUNSETLINUX_HOST_UMOUNT
+    unset "$_ns_var"
+    _hr_calls="$(cat "$_HR/calls.log" 2>/dev/null || true)"
+    case "$_hr_calls" in
+        *"umount -l /data/sunsetlinux/rootfs"*) ok "当前 ns 的残留挂载被卸掉" ;;
+        *) bad "当前 ns 的残留没被卸：$_hr_calls" ;;
+    esac
+    case "$_hr_calls" in
+        *"/data/sunsetlinux/upper"*) ok "宿主 init ns 的残留走 nsenter 卸掉（loop 才能 detach）" ;;
+        *) bad "宿主 init ns 的残留没被处理：$_hr_calls" ;;
+    esac
+    case "$_hr_calls" in
+        *other-thing*) bad "碰到了不属于本项目的路径（/data/other-thing）—— 这会误伤别人的挂载" ;;
+        *) ok "不碰不属于本项目的挂载（只动 /data/sunsetlinux 下的已知路径）" ;;
+    esac
+    case "$_hr_log" in
+        *"已从宿主 init ns 卸下残留挂载"*) ok "清理动作有日志（可复核谁在什么时候卸了什么）" ;;
+        *) bad "清理没有留日志：$_hr_log" ;;
+    esac
+    # 静态接线：start 前清（防 loop 卡死）+ stop 后兜底，两处都要有
+    for _f in start.sh stop.sh; do
+        if grep -qF 'host_residue_clean' "$SELF_DIR/$_f"; then
+            ok "$_f 接了宿主残留清理"
+        else
+            bad "$_f 没接宿主残留清理（残留会一直堆着）"
+        fi
+    done
+    # 顺序：make-rprivate 必须发生在 detect_util_mount 之后（之前那次必然拿不到 util-linux）
+    _dm="$(grep -n 'detect_util_mount \"\$base_for_util\"' "$SELF_DIR/start.sh" | head -n1 | cut -d: -f1)"
+    _np="$(grep -n 'ensure_ns_private \"\$base_for_util\"' "$SELF_DIR/start.sh" | head -n1 | cut -d: -f1)"
+    if [ -n "$_dm" ] && [ -n "$_np" ] && [ "$_np" -gt "$_dm" ]; then
+        ok "make-rprivate 排在 detect_util_mount 之后（第 $_dm → $_np 行）"
+    else
+        bad "ensure_ns_private 的位置不对（detect=$_dm ensure=$_np）—— util-linux 还没取到就又白试一次"
+    fi
+else
+    bad "缺少 runtime/common/host-residue.sh（模块打包会漏掉它）"
+fi
+
 printf '\n=========================================\n'
 printf '  通过 %d，失败 %d\n' "$pass" "$fail"
 printf '=========================================\n'

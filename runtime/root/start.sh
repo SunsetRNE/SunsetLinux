@@ -317,6 +317,71 @@ detect_util_mount() { # detect_util_mount [base_dir]（默认 loop 模式下的 
     fi
 }
 
+# ---------------------------------------------------------------------------
+# 传播属性：把本 mount ns 设为私有（阻止挂载回流宿主）
+#
+# ### 为什么必须"在 base 层挂上之后"才调用
+#
+# `make-rprivate` 这一台机器上只有 **base 层里的 util-linux mount** 做得到（toybox 没有该选项），
+# 而 base 层是**挂载树里**才挂上的。原来唯一的一次尝试在外层、**在挂载树之前** ⇒ 那时
+# `UTIL_MNT_BIN` 必然是空的，兜底那一支一次都没执行过。真机后果（2026-09-18 实测）：
+# `/proc/1/mountinfo` 里积累了 **33 条** sunsetlinux 挂载（宿主 ns 里），用户看到的就是
+# "已经有挂载了" + loop 卸不掉（`cleanup_stale_loops` 见别的 ns 里还挂着就跳过 detach）。
+#
+# 现在：base 层一挂上就调这个函数 —— 之后的 overlay / proc / sys / dev / run / sdcard
+# 都不再回流；在它之前已经建好的那几个（upper + 三层）由 host-residue 负责清理。
+# ---------------------------------------------------------------------------
+ns_is_private() {   # 0 = / 与 /data 都不是 shared（不会再回流）
+    awk '
+        $5 == "/" || $5 == "/data" {
+            for (i = 7; i <= NF && $i != "-"; i++) if ($i ~ /^shared:/) f = 1
+        }
+        END { exit(f ? 1 : 0) }
+    ' /proc/self/mountinfo 2>/dev/null
+}
+
+ns_private_evidence() {   # 打一行**可核对**的现状（shared: = 会回流；master: = 安全）
+    local ev
+    ev="$(awk '
+        $5 == "/" || $5 == "/data" {
+            line = $5 ":"
+            for (i = 7; i <= NF && $i != "-"; i++) {
+                if ($i ~ /^shared:/ || $i ~ /^master:/) line = line " " $i
+            }
+            print line
+        }
+    ' /proc/self/mountinfo 2>/dev/null | tr '\n' ' ')"
+    log "传播属性现状：${ev:-（读不到 mountinfo）}（shared: = 会回流宿主；master: = 安全）"
+}
+
+ensure_ns_private() {   # 默认 base 目录；只在 --make-private 这条线上需要
+    local base="${1:-$LAYERS_MNT/base}" verdict=""
+    [ "${MAKE_PRIVATE:-0}" = "1" ] || return 0
+    if ns_is_private; then
+        log "mount ns 已是私有/从属（/ 与 /data 都不带 shared:），无需 make-rprivate"
+        ns_private_evidence
+        return 0
+    fi
+    # ① toybox：实测没有 --make-rprivate（保留调用只为"万一以后有了"）
+    if "$MOUNT" --make-rprivate / 2>>"$DAEMON_LOG"; then
+        verdict="toybox mount --make-rprivate /"
+    fi
+    # ② base 层的 util-linux —— 这台机上唯一真正有用的那条
+    if [ -z "$verdict" ] && [ -n "$UTIL_MNT_BIN" ] && util_mount_run --make-rprivate / 2>>"$DAEMON_LOG"; then
+        verdict="base 层 util-linux mount --make-rprivate /"
+    fi
+    # ③ 再退一步：只把 /data 设私有（我们的挂载全在 /data 下；/ 设不动时这一步仍能止住回流）
+    if [ -z "$verdict" ] && [ -n "$UTIL_MNT_BIN" ] && util_mount_run --make-rprivate /data 2>>"$DAEMON_LOG"; then
+        verdict="base 层 util-linux mount --make-rprivate /data"
+    fi
+    if [ -n "$verdict" ]; then
+        log "已把 mount ns 设为私有：$verdict"
+    else
+        warn_soft "make-rprivate 仍失败（toybox 无此选项、util-linux 也失败）：本 ns 的挂载会回流宿主；stop 时由 host-residue.sh 清理，实际端口/挂载不受影响"
+    fi
+    ns_private_evidence
+}
+
 # 探测 loop 能不能**读**我们目录里的文件。为什么必须实测（真机实测 2026-09-17，6.1.141-android14）：
 #   loop 的 I/O 不在我们进程里做，而在 kworker（u:r:kernel:s0）里做，SELinux 用 current_sid()
 #   判权限。实测结论：
@@ -1070,6 +1135,9 @@ build_mount_tree() {
     # base 层挂上/解开之后才可能取到 util-linux 的 mount，这里补一次探测，
     # 让后面的 proc/sys/dev 挂载有真正的回退路径可用
     detect_util_mount "$base_for_util"
+    # ★ 传播：**这里**才是 make-rprivate 真正能生效的地方（util-linux 刚从 base 层取到）。
+    #   外层那次尝试注定失败（那时 base 层还没挂），保留它只为"万一 toybox 以后支持"。
+    ensure_ns_private "$base_for_util"
     # 挂载点先建好（overlay 要求目录存在且为空；非空会报 ENOTEMPTY）
     [ -d "$ROOTFS_DIR" ] || mkdir -p "$ROOTFS_DIR" || die "无法创建 $ROOTFS_DIR"
     # overlay 失败时 toybox 只回一句 "Invalid argument"，**原因只在 dmesg**（overlayfs
@@ -1462,14 +1530,14 @@ main() {
         #   会被遮住（比不设私有更糟）。真正能改传播的只有 util-linux 的 mount：
         #   base 层里那份（用 util_mount_run 经动态加载器跑）或外层 unshare。
         if [ "${MAKE_PRIVATE:-0}" = "1" ]; then
+            # 此刻 base 层还没挂 ⇒ util-linux 取不到，只有 toybox 这条能试（实测不支持）。
+            # **真正能生效的那次在挂载树里**（base 层挂上之后调 ensure_ns_private），
+            # 所以这里失败不是问题，别报成"永远失败"——那是上一版误导人的地方。
             if "$MOUNT" --make-rprivate / 2>>"$DAEMON_LOG"; then
-                log "已把 mount ns 根设为 rprivate"
-            elif [ -n "$UTIL_MNT_BIN" ] && util_mount_run --make-rprivate / 2>>"$DAEMON_LOG"; then
-                log "已把 mount ns 根设为 rprivate（base 层的 util-linux）"
+                log "已把 mount ns 根设为 rprivate（toybox）"
+                ns_private_evidence
             else
-                # 不必惊慌也不必撒谎：/ 与 /data 是 slave(master:) 时本就不会回流，
-                # 只有它们是 shared(:) 时才有风险 —— 给出可核对的判据。
-                warn_soft "make-rprivate 未成功（toybox 无此选项）：若 / 或 /data 是 shared: 则本 ns 的挂载会回流宿主（用 grep -E ' / | /data ' /proc/self/mountinfo 看 master:/shared: 字段；是 master: 就安全）"
+                log "提示：toybox 不支持 --make-rprivate；等 base 层挂上后用 util-linux 再试（见挂载树里的 ensure_ns_private）"
             fi
         fi
         printf '%s\n' "$LAYER_MODE" > "$RUN_DIR/layer-mode" 2>/dev/null || true
@@ -1574,6 +1642,14 @@ main() {
     # 要么这条启动已经失败（不该继续挡着）。守护进程自己还会在写完 ready 时再释放一次。
     trap 'start_lock_release_own' EXIT INT TERM HUP
 
+    # ---- 开工前先清掉"上一次泄漏到别的 ns 的挂载" ----------------------------
+    # 不清的话：cleanup_stale_loops 见到 loop 还挂在别的 ns 里就跳过 detach（loop 残留），
+    # 而且残留挂载点会让"到底有没有挂载"这件事看着自相矛盾（用户的疑问就是从这里来的）。
+    # 位置有讲究：必须在"确认没有活着的环境 + 已拿到启动锁"之后，否则会拆掉正在用的环境。
+    if command -v host_residue_clean >/dev/null 2>&1; then
+        host_residue_clean
+    fi
+
     # 前置检查放在起守护进程之前，失败能立刻给 App 可读原因
     local l
     for l in $LAYER_NAMES; do
@@ -1660,6 +1736,11 @@ done
 if [ -n "$_PORT_PROBE" ]; then
     # shellcheck source=/dev/null
     SUNSETLINUX_SOURCED=1 . "$_PORT_PROBE"
+    # 泄漏到别的 ns 的挂载清理（同上）
+    for _hr in "$SELF_DIR/common/host-residue.sh" "$SELF_DIR/../common/host-residue.sh" \
+               "$SELF_DIR/../../runtime/common/host-residue.sh"; do
+        [ -f "$_hr" ] && { SUNSETLINUX_SOURCED=1 . "$_hr"; break; }
+    done
 else
     die "缺 port-probe.sh（应与 start.sh 同目录的 common/ 或 ../common/）：端口占用判定无法进行"
 fi

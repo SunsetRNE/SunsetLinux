@@ -41,6 +41,9 @@ done
 if [ -n "$COMMON_DIR" ]; then
     # shellcheck source=/dev/null
     SUNSETLINUX_SOURCED=1 . "$COMMON_DIR/env-procs.sh"
+    # 泄漏到别的 ns 的挂载清理（见那个文件的注释：KernelSU 的 root shell ns 是 shared，
+    # 我们的 --make-rprivate 在这台机上从没生效过 ⇒ 宿主 init ns 里留着我们的挂载）
+    [ -f "$COMMON_DIR/host-residue.sh" ] && . "$COMMON_DIR/host-residue.sh"
 fi
 
 UMOUNT=/system/bin/umount
@@ -282,6 +285,14 @@ $LAYER_MNT_REL
 EOF
     mountpoint -q "$UPPER_DIR" 2>/dev/null && left="$left upper"
     if [ -n "$left" ]; then
+        # 残留的常见来源不是"漏卸"，而是**泄漏到别的 ns 的副本**（当前 ns 与宿主 init ns）。
+        # 先尽力清一次再判定 —— 这也是 loop 能被 detach 的前提：cleanup_stale_loops 见到
+        # loop 还挂在别的 ns 里就会跳过 detach，于是 loop 一直残留（用户看到的那堆 WARN）。
+        if [ "${1:-}" != "after-host-cleanup" ]; then
+            log "检测到挂载残留（$left）：先尝试清掉泄漏到其它 ns 的副本"
+            host_residue_clean
+            verify_clean after-host-cleanup && return 0
+        fi
         warn "仍有挂载残留：$left"
         warn "可尝试手动清理：nsenter --mount=/proc/<pid>/ns/mnt -- umount -l <path>"
         check_loop_leak

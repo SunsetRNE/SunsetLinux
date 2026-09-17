@@ -1089,3 +1089,49 @@ spawn 闸门收紧（新增两组**真实误报**样本：诊断消息里提到�
 
 （`org.gradle.jvmargs` 里已经有 `-Dfile.encoding=UTF-8`，但 `sun.jnu.encoding` 是 JVM 启动时
 按 locale 定的，`-D` 覆盖不了 —— 所以必须给 `LANG`。下一轮可以把它写进 CI/构建脚本的注释里。）
+
+## 第 45 轮（2026-09-18 04:0x）：用户追问的那三个问题落到地上 —— 泄漏、清理、打包漏文件（模块 1.0.35 / App 0.3.14）
+
+详细归因见 `docs/STATUS.md` §3.10.44。这一轮只留"下一轮必须知道"的。
+
+### 1. 已查实的三件事
+
+| # | 事实 | 影响 |
+|---|---|---|
+| 1 | 我们的挂载**在宿主 init 的挂载表里**（`grep -c sunsetlinux /proc/1/mountinfo` = **33**） | `stop` 之后像"已经有挂载"；`cleanup_stale_loops` 见别的 ns 里还挂着就 `跳过 detach` ⇒ **loop 残留永远清不掉** |
+| 2 | **`make-rprivate` 从来没成功过**：唯一那次尝试在外层（挂载树之前），而能执行它的 util-linux 在挂载树里 `detect_util_mount` 之后才取到 ⇒ 兜底那支从未执行 | 泄漏没有任何东西挡着 |
+| 3 | `module/mkmodule.sh` 的 `BIN_COMMON` 是**硬编码清单**，新增 common 脚本不会被自动收进包 | 这次真踩了：`host-residue.sh` 没进 1.0.35 的首个包（已补 + 加闸门） |
+
+> ⚠️ 一个**还没定论**的点（写在 STATUS 里了，别当结论用）：root shell 那层 ns 里看到 `/`=master:1、
+> `/data`=master:60（像 slave，本不该往上传播），但挂载确实落进了 init 的挂载表。
+> 候选原因是"链上还有一层 shared"或"某次守护进程没成功 unshare"。本轮修复**不依赖**这个判断。
+
+### 2. 本轮改动
+
+- `start.sh`：`ensure_ns_private()`（toybox → base 层 util-linux `--make-rprivate /` → 退一步 `/data`），
+  **在 `detect_util_mount` 之后调用**；`ns_is_private` / `ns_private_evidence` 用 mountinfo 打
+  **可核对**的结论行；开工前先 `host_residue_clean`（清上次泄漏）。
+- 新增 `runtime/common/host-residue.sh`：当前 ns 直接 `umount -l`；init ns 走
+  `nsenter --mount=/proc/1/ns/mnt -- umount -l`；只碰 `/data/sunsetlinux` 下的已知路径。
+- `stop.sh`：正常卸载后仍有残留 → 先 `host_residue_clean` 再判定（`verify_clean` 加参数防重入）。
+- `module/mkmodule.sh`：`BIN_COMMON` 补 `host-residue.sh`。
+- `tools/module-variant-selftest.mjs`：新增"打包清单完整性"闸门（变异测试会红）。
+
+回归：`selftest.sh` **101 → 108/0**（bash + mksh）、`module-variant-selftest.mjs` **36 → 37/0**、
+`shell-compat-check.mjs` 绿、App 单测 271/0 × 2 变体。
+
+### 3. 装 1.0.35 之后，专门验这三条（**都是这一轮的直接验收点**）
+
+1. **泄漏有没有止住**：起环境后 `grep -c sunsetlinux /proc/1/mountinfo` —— 期望 **0**；
+   若仍 >0，看 `run/linux.log` 里那行 `传播属性现状：…（shared: = 会回流宿主；master: = 安全）`
+   与 `已把 mount ns 设为私有：…`，把这两行发我（那是判定下一步的唯一依据）；
+2. **残留能不能清**：`stop` 之后再 `grep -c sunsetlinux /proc/1/mountinfo`（期望 0），
+   并看日志里有没有 `已从宿主 init ns 卸下残留挂载：…`；
+3. **loop 不再残留**：`stop` 之后 `losetup -a | grep sunsetlinux` 应为空（以前会因为"别的 ns 还挂着"而跳过 detach）。
+
+### 4. 下一轮候选（按优先级）
+
+1. 若第 3 条仍不干净：查 `make-rprivate` 到底有没有生效（`ns_private_evidence` 的输出说话），
+   必要时把 util-linux 的 `mount`/`unshare` **提前**取到（例如从 erofs 里抽出来，避开"必须先挂 base 层"的循环）；
+2. `stop` 的清理做成"先清宿主残留、再报结果"（现在已经是这个顺序，但只在"有残留"时进入）；
+3. 把 `BIN_COMMON` 这类清单**全部改成目录派生**（本轮只加了闸门，没有消灭清单本身）。

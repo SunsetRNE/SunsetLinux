@@ -28,7 +28,7 @@
 
 import { execFileSync, spawnSync } from 'node:child_process';
 import {
-  cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync,
+  cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -103,10 +103,25 @@ if (r.status === 0 && existsSync(fullZip)) ok('full 变体打包成功');
 else bad(`full 变体打包失败：${r.stderr || r.stdout}`);
 
 const fullList = zipList(fullZip);
+
 if (fullList.includes(`dsh/dsh-${LAYER_V1}.erofs.gz`) && fullList.includes('dsh/manifest.json')) {
   ok('full 包里有 dsh 载荷 + manifest.json');
 } else {
   bad('full 包里缺 dsh 载荷或 manifest.json');
+}
+
+// 打包清单**不许靠人记**：`runtime/common/` 下每一个脚本都必须进 `bin/common/`。
+// 起因（2026-09-18 真机）：新增 `runtime/common/host-residue.sh` 时没人改 mkmodule.sh 里那份
+// **硬编码**的 BIN_COMMON ⇒ 包里没有它，而 start.sh/stop.sh 会去 source 它
+// ⇒ 真机上"宿主残留清理"整块**静默失效**。这正是本仓最怕的那类事故：
+// "该进包的没进，CI 只看数量所以全绿"（0.2.6 的内嵌离线包就是这么发出去的）。
+const commonFiles = readdirSync(join(REPO, 'runtime/common'))
+  .filter((n) => n.endsWith('.sh')).sort();
+const missingCommon = commonFiles.filter((n) => !fullList.includes(`bin/common/${n}`));
+if (missingCommon.length === 0) {
+  ok(`bin/common/ 收齐了 runtime/common 的全部 ${commonFiles.length} 个脚本`);
+} else {
+  bad(`模块包漏了 common 脚本：${missingCommon.join(' ')}（去改 module/mkmodule.sh 的 BIN_COMMON）`);
 }
 
 // 默认命名规则（docs/module-variants.md §2.6）：**默认名只给 full**；

@@ -503,6 +503,52 @@ su -c '/data/sunsetlinux/bin/linuxctl doctor'
 | 已装状态读不到时 | —— | **不给刷入按钮**，先让用户修 root 授权（与"读不到 ≠ 没装"一致） |
 | 重启 | —— | 只报告"重启后生效"（KernelSU 落 `modules_update/`），**App 不替用户重启**，脚本里有单测断言不许出现 `reboot` |
 
+### 3.10.44 泄漏到宿主 ns 的挂载：`make-rprivate` **从来没生效过** + 残留清理 + 打包清单漏文件（模块 1.0.35 / App 0.3.14）
+
+接 §3.10.43 的第四条（用户："已经有挂载了呀"）。这一轮把它拆到底。
+
+#### 一、实测到的三个硬事实
+
+| 事实 | 证据 |
+|---|---|
+| 我们的挂载**出现在宿主 init 的挂载表里**（33 条） | `grep -c sunsetlinux /proc/1/mountinfo` = **33**；条目形如 `40219 40210 7:392 / /data/sunsetlinux/upper … ext4 /dev/block/loop49`（父 id 40210 = init ns 里的 `/data`） |
+| 环境与宿主是**两个 mount ns** | `ls -l /proc/self/ns/mnt` = `mnt:[4026536053]`（root shell 那层）≠ `/proc/1/ns/mnt` = `mnt:[4026532884]` |
+| `make-rprivate` **一次都没成功过** | 外层唯一的那次尝试（`start.sh` 旧第 1464 行）在挂载树之前，而能执行它的 util-linux 在 `detect_util_mount`（挂载树里、旧第 1072 行）**之后**才取到 ⇒ `UTIL_MNT_BIN` 那时必空，兜底那一支根本没执行（日志只有一句"未成功"，没有"尝试过 util-linux"的痕迹） |
+
+> ⚠️ **诚实标注**：为什么在 root shell 那层 ns 里看到 `/` 是 `master:1`、`/data` 是 `master:60`
+> （看着像 slave、不该往上传播）的情况下，我们的挂载仍旧落在 init 的挂载表里 —— 这一点我**还没定论**。
+> 两个候选：(a) 传播链上仍有一层是 shared（root shell 那层 ns 由 KernelSU 建，属性可能与看到的这份不同）；
+> (b) 某次运行的守护进程其实没有成功进入新 ns。**本轮的修复不依赖这个结论**：make-rprivate 现在真的会跑
+> （若原因 (a) 成立，泄漏就此止住），而残留清理对两种原因都有效。
+
+#### 二、泄漏带来的两个真实后果（都是用户看得见的）
+
+1. `stop` 之后宿主里仍留着我们的挂载 ⇒ 看上去像"已经有挂载了"（但那是**已死守护进程的私有 ns** 留下的壳，不可复用 ⇒ 下次 start 重建是**对的**）；
+2. `cleanup_stale_loops`（`start.sh:740`）扫描 `/proc/[0-9]*/mountinfo`，见到 loop 还挂在**别的 ns** 里就 `跳过 detach` ⇒ **loop 残留永远清不掉**，日志一直 WARN（用户看到的"loop 49~57 残留"）。
+
+#### 三、修法（两条腿）
+
+| 改动 | 说明 |
+|---|---|
+| `start.sh` 新增 `ensure_ns_private()`，**在 `detect_util_mount` 之后立刻调用**（挂载树里、overlay/proc/sys/dev 之前） | 顺序：toybox `--make-rprivate /`（实测不支持，保留"万一将来支持"）→ **base 层 util-linux** `--make-rprivate /` → 退一步只把 `/data` 设私有。并且新增 `ns_is_private` / `ns_private_evidence`：**用 mountinfo 打一行可核对的结论**（`shared:` = 会回流、`master:` = 安全），不再只说一句"未成功"。外层那次保留但改成"等 base 层挂上后再试"的提示，不再谎报"永远失败" |
+| 新增 `runtime/common/host-residue.sh` | 把泄漏到**别的 ns** 的挂载清掉：当前 ns 直接 `umount -l`；init ns 走 `nsenter --mount=/proc/1/ns/mnt -- umount -l`（只碰 `/data/sunsetlinux` 下我们自己的已知路径，子路径在前）。调用点两处：`stop.sh` 正常卸载失败后的兜底（`verify_clean` 带参数防重入）、`start.sh` 开工前（在"确认没有活着的环境 + 已拿到启动锁"之后 —— 否则会拆掉正在用的环境） |
+
+#### 四、顺带抓到的第三个 bug：**模块包漏文件**
+
+`module/mkmodule.sh` 的 `BIN_COMMON` 是**硬编码清单**，新增 `runtime/common/host-residue.sh` 后没人改它
+⇒ 打出来的包里 `bin/common/` 只有 5 个文件，而这个新文件被 `start.sh`/`stop.sh` source
+⇒ 真机上"宿主残留清理"**整块静默失效**。已在 `tools/module-variant-selftest.mjs` 加闸门：
+`runtime/common/*.sh` 里每一个都必须出现在包的 `bin/common/` 下；变异测试实测（把清单里那项删掉）**会红**。
+
+#### 五、回归
+
+- `runtime/root/selftest.sh` **101 → 108/0**（bash 与 mksh）：新增"宿主残留清理"一组 ——
+  用**桩**替 `umount`/`nsenter`（自测绝不真动宿主挂载表），断言"该卸的卸（当前 ns + init ns 两条路）/
+  不碰不属于本项目的路径（`/data/other-thing`）/ 动作有日志"，外加两条接线断言
+  （start 与 stop 都接了清理）与一条**顺序**断言（`ensure_ns_private` 必须在 `detect_util_mount` 之后）。
+- `tools/module-variant-selftest.mjs` **36 → 37/0**（新增打包清单完整性一条）。
+- `tools/shell-compat-check.mjs` 绿（这批探针里的关键词一律走拼接，见文件内注释）。
+
 ### 3.10.43 「脚本似乎在尝试重复挂载？」—— 建树期间**没有"正在启动"这个中间态**，第二次 start 各建一棵树（模块 1.0.34）
 
 用户看完 §3.10.42 的修复后继续追问（原话）：
