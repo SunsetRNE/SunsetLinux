@@ -2,20 +2,25 @@
 
 > 用途：**对话记录可能被删/会被换掉**，所以把"现在到哪了、还剩什么、怎么接着做"落进仓库。
 > 和 `docs/STATUS.md`（项目总账）配合看：STATUS 讲**项目本身**做到什么程度，本文讲**这次协作的落点**。
-> 最后更新：**2026-09-17（第 40 轮）**（本轮：**§3.10.34 真机批注改 UI**（操作卡置顶 · 一键/分步二选一 ·
-> 终端紧凑化/避让胶囊/身份行随状态自动变）、**§3.10.35 源独立成页**（npm 默认修成官方 · 新增 Python 源 ·
-> 设置页 986→514 行拆出「频道管理 / 冻结与省电」）+ **gh-pages 合成一次推送**（Pages 构建 2~3 条 → 1 条）；
-> App **0.3.9** / 模块 **1.0.29**，流水线 `1004e30` 全绿）
+> 最后更新：**2026-09-17（第 41 轮）**（本轮：**§3.10.36** —— 把第 40 轮留下的第 2 条**修完**（`nsenter --wd=`
+> 那条修法本身是错的，已按设备实测重写 + 加"会红"的闸门）、顺手修掉一条**在真机上必然假红**的门禁
+> （`e2fsck -p` 覆盖点）、第 1 条**独立复核 + 让失败可自证**（`diagnose()` 带指纹/字节数/sha256 + 真实发布快照的
+> 行为级回归）；App **0.3.10** / 模块 **1.0.30**）
 >
-> **★ 下一轮第一件事（真机交接，按优先级；都还没修，别当成已完成）**：
+> **★ 下一轮第一件事（真机交接，按优先级）**：
 > 1. **App 报「频道 签名校验失败，已拒绝该频道」**（0.3.9，22:5x 之后；App 0.3.8 时还是"已是最新"）。
->    **发布侧已核实无问题**：线上 `channel.json/.sig/.pub` 与 `channel` 分支逐字节一致，用
->    `tools/channel/verify.mjs --pub … --in … --sig …` 验签通过、层 sha256 复算也过 ⇒ 问题在 **App 侧**。
->    第一嫌疑：本轮把「频道管理」搬到 `ui/ChannelsPane.kt` 时，官方频道的**公钥/签名获取路径**或内嵌公钥被动过。
->    查法：找 App 验签实现取的是内嵌公钥还是线上 `.pub`、有没有缓存；`OfficialChannelContractTest` 是否只搬了断言没搬常量。
-> 2. **`nsenter: Unknown option 'wd=/data/sunsetlinux/rootfs'`**（「源与镜像 → 验证当前生效值」两张图都报）。
->    `linuxctl` 的 `run_in_env` 写的是 `--wd="$ROOTFS_DIR"`（带等号），设备上的 **toybox nsenter 不认**这种写法
->    ⇒ **终端 `attach` 与 `exec` 在这台机上必然失败**。修法：`--wd "$ROOTFS_DIR"`（或 `-w`）+ 一条回归断言。
+>    第 41 轮**已独立复核发布侧**（本机 curl 走的就是这台手机的网络）：线上 `/channel/channel.json` + `.sig`
+>    与 **gh-pages 分支**里的副本**逐字节一致**（sha256 `f28669bb…` / `a550ae0d…`），用 App 内嵌公钥按 App 的
+>    算法（base64 → SPKI → Ed25519）**验签通过**；`.pub` 是 404 但 App 从不取它（内嵌公钥、无缓存）。
+>    代码侧也排除了嫌疑：`Update.kt` 最后一次改动是 **0.2.4**、`Net.kt` 未动。
+>    ⇒ **现在要的是现场**：① 此刻是否仍复现（重开「更新」页点一次检查）② 界面上是**哪个频道名**（官方？自建的？）。
+>    第 41 轮已把拒绝理由改成**自带证据**（公钥指纹 / 清单字节数 + sha256 / 签名解出的字节数），装了 0.3.10 之后
+>    那张截图就能直接定位（指纹与文档那行 `ed25519:06:d0:c4:4d:29:1c:ef:66` 对不上 = 换了钥匙；对得上 = 这次取到的
+>    清单/签名有问题，多半是 CDN 两份文件不同步）。
+> 2. ~~`nsenter: Unknown option 'wd=…'`~~ → **第 41 轮已修**（模块 **1.0.30**）：设备是 toybox nsenter，**根本没有
+>    cwd 选项**（`--wd=` / `--wd ` / `-w` 全是 `Unknown option`，`--help` 全文核过），所以第 40 轮写的修法是错的；
+>    真修法是**四处删掉 `--wd=`**（`chroot` 自己会 chdir 进新根，实测 `pwd` = `/`）。**仍需真机验一次
+>    `linuxctl exec -- pwd` / 终端 `attach`**（选项面已实测通过，缺端到端）。
 > 3. **「root 已授权 + linuxctl 已就位，但模块状态未知（经 su 读取失败）」**（欢迎页/环境检测）：自相矛盾，
 >    要拉一次 su 那步的原始 stderr 再定位（可能只是刚更新 App/模块后授权需重新确认）。
 > 4. **DSH Web 是桌面版落地页**（"探索未至之境 / 选择工作区"）：移动版界面来自**第三方插件 `dsh-web-mobile`**
@@ -24,10 +29,7 @@
 >    没就位（`supervise.sh` 会先检查并在缺失时退 78），要么是离线环境下装不上这些 bundle 而退化成桌面版。
 >    查法：`linuxctl exec -- sh -c 'cat /root/.dsh/profiles/web/package.json; ls /root/.dsh/profiles/web'`。
 >
-> （另：手机上的老问题仍在 —— 残留 dsh **pid 4898** 占着 `127.0.0.1:3080`，装 1.0.29 后**重启一次**即可清掉。）
-> "登录地址还没写出来"）、**§3.10.32 环境与 DSH 拆开启动**（`--no-dsh` · `dsh start|stop` · 互斥判定 ·
-> 终端只要求环境在跑）；App **0.3.8** / 模块 **1.0.29**。**下一轮第一件事：真机装 1.0.29 + App 0.3.8，验
-> 「操作卡置顶 · 一键/分步切换与运行中锁定 · 终端不被胶囊盖住 · 身份行连上才出现」这一串**，见文末）
+> （另：手机上的老问题仍在 —— 残留 dsh **pid 4898** 占着 `127.0.0.1:3080`，装 1.0.30 后**重启一次**即可清掉。）
 
 ---
 
@@ -775,3 +777,61 @@ provision 83/0；oneshot 29/0；shell-compat / contract / cmp-consistency / webr
 2. `linuxctl doctor` 应能看到内置 DSH 版本；`linuxctl dsh install` 从官方频道更新；
    `linuxctl rollback dsh` 回内置；
 3. 免 root：装 `proot-full`，打开 App 应**自动**铺好并落到终端（全流程不出现"模块"两个字）。
+
+---
+
+## 第 41 轮（2026-09-17）：把第 40 轮留下的两条真机遗留推进到可验收状态
+
+**结论先行**：第 40 轮交接里第 2 条的**修法本身是错的**（照它改会原样失败），已按设备实测重写并加闸门；
+第 1 条（频道验签）**发布侧由我独立复核通过**、App 侧嫌疑排除，剩下的必须靠现场信息，因此这轮把
+"拒绝理由"改成**自带证据**，并给此前零覆盖的验签代码补上**真实发布快照**的行为级回归。
+
+### 一、`nsenter --wd=`：不是"换个写法"，是这台设备的 nsenter 没有 cwd 选项
+
+用容器里**同一套 Android 二进制**（`/system/bin/nsenter` → Toybox 0.8.12-android）逐条实测：
+
+| 写法 | 实测结果 |
+|---|---|
+| `--wd=/data/…` | `nsenter: Unknown option 'wd=/data/…'` ← 真机原话 |
+| `--wd /data/…` | `nsenter: Unknown option 'wd'` |
+| `-w /data/…` | `nsenter: Unknown option 'w'` |
+| `--mount=/proc/1/ns/mnt` | ✅ 认（`-m=/path` 也认） |
+| `--mount /proc/1/ns/mnt` | `need -t or =filename`（**空格分隔不认**） |
+| `chroot <rootfs> /usr/bin/env -i /bin/pwd`（从 `/tmp` 起） | 打印 `/` ⇒ **chroot 自己会 chdir 进新根** |
+
+⇒ 修法：`linuxctl.sh` 四处 `--wd="$ROOTFS_DIR"` **全部删掉**（cwd 由 chroot 保证，本来就是加 `--wd` 的目的），
+原地留实测结论。**闸门两层**：① `tools/shell-compat-check.mjs` 新增「nsenter 选项面」逐选项比对
+（跨续行合并；有 `-t PID` 才允许裸 `-m/-u`），并带 `nsenterSelfCheck()` 自检 —— 因为第一版扫描器
+在真实代码上**一直空转**（`"$NSENTER"` 的收尾引号把 token 解析卡死），变异测试全绿，是自检把它揪出来的；
+② `runtime/root/selftest.sh` 加一条**行为级**对照（拿设备真实二进制验我们用的写法，判据只看选项解析）。
+
+### 二、顺手：一条**在真机上必然假红**的门禁（`e2fsck -p`）
+
+`工具/selftest.sh` 的"可写层自愈顺序"在设备上永远红：`/system/bin/e2fsck` 真实存在且排在最前，
+自测放的桩轮不到，真 e2fsck 去跑 0 字节 `upper.img`（rc=8）。基线复核：**HEAD = 81 通过 / 1 失败**。
+修法：`e2fsck_preen` 候选表首位加覆盖点 `$SUNSETLINUX_E2FSCK`（留空行为不变）。修后 **83/0（bash + mksh）**。
+
+### 三、频道「签名校验失败」：复核 + 可自证（仍未定位到具体频道，需现场）
+
+- 线上 `/channel/channel.json` + `.sig` 与 **gh-pages 分支**副本逐字节一致（`f28669bb…` / `a550ae0d…`），
+  用 App 内嵌公钥 + App 的算法（base64 → SPKI → Ed25519）**验签通过**（本机 curl 走的就是这台手机的网络）；
+- `Update.kt` 最后一次改动 **0.2.4**、`Net.kt` 未动 ⇒「搬 UI 动坏了公钥/签名路径」**排除**；
+- 新增 `SignatureVerifier.diagnose()`（指纹 / 清单字节数 + sha256 / 签名字节数进拒绝理由）+
+  `ChannelSignatureTest`（真实发布快照 `testdata/channel/` 行为级回归，此前零覆盖）。
+  **测试当场抓到我自己写错的指纹定义**：文档/发布工具（`tools/channel/common.mjs:285`）用的是
+  `sha256(公钥)` 前 8 字节，我第一版写成"公钥前 8 字节"（会算成 `ed25519:61:7a:00:73:…`）——
+  这种"看起来像证据、其实指错方向"的输出比不给证据更糟。
+
+### 本轮数字
+
+模块 **1.0.30**（versionCode 10030）/ App **0.3.10**（versionCode 26）。门禁：root selftest **83/0 × bash+mksh**、
+proot selftest-funcs **81/0 × bash+mksh**、webroot 64/0、module-variant 36/0、provision 87/0、oneshot 29/0、
+customize 24/0、detect-mount 6/0、cmp-consistency 16/16、contract-check（root+proot）✅、shell-compat ✅、
+App 单测（`ChannelSignatureTest` 6 条新增，`testRootFullDebugUnitTest` 全绿）。
+
+### 下一轮第一件事（真机）
+
+1. 装 **模块 1.0.30** + **App 0.3.10**（重启一次），验 `linuxctl exec -- pwd`（应为 `/`）与终端 `attach`；
+2. 关于频道：重开「更新」页点检查，把**那张截图**（含频道名与新加的指纹）发回来 ——
+   指纹对不上文档那行 = 换了钥匙；对得上 = 这次取到的清单/签名有问题（多半 CDN 两份不同步）；
+3. 第 3、4 条（模块状态未知 / DSH Web 桌面版）照旧，需要 `linuxctl exec` 通了之后才好查。

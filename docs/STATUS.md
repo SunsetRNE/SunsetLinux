@@ -503,6 +503,55 @@ su -c '/data/sunsetlinux/bin/linuxctl doctor'
 | 已装状态读不到时 | —— | **不给刷入按钮**，先让用户修 root 授权（与"读不到 ≠ 没装"一致） |
 | 重启 | —— | 只报告"重启后生效"（KernelSU 落 `modules_update/`），**App 不替用户重启**，脚本里有单测断言不许出现 `reboot` |
 
+### 3.10.36 把上一轮留下的两条真机遗留做完：`nsenter --wd=`（终端进不去环境）+ 频道验签拒绝理由带证据（模块 1.0.30 / App 0.3.10）
+
+**一、`nsenter: Unknown option 'wd=/data/sunsetlinux/rootfs'` —— handoff 里给的修法是错的，实测重写**
+
+第 40 轮交接写的修法是「`--wd "$ROOTFS_DIR"`（或 `-w`）」，真机上**同样不成立**：
+
+| 写法 | 设备实测（`/system/bin/nsenter` → **Toybox 0.8.12-android**） |
+|---|---|
+| `--wd=/path` | `nsenter: Unknown option 'wd=/path'`（真机原话） |
+| `--wd /path` | `nsenter: Unknown option 'wd'` |
+| `-w /path` | `nsenter: Unknown option 'w'` |
+| `--help` 的选项表 | 只有 `-a -F -t -C -i -m -n -p -u -U` —— **没有 cwd 选项** |
+
+也就是说设备这个 nsenter **根本不支持指定工作目录**，而 cwd 本来也不需要它：
+`chroot NEWROOT` 自己会 chdir 进新根（实测：从 `/tmp` 起 `chroot <rootfs> /usr/bin/env -i /bin/pwd` 打印 `/`），
+而"chroot 后 cwd 必须在环境内"正是当初加 `--wd` 的唯一目的。所以修法是**四处统统删掉 `--wd=`**（`linuxctl.sh`），
+并在原地留下这段实测结论。另一条被测出来的约束：ns 参数必须写成**等号**形式（`--mount=/proc/<pid>/ns/mnt`），
+空格分隔会被判 `need -t or =filename`。
+
+**闸门（这次做成了"会红"的）**：`tools/shell-compat-check.mjs` 新增**nsenter 选项面检查** —— 按设备 `--help`
+的选项表逐条比对脚本里真正传给 nsenter 的选项（跨 `\` 续行合并成逻辑行；给了 `-t PID` 时才允许裸 `-m/-u`）。
+写它时踩到一个必须记住的坑：**第一版扫描器在真实代码上一直空转**（`"$NSENTER"` 的收尾引号把 token 解析卡死），
+变异测试全绿 —— 于是给它加了 `nsenterSelfCheck()` 自检（10 组"必须抓到 / 不得误报"的固定样本，含真机原样、
+续行拆开、`stop.sh` 里 `umount -l` 不得误报），闸门自己失效就直接判红。
+`runtime/root/selftest.sh` 另加一条**行为级**对照：拿设备上真实的 nsenter 验一遍我们实际用的写法
+（判据只看选项解析，`No such file` / `Operation not permitted` 都算通过，非 root 也不假红）。
+
+**二、顺手修掉一条"在设备上必然假红"的门禁**（`e2fsck -p`）
+
+`runtime/root/selftest.sh` 的"可写层自愈顺序"断言在真机上**永远红**：`/system/bin/e2fsck` 真实存在，
+而 `e2fsck_preen` 的绝对路径候选排在 PATH 前面 ⇒ 自测放的桩一次都轮不到，真 e2fsck 去跑那个 0 字节的
+`upper.img`（rc=8）⇒ 断言失败（基线复核：HEAD = `81 通过 / 1 失败`）。修法：候选表第一位加**覆盖点**
+`$SUNSETLINUX_E2FSCK`（与 `SUNSETLINUX_EROFS_EXTRACT` 同类，留空行为不变），自测用它指向桩。
+修后 `83 通过 / 0 失败`（bash + mksh）。
+
+**三、频道「签名校验失败」：先把"发布侧没问题"独立复核，再让 App 的失败能自证**
+
+- 复核（本机 curl 走的**就是这台手机的网络**）：线上 `/channel/channel.json` + `.sig` 与 **gh-pages 分支**里的副本
+  逐字节一致（sha256 `f28669bb…` / `a550ae0d…`），用 App 内嵌公钥按 App 的算法（base64 → SPKI → Ed25519）验签 **通过**；
+  `channel.json.pub` 是 404，但 App 从不取它（内嵌公钥、无缓存）。
+- 代码侧：`Update.kt` 最后一次改动是 **0.2.4**，`Net.kt` 未动 —— "0.3.9 搬 UI 时把公钥/签名获取路径动过"这一嫌疑**排除**。
+- 所以这轮做的是**让失败可自证**：`SignatureVerifier.diagnose()` 把公钥指纹（写法与 HANDOFF 公开的那行逐字相同）、
+  清单字节数 + sha256、签名解出的字节数写进拒绝理由；异常也不再被吞成"验签失败"（`availability()` 只查了
+  `KeyFactory`，而 `verify()` 还要 `Signature.getInstance("Ed25519")`）。新增 `ChannelSignatureTest`
+  用**真实发布快照**（`testdata/channel/`）做行为级回归 —— `SignatureVerifier` 此前零覆盖。
+
+> 真机仍未验证：① 装 1.0.30 后 `linuxctl exec/attach` 是否真能进环境（选项面已实测通过，缺端到端）；
+> ② 频道失败**发生在哪个频道、什么现象**（需要用户侧现场：现在是否仍复现、界面上是哪个频道名）。
+
 ### 3.10.35 源独立成页（npm 默认修成官方 + Python 源）+ 设置页拆分 + gh-pages 合成一次提交（App 0.3.9）
 
 真机批注三条：「把这个 NPM 源默认成官方的」/「顺便多一个 Python 源」/「源独立页，然后设置内但是侧边栏有相应标签的内容

@@ -119,16 +119,23 @@ object UpdateChecker {
             val body = Http.getBytes(channel.url)
             if (channel.pubkey.isNotBlank()) {
                 val sigText = Http.getText(sigUrl(channel.url), 64 * 1024)
-                val ok = try {
-                    SignatureVerifier.verify(channel.pubkey, body, sigText)
+                // 失败理由必须带**可核对证据**（原先只有一句"签名校验失败"，用户贴过来没法定位）。
+                // 另一个坑：availability() 只探测 KeyFactory("Ed25519")，而 verify() 还要
+                // Signature.getInstance("Ed25519") —— 平台只缺后者时会抛异常，被这里 catch 成
+                // "验签失败"，用户看到的是**指错方向**的结论。所以异常也写成理由。
+                val problem = try {
+                    if (SignatureVerifier.verify(channel.pubkey, body, sigText)) null
+                    else SignatureVerifier.diagnose(channel.pubkey, body, sigText)
                 } catch (t: Throwable) {
-                    false
+                    "验签过程抛异常：${t.javaClass.simpleName}${t.message?.let { "：$it" } ?: ""}" +
+                        "（若为 NoSuchAlgorithmException，说明本机缺 Ed25519 Signature 实现，" +
+                        "与「清单不对」是两回事）"
                 }
-                if (!ok) {
+                if (problem != null) {
                     return ChannelReport(
                         channel,
                         ReportState.REJECTED,
-                        "签名校验失败，已拒绝该频道（不静默降级）",
+                        "签名校验失败，已拒绝该频道（不静默降级）｜$problem",
                     )
                 }
             }

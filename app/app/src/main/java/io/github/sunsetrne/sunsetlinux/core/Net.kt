@@ -154,9 +154,51 @@ object SignatureVerifier {
         return verifier.verify(rawSig)
     }
 
+    /**
+     * 验签**失败时**给出的一行"可核对证据"（进拒绝理由，显示给用户）。
+     *
+     * 为什么必须有：原先界面只有一句「签名校验失败」，用户把它贴过来谁也判断不了是
+     * ① 清单与签名不配套（内容被改/缓存不同步）、② 签名文件根本不是签名（取到的是
+     * 404 页面或被代理改写）、还是 ③ 公钥不是内嵌的那把。三种原因的处置完全不同。
+     *
+     * 指纹写法与 `docs/HANDOFF.md` 公开的那行**完全一致**（`ed25519:` + 公钥前 8 字节
+     * 十六进制），所以用户可以直接拿它跟文档对照 —— 对不上就是"频道换了钥匙"，
+     * 对得上就是"这次取到的清单/签名有问题"。
+     */
+    fun diagnose(pubkeyEncoded: String, data: ByteArray, signatureEncoded: String): String {
+        val rawPub = decodeKeyLike(pubkeyEncoded)
+        val rawSig = decodeKeyLike(signatureEncoded)
+        val pubNote = when {
+            rawPub == null -> "公钥解不出来（${pubkeyEncoded.trim().length} 字符，应为 32 字节的 base64/hex）"
+            rawPub.size != 32 -> "公钥解出来是 ${rawPub.size} 字节（ed25519 应为 32）"
+            else -> "公钥指纹 ${fingerprint(rawPub)}"
+        }
+        val sigNote = when {
+            rawSig == null ->
+                "签名文件解不出来（${signatureEncoded.trim().length} 字符：取到的可能不是 .sig，而是错误页面/被代理改写）"
+            rawSig.size != 64 -> "签名解出来是 ${rawSig.size} 字节（ed25519 应为 64）"
+            else -> "签名 64 字节正常"
+        }
+        return "清单 ${data.size} B sha256=${Digest.sha256Hex(data).take(16)}…；$pubNote；$sigNote；" +
+            "签名与该公钥 + 该清单不匹配"
+    }
+
+    /**
+     * 公钥指纹，写法与**发布工具**（`tools/channel/common.mjs` 的 `publicKeyFingerprint`）
+     * 以及文档里公开的那行**完全一致**：`ed25519:` + `sha256(公钥 32 字节)` 的**前 8 字节**十六进制。
+     * 例：`ed25519:06:d0:c4:4d:29:1c:ef:66`（内置官方频道那把）。
+     *
+     * ⚠️ 它**不是**"公钥的前 8 字节"。第一版就是这么写的，写完立刻被自己的单测抓住：
+     * 那样算出来是 `ed25519:61:7a:00:73:…`，跟文档/发布工具对不上 —— 用户拿这个"证据"去核对
+     * 只会更迷惑（比不给证据更糟）。
+     */
+    fun fingerprint(rawPub: ByteArray): String {
+        val digest = java.security.MessageDigest.getInstance("SHA-256").digest(rawPub)
+        return "ed25519:" + digest.take(8).joinToString(":") { "%02x".format(it) }
+    }
+
     /** 兼容 base64（标准/URL 变体）与 hex 两种公钥/签名写法。 */
-    private fun decodeKeyLike(text: String): ByteArray? {
-        val t = text.trim()
+    private fun decodeKeyLike(text: String): ByteArray? {        val t = text.trim()
         if (t.isEmpty()) return null
         if (t.length >= 64 && t.all { it.isDigit() || it.lowercaseChar() in 'a'..'f' } && t.length % 2 == 0) {
             return runCatching { hexToBytes(t) }.getOrNull()
