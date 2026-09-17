@@ -178,6 +178,7 @@
   <section class="page active" id="page-dash">
     <div class="card">
       <h2>运行状态</h2>
+      <div class="hint" id="bootHint">正在读取状态…（首次进入要跑一次 <code>linuxctl status</code>，约 1~3 秒）</div>
       <div class="row"><span class="k">状态</span><span class="v" id="stState">—</span></div>
       <div class="row"><span class="k">模式</span><span class="v" id="stMode">—</span></div>
       <div class="row"><span class="k">运行时长</span><span class="v" id="stUptime">—</span></div>
@@ -209,11 +210,16 @@
       <div class="switch">
         <div>
           <div>随系统启动</div>
-          <div class="hint" style="margin:0">写入 <code>etc/config.json</code> 的 <code>autostart</code>，与 App 设置页**共用同一份配置**。</div>
+          <div class="hint" style="margin:0">写 <code>etc/config.json</code> 的 <code>autostart</code>：
+            由 KernelSU 模块在 <code>late_start</code> 调 <code>linuxctl start</code>。</div>
         </div>
         <label class="sw"><input type="checkbox" id="swAutostart"><span></span></label>
       </div>
       <div class="hint" id="autostartHint"></div>
+      <div class="hint" style="margin-top:6px">
+        <svg class="ico inline" aria-hidden="true"><use href="#i-warn"/></svg>
+        这与 App 设置页的「开机自启<b>状态服务</b>」<b>不是同一个开关</b>：那个只管 App 自己的前台服务，改了它不影响模块会不会自启。
+      </div>
     </div>
 
     <div class="card" id="undeployedCard" style="display:none">
@@ -658,6 +664,60 @@ PURE.resultOk = function (obj) {
   return true;
 };
 
+/* 首屏取数的**顺序**（纯函数，便于回归）。
+ *
+ * ★ 真机反馈：打开 WebUI 先**白屏 2~3 秒**（其他模块不会）。
+ *   这个页面是 66 KB 单文件、零外链，白屏只可能来自"第一次绘制被挡住"：
+ *   旧代码在 DOMContentLoaded 里**同时**发 4 条命令（status / cat config.json /
+ *   update-module-info / 回滚列表），而 manager 的 `ksu.exec` 桥接是**串行**的
+ *   —— 首帧要等这一串跑完，而光是 `linuxctl status` 就要 1~3 秒。
+ *   现在：先让静态外壳画出来（双 rAF），再**一条一条**发；任一条慢都不顶首屏。
+ *   顺序按"用户最先看哪块"排：状态 → 模块 → 开机自启 → 回滚列表。
+ */
+PURE.bootPlan = function () {
+  return ["status", "moduleInfo", "autostart", "rollback"];
+};
+
+/* 开机自启的**语义**（纯函数，便于回归；真机反馈过一个坑，见下）。
+ *
+ * 判据必须与设备侧**逐字一致**：service.sh 先默认 AUTOSTART=1，只有
+ * `grep -q '"autostart"[[:space:]]*:[[:space:]]*false'` 命中才改成 0 ——
+ * 也就是说 **config.json 里没有这个键 = 开机自启（开）**，不是"关"。
+ *
+ * ★ 真机踩过的坑（2026-09-17 用户反馈"模块页没有自启设置，关了还是自启"）：
+ *   旧实现遇到"文件在、但没有 autostart 键"就把开关**置灰并显示关**，
+ *   而真实行为是**开** —— 用户看到的和实际发生的相反，还以为没有这个设置。
+ *   现在：没有键 → 显示"开（默认）"且开关**可用**（切一下就把键写进去）。
+ *
+ * 注意（同一个坑的另一半）：**App 设置页的「开机自启状态服务」不是这个开关**
+ *   （它写 App 自己的 SharedPreferences、只管 App 的前台服务）。旧提示写
+ *   "与 App 设置页共用同一份 config.json"是错的，会让用户以为关一个等于关两个。
+ */
+PURE.autostartView = function (txt, catOk) {
+  var s = String(txt == null ? "" : txt);
+  var m = s.match(/"autostart"\s*:\s*(true|false)/);
+  if (m) {
+    return {
+      kind: "set", on: m[1] === "true", disabled: false,
+      label: "当前值：" + m[1] + "（设备侧读的就是这一行）",
+      note: "只管 KernelSU 模块在 late_start 调 linuxctl start；App 设置页的"
+          + "「开机自启状态服务」是 App 自己的前台服务，两者互不影响。",
+    };
+  }
+  if (!catOk) {
+    return {
+      kind: "no-file", on: false, disabled: true,
+      label: "读不到 config.json。",
+      note: "还没部署环境时模块也没有可自启的东西；部署后再设。",
+    };
+  }
+  return {
+    kind: "no-key", on: true, disabled: false,
+    label: "config.json 里没有 autostart 键 —— 模块默认**开机自启**（不是「关」）。",
+    note: "切换开关会把这个键写进去；App 设置页的「开机自启状态服务」是另一个开关。",
+  };
+};
+
 /* 在 node 里可 require 这段做单测：导出到 globalThis */
 if (typeof globalThis !== "undefined") globalThis.SUNSETLINUX_PURE = PURE;
 if (typeof module !== "undefined" && module.exports) module.exports = PURE;
@@ -715,7 +775,32 @@ function fakeStatus() {
 
 var LAST = { status: null, statusView: null, updRes: null, doctor: "" };
 
-async function refreshStatus(silent) {
+/* =========================================================================
+ * 桥接闸门：ksu.exec 是**串行**的 —— 长操作期间绝不能让定时器排队
+ * =========================================================================
+ * ★ 真机现象（2026-09-17 用户反馈）：在「操作」页点一次「停止」，之后切换页面
+ *   **越来越卡**，最后只能强制重启手机。
+ *   原因：`stop.sh` 要等 supervisor 最多 15s 再 KILL、然后逐项卸载（实测 20~30s）；
+ *   而页面同时挂着「状态每 5s」「日志每 3s」两个定时器，它们**不等上一次返回**
+ *   就发下一次请求 —— 在串行的桥接上排队，队列越排越长，整个 WebUI 就像卡死。
+ *   判据：① 同一时刻只允许**一个**轮询在飞（在飞就丢掉这一拍，绝不排队）；
+ *        ② start/stop/restart 期间**暂停**轮询（GATE.op），操作结束再恢复并刷一次。
+ *   注意：轮询必须叫 Inner 版本，别绕过闸门（selftest 里有静态断言盯着）。
+ */
+var GATE = { op: false, polls: 0 };
+
+async function refreshStatus(silent, force) {
+  if (GATE.polls > 0) return;              // 已有一个在飞 → 丢这一拍（不排队）
+  if (GATE.op && !force) return;           // start/stop/restart 进行中 → 丢这一拍
+  GATE.polls++;
+  try {
+    await refreshStatusInner(silent);
+  } finally {
+    GATE.polls--;
+  }
+}
+
+async function refreshStatusInner(silent) {
   var st;
   if (isPreview()) {
     st = fakeStatus();
@@ -764,41 +849,51 @@ async function refreshStatus(silent) {
     $("stState").innerHTML = pill + ' <span class="hint" style="color:var(--fg);font-weight:700">' +
       ESC(v.lastError) + "</span>";
   }
+  var bh = $("bootHint");
+  if (bh) bh.style.display = "none";     // 状态拿到了，收掉"正在读取…"占位
   if (!silent) { /* 无需额外动作 */ }
 }
 
-/* ---- autostart：读写同一份 config.json（不另存状态）---- */
+/* ---- autostart：只读写 etc/config.json 的这一个键（不改 App 写的其它字段）----
+ * 语义与"键缺失怎么办"都在 PURE.autostartView 里，本函数只负责画。 */
 async function loadAutostart() {
-  var txt = "";
+  var txt = "", catOk = true;
   if (isPreview()) {
     txt = '{"port":3080,"autostart":true}';
   } else {
     var r = await exec("cat " + shq(CONF));
+    catOk = r.errno === 0;
     txt = r.stdout || "";
   }
-  var m = txt.match(/"autostart"\s*:\s*(true|false)/);
-  if (!m) {
-    $("autostartHint").textContent = "读不到 " + CONF + "（可能尚未部署）。";
-    $("swAutostart").checked = false;
-    $("swAutostart").disabled = true;
-    return;
-  }
-  $("swAutostart").checked = (m[1] === "true");
-  $("swAutostart").disabled = false;
-  $("autostartHint").textContent = "当前值：" + m[1] + "（与 App 设置页共用同一份 config.json）";
+  var v = PURE.autostartView(txt, catOk || isPreview());
+  $("swAutostart").checked = v.on;
+  $("swAutostart").disabled = v.disabled;
+  $("autostartHint").textContent = v.label + " " + v.note;
 }
 
 async function setAutostart(on) {
-  // 用 sed 原地改 config.json 的 autostart —— 只改这一个键，不动别的字段，
-  // 这样不会覆盖 App 写的端口/频道等配置。
-  var cmd = "sed -i 's/\"autostart\"[ \t]*:[ \t]*\\(true\\|false\\)/\"autostart\": " +
-            (on ? "true" : "false") + "/' " + shq(CONF);
+  var val = on ? "true" : "false";
+  // 只改这一个键，不动别的字段（端口/频道/层模式等都在同一份文件里，整体覆盖会丢）。
+  // 注意：键可能**不存在**（老配置或手写的 config.json）—— 那就插进第一个 `{` 之后；
+  //    sed 的替换分支匹配不到时**不能当成成功**，否则用户以为关掉了、实际还开着
+  //    （真机反馈过这个坑）。
+  var cmd = "if grep -q '\"autostart\"' " + shq(CONF) + "; then " +
+            "sed -i 's/\"autostart\"[ \\t]*:[ \\t]*\\(true\\|false\\)/\"autostart\": " + val + "/' " + shq(CONF) + "; " +
+            // 插键时**不要**在替换串里写 \n（toybox sed 未必认）：同一行插入，JSON 依然合法
+            "else sed -i '0,/^{/s//{\"autostart\": " + val + ",/' " + shq(CONF) + "; fi";
   var r = await exec(cmd);
   if (r.errno !== 0) {
     showToast("写入失败：" + (r.stderr || r.errno));
     return false;
   }
-  showToast(on ? "已开启开机自启" : "已关闭开机自启");
+  // 写完**回读核实**：sed 没匹配到时 errno 仍是 0，只有回读能发现"其实没写进去"。
+  var chk = await exec("grep -c '\"autostart\"[ \\t]*:[ \\t]*" + val + "' " + shq(CONF));
+  if (chk.errno !== 0 || String(chk.stdout).trim() === "0") {
+    showToast("写入没生效（config.json 格式可能异常，见下方当前值）");
+    await loadAutostart();
+    return false;
+  }
+  showToast(on ? "已开启开机自启（重启后生效）" : "已关闭开机自启（重启后不再自动启动）");
   await loadAutostart();
   return true;
 }
@@ -888,7 +983,18 @@ async function applyModuleUpdate(asBin) {
 
 /* ---- 日志 ---- */
 var logTimer = null, logPaused = false;
-async function refreshLog() {
+async function refreshLog(force) {
+  if (GATE.polls > 0) return;              // 同上：串行桥接上不排队
+  if (GATE.op && !force) return;
+  GATE.polls++;
+  try {
+    await refreshLogInner();
+  } finally {
+    GATE.polls--;
+  }
+}
+
+async function refreshLogInner() {
   var txt;
   if (isPreview()) {
     txt = "[preview] 这是预览模式下的示例日志行\n" +
@@ -916,27 +1022,53 @@ async function doOp(op) {
     stop: ["stop", "正在停止…"],
     restart: ["stop", "正在重启…"],
   };
-  if (op === "refresh") { await refreshStatus(); showToast("已刷新"); return; }
+  if (op === "refresh") {
+    if (GATE.op) { showToast("正在执行操作，等它结束再刷新"); return; }
+    await refreshStatus(false, true);
+    showToast("已刷新");
+    return;
+  }
 
   if (op === "start" || op === "stop" || op === "restart") {
     var btn = document.querySelector('[data-op="' + op + '"]');
     if (btn) btn.disabled = true;
     showToast(map[op][1]);
-    setOut("opsOut", map[op][1]);
-    var r1 = await ctlJson(map[op][0]);
-    setOut("opsOut", JSON.stringify(r1, null, 2));
-    if (op === "restart") {
-      await new Promise(function (res) { setTimeout(res, 1200); });
-      var r2 = await ctlJson("start");
-      setOut("opsOut", "stop → " + JSON.stringify(r1) + "\n\nstart → " + JSON.stringify(r2));
-      if (!PURE.resultOk(r2)) showToast("重启可能失败：" + (r2.last_error || r2.error || "见输出"));
-    } else if (!PURE.resultOk(r1)) {
-      showToast("失败：" + (r1.last_error || r1.error || "见输出"));
-    } else {
-      showToast("完成");
+    // ★ 先把闸门关上：否则 3s/5s 两个定时器会在串行桥上跟这个长操作排队，
+    //   表现就是"点一次停止之后整个页面越来越卡"（真机反馈）。
+    GATE.op = true;
+    setOut("opsOut", map[op][1] + "\n（停止/启动要等 supervisor 退出并逐项卸载/挂载，"
+      + "通常 10~30 秒；这期间页面不再轮询，所以不会卡）");
+    var r1;
+    try {
+      r1 = await ctlJson(map[op][0]);
+      setOut("opsOut", JSON.stringify(r1, null, 2));
+      if (op === "restart") {
+        await new Promise(function (res) { setTimeout(res, 1200); });
+        var r2 = await ctlJson("start");
+        setOut("opsOut", "stop → " + JSON.stringify(r1) + "\n\nstart → " + JSON.stringify(r2));
+        if (!PURE.resultOk(r2)) showToast("重启可能失败：" + (r2.last_error || r2.error || "见输出"));
+      } else if (!PURE.resultOk(r1)) {
+        showToast("失败：" + (r1.last_error || r1.error || "见输出"));
+      } else {
+        showToast("完成");
+      }
+    } finally {
+      // ★ 必须 finally：操作抛异常时若忘了开闸，轮询就永久停摆（页面看着像死了）
+      GATE.op = false;
+      if (btn) btn.disabled = false;
     }
-    if (btn) btn.disabled = false;
-    await refreshStatus(true);
+    await refreshStatus(true, true);
+    // ★ 停完必须把"重启后还会自己起来"说出来：停止**不改**开机自启（那是两件事），
+    //   用户以为停一次就永久关掉了，下次开机又起来 —— 真机就是这么困惑的。
+    if (op !== "start") {
+      await loadAutostart();
+      if ($("swAutostart").checked) {
+        setOut("opsOut", ($("opsOut").textContent || "") +
+          "\n\n注意：本次只是停止运行；**开机自启仍是开的** ⇒ 下次重启还会自动启动。" +
+          "\n要它以后不再自动起，请把上面「开机自启」卡片里的开关关掉。");
+        showToast("已停止（开机自启仍开着：下次重启还会自动启动）");
+      }
+    }
     return;
   }
 
@@ -1139,7 +1271,7 @@ function bindTabs() {
       t.classList.add("on");
       var pg = $("page-" + t.getAttribute("data-page"));
       if (pg) pg.classList.add("active");
-      if (t.getAttribute("data-page") === "logs") refreshLog();
+      if (t.getAttribute("data-page") === "logs") refreshLog(true);
       if (t.getAttribute("data-page") === "upd") { loadRollback(); loadModuleInfo(); }
     });
   });
@@ -1174,9 +1306,9 @@ function boot() {
   $("btnLogToggle").addEventListener("click", function () {
     logPaused = !logPaused;
     $("btnLogToggle").textContent = logPaused ? "继续自动刷新" : "暂停自动刷新";
-    if (!logPaused) refreshLog();
+    if (!logPaused) refreshLog(true);
   });
-  $("btnLogReload").addEventListener("click", refreshLog);
+  $("btnLogReload").addEventListener("click", function () { refreshLog(true); });
   $("btnLogCopy").addEventListener("click", function () {
     var t = $("logOut").textContent || "";
     try { navigator.clipboard.writeText(t).then(function () { showToast("日志已复制"); }, function () { showToast("复制被拒绝"); }); }
@@ -1197,13 +1329,38 @@ function boot() {
   $("btnBinApply").addEventListener("click", function () { applyModuleUpdate(true); });
   $("btnReloadCh").addEventListener("click", function () { loadAutostart(); loadRollback(); showToast("已重读配置"); });
 
-  refreshStatus();
-  loadAutostart();
-  loadModuleInfo();
-  startLogTimer();
-  loadRollback();
-  // 状态每 5 秒自动刷新（running 时才有意义，但成本很低）
+  // ★ 先出画面、再取数：别在 DOMContentLoaded 里同步发桥接命令（那是 2~3 秒白屏的原因，
+  //   见 PURE.bootPlan 的注释）。双 rAF = 等首帧真的画完再进下一步。
+  afterFirstPaint(function () { runBootPlan(); });
+  // 状态每 5 秒自动刷新（走闸门版：同一时刻只允许一个在飞，长操作期间丢拍）
   setInterval(function () { refreshStatus(true); }, 5000);
+}
+
+/* 首帧之后再干活（老 WebView 没有 rAF 就退化成定时器） */
+function afterFirstPaint(fn) {
+  if (typeof requestAnimationFrame === "function") {
+    requestAnimationFrame(function () { requestAnimationFrame(fn); });
+  } else {
+    setTimeout(fn, 80);
+  }
+}
+
+/* 按 PURE.bootPlan 的顺序**逐条**取数：一条返回再发下一条。
+ * 为什么不用 Promise.all：桥接是串行的，同时发 4 条只会把首屏和后续交互一起堵住。 */
+async function runBootPlan() {
+  var plan = PURE.bootPlan();
+  for (var i = 0; i < plan.length; i++) {
+    try {
+      if (plan[i] === "status") await refreshStatus(false, true);
+      else if (plan[i] === "moduleInfo") await loadModuleInfo();
+      else if (plan[i] === "autostart") await loadAutostart();
+      else if (plan[i] === "rollback") await loadRollback();
+    } catch (e) {
+      // 单条失败不阻断后面的：首屏可见优先，具体错误各卡片自己会显示
+      if (typeof console !== "undefined") console.log("boot step failed:", plan[i], e);
+    }
+  }
+  startLogTimer();
 }
 
 if (typeof document !== "undefined" && document.addEventListener) {

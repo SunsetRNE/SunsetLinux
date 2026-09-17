@@ -191,6 +191,62 @@ console.log('\n== 结果判定 ==');
 ok(P.resultOk({ ok: true }) === true && P.resultOk({ state: 'running' }) === true, '正常');
 ok(P.resultOk({ ok: false }) === false && P.resultOk({ state: 'error' }) === false && P.resultOk(null) === false, '失败情形');
 
+console.log('\n== 开机自启的语义（真机反馈踩过：显示「关」而实际是「开」）==');
+// 判据必须与设备侧 service.sh 一致：**没有这个键 = 开机自启（开）** ——
+// 它先默认 AUTOSTART=1，只有 grep 到 `"autostart": false` 才关。
+{
+  const on = P.autostartView('{"port":3080,"autostart":true}', true);
+  ok(on.kind === 'set' && on.on === true && on.disabled === false, '有键=true → 显示开、开关可用');
+  const off = P.autostartView('{"port":3080,"autostart":false}', true);
+  ok(off.kind === 'set' && off.on === false && off.disabled === false, '有键=false → 显示关');
+  const noKey = P.autostartView('{\n  "port": 3080\n}', true);
+  ok(noKey.kind === 'no-key' && noKey.on === true && noKey.disabled === false,
+    '★ 文件在但没有 autostart 键 → 必须显示「开（默认）」且开关可用（旧实现显示"关"+置灰，与真机行为相反）');
+  const noFile = P.autostartView('', false);
+  ok(noFile.kind === 'no-file' && noFile.disabled === true, '读不到文件 → 置灰（未部署）');
+  ok(!/共用同一份/.test(on.note + off.note + noKey.note),
+    '文案不得再说「与 App 设置页共用同一份 config.json」（错的：App 那个开关写的是自己的 SharedPreferences）');
+  ok(/状态服务/.test(on.note), '文案要点明 App 那个开关叫「开机自启状态服务」、是另一件事');
+}
+
+console.log('\n== 轮询闸门（真机反馈：点停止后页面越用越卡）==');
+// index.html 走的是**串行**桥接；长操作期间定时器若不丢拍就会排队，队列越排越长。
+// 这些是静态断言（拦"改回去"），与上面 autostartView 的行为断言互补。
+{
+  ok(/var GATE = \{ op: false, polls: 0 \};/.test(html), '存在 GATE 闸门');
+  ok(/if \(GATE\.polls > 0\) return;/.test(html), '同一时刻只允许一个轮询在飞（不排队）');
+  ok(/if \(GATE\.op && !force\) return;/.test(html), 'start/stop/restart 期间轮询丢拍');
+  ok(/GATE\.op = true;/.test(html) && /finally \{[\s\S]{0,160}GATE\.op = false;/.test(html),
+    '★ 长操作置位 GATE.op，且**在 finally 里复位**（抛异常也不会让轮询永久停摆）');
+  ok(/async function refreshStatusInner\(/.test(html) && /async function refreshLogInner\(/.test(html),
+    '轮询各有 Inner 版本（闸门只包一层，逻辑不重复）');
+  ok(/setInterval\(function \(\) \{ refreshStatus\(true\); \}, 5000\);/.test(html),
+    '5s 定时器走闸门版 refreshStatus（不是 Inner）');
+  ok(/setInterval\(function \(\) \{ if \(!logPaused\) refreshLog\(\); \}, 3000\);/.test(html),
+    '3s 日志定时器走闸门版 refreshLog');
+  ok(/开机自启仍是开的/.test(html), '停止后明确提示"开机自启仍开着 ⇒ 下次重启还会自动启动"');
+  ok(/grep -c/.test(html) && /写入没生效/.test(html), '写 autostart 后回读核实（sed 没匹配到不能算成功）');
+}
+
+console.log('\n== 首屏：先出画面，再逐条取数（真机反馈白屏 2~3 秒）==');
+{
+  const plan = P.bootPlan();
+  ok(Array.isArray(plan) && plan.length === 4, 'bootPlan 返回 4 步');
+  ok(plan[0] === 'status', '第一步是 status（用户最先看状态卡）');
+  ok(new Set(plan).size === plan.length, 'bootPlan 不重复');
+  ok(plan.indexOf('autostart') >= 0 && plan.indexOf('moduleInfo') >= 0 && plan.indexOf('rollback') >= 0,
+    '四步都在（status/moduleInfo/autostart/rollback）');
+  ok(/function afterFirstPaint\(/.test(html) && /requestAnimationFrame\(function \(\) \{ requestAnimationFrame\(fn\); \}\);/.test(html),
+    '★ 双 rAF 等首帧画完再取数（白屏的根因就是 DOMContentLoaded 里同步发桥接）');
+  const bootFn = (html.match(/async function runBootPlan\(\)[\s\S]*?\n\}/) || [''])[0];
+  ok(bootFn.length > 0, '能抽出 runBootPlan（改名了就要同步改这条断言）');
+  ok(/for \(var i = 0; i < plan\.length; i\+\+\)/.test(html) && !/Promise\.all/.test(bootFn),
+    '按 plan **逐条**发（不是同时发 4 条 —— 串行桥接上会把首屏堵住）');
+  ok(/正在读取状态…/.test(html) && /id="bootHint"/.test(html), '静态外壳里有"正在读取状态…"占位（有东西可看）');
+  ok(/bh\.style\.display = "none"/.test(html), '拿到状态后收掉占位');
+  ok(!/^\s*refreshStatus\(\);\s*$/m.test(html), 'DOMContentLoaded 里不再直接同步调用 refreshStatus()');
+}
+
 console.log('\n=========================================');
 console.log(`  通过 ${pass}，失败 ${fail}`);
 console.log('=========================================');
