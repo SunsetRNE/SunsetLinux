@@ -132,6 +132,40 @@ kill_stray_dsh() {
 }
 
 # ---------------------------------------------------------------------------
+# kill_env_leftovers —— **不能只信 pid 文件** 的那一半
+#
+#   真机事故（2026-09-17，模块 1.0.26）：supervise.sh 把 dsh.pid 写进了可写层里的假目录
+#   （docs/STATUS.md §3.10.31），宿主侧根本读不到 → kill_stray_dsh 拿着不存在的 pid 文件
+#   return 0 → 残留的 node/dsh 继续活着 → 它占着 127.0.0.1:3080 和那三个 loop 设备
+#   → **下一次 start 直接失败**（stop 日志里只有一句"loop 设备仍被占用"）。
+#
+#   判据（保守：两条都成立才动手，宁可不杀也不误杀）
+#     ① 命令里有 dsh + web；
+#     ② /proc/<pid>/root 指向**我们的** rootfs（$LINUX_HOME/rootfs）。
+#   为什么要 ②：别的环境里的 dsh 长得一模一样（真机实测：DSHA 的 proot 环境也是
+#   `node /usr/local/bin/dsh web --no-open --host 127.0.0.1 --port N`），唯一区别是
+#   它的 /proc/<pid>/root 是 `/`，而我们的（chroot 进 overlay 的）是 $LINUX_HOME/rootfs。
+# ---------------------------------------------------------------------------
+kill_env_leftovers() {
+    # 管道进 while：循环体在子壳里，但这里**唯一的副作用就是 kill**，不依赖变量回传。
+    ps -A -o PID,ARGS 2>/dev/null | while read -r _pid _cmd; do
+        case "${_pid:-}" in ''|*[!0-9]*) continue ;; esac
+        case "${_cmd:-}" in *dsh*web*) ;; *) continue ;; esac
+        _root="$(readlink "/proc/$_pid/root" 2>/dev/null || printf '')"
+        [ "$_root" = "$ROOTFS_DIR" ] || continue
+        warn "发现环境内残留进程（pid=$_pid, root=$_root）：$_cmd"
+        kill -TERM "$_pid" 2>/dev/null || true
+        _i=0
+        while [ "$_i" -lt 30 ] && [ -d "/proc/$_pid" ]; do sleep 0.1; _i=$(( _i + 1 )); done
+        if [ -d "/proc/$_pid" ]; then
+            warn "  pid=$_pid 未在 3s 内退出，发送 KILL"
+            kill -KILL "$_pid" 2>/dev/null || true
+        fi
+    done
+    return 0
+}
+
+# ---------------------------------------------------------------------------
 # 2) 反序卸载 rootfs 内的挂载点
 # ---------------------------------------------------------------------------
 unmount_rootfs_tree() {
@@ -291,6 +325,7 @@ main() {
         log "没有运行中的环境（幂等）；仍会检查并清理任何挂载残留"
     fi
     kill_stray_dsh
+    kill_env_leftovers
 
     unmount_rootfs_tree
     unmount_overlay

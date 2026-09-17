@@ -503,6 +503,66 @@ su -c '/data/sunsetlinux/bin/linuxctl doctor'
 | 已装状态读不到时 | —— | **不给刷入按钮**，先让用户修 root 授权（与"读不到 ≠ 没装"一致） |
 | 重启 | —— | 只报告"重启后生效"（KernelSU 落 `modules_update/`），**App 不替用户重启**，脚本里有单测断言不许出现 `reboot` |
 
+### 3.10.31 环境内 dsh.url 写错目录 → App 永远「登录地址还没写出来」（模块 1.0.27）
+
+**真机现场（2026-09-17 19:06，模块 1.0.26 + 内置 DSH 0.1.5-rc.2）**：App 状态页一切正常 ——
+「运行中 / Web 健康 正常 / 监听端口 3080 / DSH 0.1.5-rc.2」，点进 DSH Web 却是：
+
+```
+⚠ 环境已在运行，但登录地址还没写出来（run/dsh.url 尚未就绪）。稍后点「重新登录」重试。
+```
+
+`doctor` 里同时出现两句看起来矛盾的话，两句也都是真的：
+
+```
+[ok]   环境运行中（ns_pid=4106）
+[info] run/dsh.url 不存在（环境未运行或尚未打印 URL）
+```
+
+**环境在跑、dsh 也在跑，只是带令牌的登录 URL 落错了目录**（App 读的是宿主
+`$LINUX_HOME/run/dsh.url`，见 `linuxctl.sh:140/354`）。
+
+**证据链**：
+
+1. 环境内日志：`[19:06:36] dsh 已后台启动，pid=4898` → `dsh web: http://127.0.0.1:3080/?token=…`
+   → `[19:06:40] 已捕获带令牌 URL 并写入 /data/sunsetlinux/run/dsh.url`（**它以为自己写对了**）。
+2. 宿主 `/data/sunsetlinux/run/` 里没有 `dsh.url` / `dsh.port` / `dsh.pid`；它们在**可写层**里：
+   `/data/sunsetlinux/upper/upper/data/sunsetlinux/run/`。
+3. 3080 的占用者就是环境自己的 `node /usr/local/bin/dsh web …`（pid 4898）—— App 那句
+   「Web 健康 正常」是连它探到的真响应，属于"端口通、凭证读不到"；也就是说 `doctor` 的
+   「3080 已被占用」在环境运行中是**自己占自己**的误报。
+
+**根因（一行）**：`start.sh` 的 `rbind_host_run` 把**宿主 `$LINUX_HOME/run`** rbind 到**环境内 `/run`**，
+契约就是"环境内写 `/run`"。但 `entry.sh` / `supervise.sh` 里写的是 `RUN_DIR="$LINUX_HOME/run"` ——
+这两个脚本在 **chroot 内**运行，根已经换成 overlay，那个路径既不是宿主目录、也不是 rbind 进来的
+`/run`，而是可写层里**凭空 mkdir 出来的假目录**。注释与实现自相矛盾（`entry.sh` 的注释写着"环境内写
+`/run/dsh.url` 等于宿主写 `$LINUX_HOME/run/dsh.url`"，下一行却把 `RUN_DIR` 拼成了后者）。
+
+**第二半（同一根因，症状完全不同）**：`dsh.pid` 也写进了那个假目录 → 宿主 `stop.sh` 的
+`kill_stray_dsh` 拿着不存在的 pid 文件 `return 0` → 残留的 node/dsh **继续占着 3080 与三个 loop 设备**
+→ **下一次 start 直接失败**（真机 19:18 的 `start.sh 失败` 就是这么来的；19:27 的 stop 日志里只剩
+一句"loop 设备仍被占用"）。这正是"和现有使用冲突了怎么办"的现场。
+
+**修法**：
+
+| 位置 | 改动 |
+|---|---|
+| `entry.sh` / `supervise.sh` | `RUN_DIR="${SUNSETLINUX_RUN_DIR:-/run}"` —— 环境内只写 `/run` |
+| `stop.sh` | 新增 `kill_env_leftovers`：判据 = 命令像 `dsh web` **且** `/proc/<pid>/root` == `$LINUX_HOME/rootfs`（别的环境的 dsh 同名同参、root 是 `/`，**一根汗毛都不许动**） |
+| `doctor §8` | 环境在跑却没有 `run/dsh.url` → **直接报 fail**（以前只说一句 info，用户会去重启一个本来就好的环境），并在可写层里找出错位副本、把修复路径直接写出来；启动 30s 内不报（给 dsh 打印 URL 的窗口） |
+
+**回归**：`runtime/root/selftest.sh` **66 → 73** × bash+mksh（环境内 `RUN_DIR` 必须是 `/run`；两个脚本
+不许再出现 `RUN_DIR="$LINUX_HOME/run"`；宿主侧 rbind 落点仍是 `rootfs/run`；`kill_env_leftovers` 的
+正例必须杀、**反例（别的环境的同名 dsh）不许动**）。反例做过变异测试：删掉 `/proc/<pid>/root` 判据，
+那条断言立刻红。
+
+> **已经踩在 1.0.26 上的设备怎么救**（一次性）：
+> 1. 先干掉残留的 dsh（它占着 3080 与 loop）：`ps -A -o PID,ARGS` 里找 `node /usr/local/bin/dsh web`，
+>    `kill <pid>`；或看 `losetup -a` 里还挂着 `layers/*.erofs` / `upper.img` 的那个 pid；
+> 2. 装 1.0.27（或把 `entry.sh` / `supervise.sh` 里那行 `RUN_DIR` 手改成 `/run`）后 `linuxctl start`；
+> 3. 想立刻就登录（暂不升级）：把可写层 `upper/upper/data/sunsetlinux/run/` 下的
+>    `dsh.url` / `dsh.port` / `dsh.pid` 拷到 `/data/sunsetlinux/run/`，再点 App 的「重新登录」。
+
 ### 3.10.30 内置 DSH「已就位却从没被启用」→ 永远 rc=78（模块 1.0.26）
 
 **真机现场（2026-09-17，装完 full 模块 1.0.24/1.0.25 后）**：doctor 里同时出现两行，

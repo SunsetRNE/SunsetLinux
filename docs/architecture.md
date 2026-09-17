@@ -191,6 +191,10 @@ App 不需要关心模式差异，只读 `status` 里的 `mode` 字段。
     见 [`dsh-profile.md`](dsh-profile.md)；`dsh` 是 `lib/bin.js`，`web` 是 `--profile web` 的别名。）
   - **必须捕获 stdout**，从中提取带令牌 URL，写入 `$LINUX_HOME/run/dsh.url`
     （**权限 0600**，因为它是登录凭据）。
+    ★ 路径方向要分清：`$LINUX_HOME/run` 是**宿主侧**的说法；supervise.sh 在 **chroot 内**运行，
+    它必须写 **`/run`** —— start.sh 的 `rbind_host_run` 把宿主 `$LINUX_HOME/run` rbind 到了那里，
+    两侧是同一批 inode。写成 `$LINUX_HOME/run` 会在可写层里凭空建出一个假目录，宿主永远读不到
+    （2026-09-17 真机事故，见 [`STATUS.md`](STATUS.md) §3.10.31）。
     → 因此 supervise.sh **不能直接 `exec`**，要"后台启动 + 截获输出 + 解析 + 落盘 + 前台等待 + SIGTERM 透传"。
     同时写 `run/dsh.pid`、`run/dsh.port`；stdout/stderr 追加到 `run/linux.log`。
   - 注意：`run/dsh.port` 要写**实际**生效的端口（端口被占时 dsh 可能自行换端口）。

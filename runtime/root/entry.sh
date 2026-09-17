@@ -21,16 +21,23 @@
 # 因此 DNS 与时区由 start.sh 在 chroot **之前**抓取，写到 $LINUX_HOME/etc/
 # （= 环境内的 /etc/android-*.txt），本脚本只负责读取与落地。
 #
-# 另外 $LINUX_HOME/run 是 rbind 进环境内 /run 的（见 start.sh 的 rbind_host_run），
+# 另外宿主 $LINUX_HOME/run 是 rbind 进环境内 **/run** 的（见 start.sh 的 rbind_host_run），
 # 所以环境内写 /run/dsh.url 等于宿主写 $LINUX_HOME/run/dsh.url，App 侧可直接读。
+# ★ 注意方向：是"环境内写 /run"，**不是**"环境内写 $LINUX_HOME/run"。
 # =============================================================================
 set -uo pipefail
 
 SELF_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 LINUX_HOME="${LINUX_HOME:-/data/sunsetlinux}"
-# 环境内 /run 与宿主 $LINUX_HOME/run 是**同一批 inode**（start.sh 用 rbind 实现，
-# 见其 rbind_host_run 注释），所以这里直接写 /run 就等于宿主侧的动作。
-RUN_DIR="$LINUX_HOME/run"
+# ★ RUN_DIR 必须是**环境内**的 /run —— 本脚本在 chroot 之后运行，根已经换成 overlay：
+#   chroot 里的 "$LINUX_HOME/run"（= /data/sunsetlinux/run）既不是宿主那个目录，也不是
+#   rbind 进来的 /run，而是可写层（upperdir）上**凭空新建的一个目录**。
+#   2026-09-17 真机事故：dsh.pid / dsh.port / dsh.url / linux.log 全落进那个假目录 →
+#   宿主侧 linuxctl（= App）读 $LINUX_HOME/run/dsh.url 永远为 null →
+#   App 报"环境已在运行，但登录地址还没写出来（run/dsh.url 尚未就绪）"，WebView 打不开。
+#   （同一份代码在 1.0.26 及以前就是这样，见 docs/STATUS.md §3.10.31。）
+#   SUNSETLINUX_RUN_DIR 只作覆盖口（宿主侧自测 / proot 运行时同款约定），默认 /run。
+RUN_DIR="${SUNSETLINUX_RUN_DIR:-/run}"
 
 log() {
     local line

@@ -896,6 +896,104 @@ else
     bad "内层没有改用 install_android_facts（次数=$I_N 行=$I_CALL main=$MAIN_LN）"
 fi
 
+# ---------------------------------------------------------------------------
+# 环境内 run 目录契约（2026-09-17 真机事故的回归）
+#   事故：entry.sh / supervise.sh 用 "$LINUX_HOME/run" 拼 run 目录。这两个脚本在 **chroot 内**
+#   运行（根已经换成 overlay），那个路径既不是宿主目录、也不是 rbind 进来的 /run，而是可写层里
+#   凭空 mkdir 出来的**假目录** → 宿主侧 linuxctl / App 读 $LINUX_HOME/run/dsh.url 永远是 null
+#   → App 报「环境已在运行，但登录地址还没写出来（run/dsh.url 尚未就绪）」，WebView 打不开。
+#   契约（docs/architecture.md §3.2）：环境内**只写 /run**；start.sh 的 rbind_host_run 把宿主
+#   $LINUX_HOME/run rbind 到那里，两侧是同一批 inode。
+#   断言：① 环境内脚本解析出的 RUN_DIR 必须是 /run（跑的是真实那一行）；
+#         ② 两个脚本里不许再有 `RUN_DIR="$LINUX_HOME/run"`；
+#         ③ 宿主侧 rbind 的落点必须还是 rootfs/run（契约的另一半）。
+# ---------------------------------------------------------------------------
+head_ "环境内 run 目录契约（写 /run，不写 \$LINUX_HOME/run）"
+for _src in "$SELF_DIR/entry.sh" "$SELF_DIR/supervise.sh"; do
+    _base="$(basename "$_src")"
+    [ -f "$_src" ] || { bad "找不到 $_src"; continue; }
+    _line="$(awk '/^RUN_DIR=/{print; exit}' "$_src" 2>/dev/null)"
+    if [ -z "$_line" ]; then
+        bad "$_base：抽不到 RUN_DIR= 那一行（被改名了？契约断言失效，先修测试）"
+        continue
+    fi
+    _rv="$("$SH_BIN" -c 'unset SUNSETLINUX_RUN_DIR 2>/dev/null || true
+        LINUX_HOME=/data/sunsetlinux
+        eval "$1"
+        printf "%s" "${RUN_DIR:-}"' _ "$_line" 2>/dev/null)"
+    if [ "$_rv" = "/run" ]; then
+        ok "$_base：LINUX_HOME=/data/sunsetlinux 时 RUN_DIR=/run（= 宿主 \$LINUX_HOME/run 的 rbind 落点）"
+    else
+        bad "$_base：RUN_DIR=$_rv，必须是 /run —— chroot 内的 \$LINUX_HOME/run 是可写层里的假目录，App 读不到 dsh.url"
+    fi
+done
+for _src in "$SELF_DIR/entry.sh" "$SELF_DIR/supervise.sh"; do
+    _base="$(basename "$_src")"
+    [ -f "$_src" ] || continue
+    if [ "$(grep -c -F 'RUN_DIR="$LINUX_HOME/run"' "$_src" 2>/dev/null)" = "0" ]; then
+        ok "$_base：没有写回 \$LINUX_HOME/run（真机事故那一行）"
+    else
+        bad "$_base：又出现了 RUN_DIR=\"\$LINUX_HOME/run\" —— 那行就是真机事故的根因"
+    fi
+done
+_DB_N="$(grep -c -F 'do_bind run "$RUN_DIR"' "$SELF_DIR/start.sh" 2>/dev/null)"
+_DR_N="$(grep -c -F 'dst="$ROOTFS_DIR/run"' "$SELF_DIR/start.sh" 2>/dev/null)"
+if [ "$_DB_N" = "1" ] && [ "$_DR_N" = "1" ]; then
+    ok "start.sh：宿主 \$RUN_DIR rbind 到 rootfs/run（环境内 /run 契约的另一半还在）"
+else
+    bad "start.sh 的 rbind_host_run 落点变了（do_bind=$_DB_N dst=$_DR_N）：环境内 /run 与宿主 \$LINUX_HOME/run 的对应关系是前提"
+fi
+
+# ---------------------------------------------------------------------------
+# stop.sh 的残留清理不许只信 run/dsh.pid（同一起事故的另一半）
+#   事故链：dsh.pid 被写进可写层假目录 → 宿主读不到 → stop.sh 的 kill_stray_dsh 拿不到 pid
+#   → 残留 node/dsh 继续占着 127.0.0.1:3080 与三个 loop 设备 → **下一次 start 失败**。
+#   所以补了 kill_env_leftovers：判据是「命令像 dsh web」**且**「/proc/<pid>/root == 我们的
+#   rootfs」。这里用桩 ps/readlink 把两条都跑一遍（正例必须杀、反例一根汗毛都不许动 ——
+#   真机上别的环境（DSHA proot）也是 `node /usr/local/bin/dsh web …`，误杀就出事）。
+# ---------------------------------------------------------------------------
+head_ "stop.sh 残留清理：只杀 root 在我们 rootfs 里的 dsh"
+_STOP_SRC="$SELF_DIR/stop.sh"
+_SE="$TMP/leftovers.sh"
+{
+    printf 'warn() { printf "WARN %%s\\n" "$*" >&2; }\n'
+    sed -n '/^kill_env_leftovers()/,/^}/p' "$_STOP_SRC" 2>/dev/null
+} > "$_SE"
+if ! grep -q '^kill_env_leftovers()' "$_SE"; then
+    bad "stop.sh 里抽不到 kill_env_leftovers()（函数被改名/删了？残留 dsh 又会占着 3080）"
+else
+    mkdir -p "$TMP/lstub" "$TMP/lroot"
+    printf '#!/bin/sh\nprintf "%%s\\n" "${FAKE_ROOT:-}"\n' > "$TMP/lstub/readlink"
+    chmod +x "$TMP/lstub/readlink"
+    # 正例：root 指向我们的 rootfs → 必须被杀
+    sleep 300 & _V1=$!
+    printf '#!/bin/sh\nprintf "%%s\\n" "  PID ARGS" "%s node /usr/local/bin/dsh web --host 127.0.0.1 --port 3080"\n' "$_V1" > "$TMP/lstub/ps"
+    chmod +x "$TMP/lstub/ps"
+    PATH="$TMP/lstub:$PATH" ROOTFS_DIR="$TMP/lroot" FAKE_ROOT="$TMP/lroot" \
+        "$SH_BIN" -c '. "$1"; kill_env_leftovers' _ "$_SE" >/dev/null 2>&1
+    sleep 0.3
+    _S1=""
+    [ -f "/proc/$_V1/stat" ] && _S1="$(sed 's/.*) //' "/proc/$_V1/stat" 2>/dev/null | cut -c1)"
+    case "$_S1" in
+        ""|Z) ok "残留 dsh（root=$TMP/lroot）被杀掉（state=${_S1:-gone}）" ;;
+        *)    bad "残留 dsh 没被杀（state=$_S1）：stop 之后端口/loop 会被它占住，下次 start 直接失败" ;;
+    esac
+    kill "$_V1" 2>/dev/null || true
+    # 反例：root 不是我们的 rootfs（别的环境的同名 dsh）→ 一根汗毛都不许动
+    sleep 300 & _V2=$!
+    printf '#!/bin/sh\nprintf "%%s\\n" "  PID ARGS" "%s node /usr/local/bin/dsh web --host 127.0.0.1 --port 0"\n' "$_V2" > "$TMP/lstub/ps"
+    chmod +x "$TMP/lstub/ps"
+    PATH="$TMP/lstub:$PATH" ROOTFS_DIR="$TMP/lroot" FAKE_ROOT=/ \
+        "$SH_BIN" -c '. "$1"; kill_env_leftovers' _ "$_SE" >/dev/null 2>&1
+    _S2=""
+    [ -f "/proc/$_V2/stat" ] && _S2="$(sed 's/.*) //' "/proc/$_V2/stat" 2>/dev/null | cut -c1)"
+    case "$_S2" in
+        S|R|D) ok "别的环境的 dsh（root=/）没被误杀（state=$_S2）" ;;
+        *)     bad "误杀了 root 不是我们 rootfs 的进程（state=${_S2:-gone}）：判据必须带 /proc/<pid>/root 这一条" ;;
+    esac
+    kill "$_V2" 2>/dev/null || true
+fi
+
 printf '\n=========================================\n'
 printf '  通过 %d，失败 %d\n' "$pass" "$fail"
 printf '=========================================\n'

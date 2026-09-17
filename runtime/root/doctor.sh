@@ -1135,8 +1135,39 @@ else
 fi
 if [ -f "$RUN_DIR/dsh.url" ]; then
     ok "run/dsh.url 存在（带令牌登录 URL，权限 $(stat -c '%a' "$RUN_DIR/dsh.url" 2>/dev/null)）"
+    add_finding ok dsh_url "present"
+elif env_running; then
+    # 环境在跑却没有登录 URL = App 一定打不开界面（"环境已在运行，但登录地址还没写出来"）。
+    # 这与"环境没起来"是**两件事**，必须分开报，否则用户会去重启一个本来就好的环境。
+    # 2026-09-17 真机事故：模块 ≤1.0.26 的 entry.sh/supervise.sh 用 "$LINUX_HOME/run" 拼路径，
+    # 而它们在 chroot 内跑（根是 overlay）→ 写进了**可写层里的假目录**，宿主读不到。
+    bad "环境在运行，但 run/dsh.url 不存在 —— App 拿不到带令牌登录 URL（WebView 打不开）"
+    add_finding fail dsh_url "running but run/dsh.url missing"
+    # 找那个错位副本：upperdir 在 loop 模式是 $LH/upper/upper、dir 模式是 $LH/dirs-upper；
+    # 环境内的 run 目录按老代码是 "$LINUX_HOME/run"，而环境内的 LINUX_HOME 要么继承了宿主的
+    # 路径、要么退回内置默认值 /data/sunsetlinux —— 两种都试，别只赌一种。
+    _stray=""
+    for _up in "$LH/upper/upper" "$LH/dirs-upper"; do
+        for _gr in "$LH" /data/sunsetlinux; do
+            _c="$_up$_gr/run/dsh.url"
+            if [ -f "$_c" ]; then _stray="$_c"; break; fi
+        done
+        if [ -n "$_stray" ]; then break; fi
+    done
+    if [ -n "$_stray" ]; then
+        info "可写层里有一个**错位副本**：$_stray"
+        info "根因（模块 ≤1.0.26）：entry.sh / supervise.sh 用 \$LINUX_HOME/run 拼 run 目录，"
+        info "  但它们在 chroot 内运行，那里的 /data/sunsetlinux 不是宿主目录 → 写进了可写层。"
+        info "  1.0.27 起改写 /run（宿主 \$LINUX_HOME/run 的 rbind 落点）；升级模块后重启环境即修好。"
+        info "要立刻登录：把错位副本按 dsh.url / dsh.port / dsh.pid 三个一起 cp 到 $RUN_DIR/，再点 App 的「重新登录」"
+        info "  （这只是临时续命：下次 start 仍会写错位，除非升级到模块 1.0.27）"
+    else
+        info "可写层里也没有错位副本：更可能是 dsh 还没起/起不来 —— 看 $RUN_DIR/linux.log 里有没有"
+        info "  'dsh web: http://127.0.0.1:<port>/?token=...' 这一行（没有就是 supervisor 阶段就失败了）。"
+    fi
 else
-    info "run/dsh.url 不存在（环境未运行或尚未打印 URL）"
+    info "run/dsh.url 不存在（环境未运行）"
+    add_finding ok dsh_url "absent-stopped"
 fi
 if [ -s "$RUN_DIR/last-error" ]; then
     _le="$(head -n1 "$RUN_DIR/last-error" 2>/dev/null)"

@@ -28,7 +28,12 @@
 set -uo pipefail
 
 LINUX_HOME="${LINUX_HOME:-/data/sunsetlinux}"
-RUN_DIR="$LINUX_HOME/run"
+# ★ RUN_DIR 必须是**环境内**的 /run（宿主 $LINUX_HOME/run 的 rbind 落点），
+#   **绝不能**写成 "$LINUX_HOME/run"：本脚本在 chroot 之后跑，根已换成 overlay，
+#   那个路径会变成可写层里凭空 mkdir 出来的新目录 —— 宿主侧读不到，
+#   status.dsh.url 永远是 null，App 直接打不开界面（2026-09-17 真机事故，
+#   见 docs/STATUS.md §3.10.31）。默认 /run，SUNSETLINUX_RUN_DIR 仅作覆盖口。
+RUN_DIR="${SUNSETLINUX_RUN_DIR:-/run}"
 PORT=3080
 
 while [ $# -gt 0 ]; do
