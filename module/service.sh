@@ -5,6 +5,27 @@
 # late_start 阶段做两件事：
 #   1. **还没建层就自己建**（零点击部署）—— 装机流程应该是
 #        「装模块 → 重启 → 自己建 → 自己起」，不需要先开 App 再点一下"执行部署"。
+# --- 自动应用 loop 可写层所需的 SELinux 规则（真机 2026-09-17 验证过写法）-----------
+# 为什么需要：loop 的 I/O 在 kernel 域（kworker）里做，本机策略没给 kernel 域
+#   system_data_file 的**写**权限 → `mount -t ext4 -o loop,rw upper.img` 报 I/O error
+#   （EXT4-fs: I/O error while writing superblock）。规则只有一条、只放开"写"（读本来就允许）。
+# 为什么每次开机都要打：ksud sepolicy patch/apply 是**运行时会话级**的，重启即失效。
+# 关掉它（例如你不想扩大策略面）：touch /data/sunsetlinux/etc/sepolicy-loop.disabled
+_SL_ETC=/data/sunsetlinux/etc
+_SL_RUN=/data/sunsetlinux/run
+_SL_KS=/data/adb/ksu/bin/ksud
+mkdir -p "$_SL_ETC" "$_SL_RUN" 2>/dev/null || true
+if [ -x "$_SL_KS" ] && [ ! -f "$_SL_ETC/sepolicy-loop.disabled" ]; then
+    printf '%s\n' 'allow kernel system_data_file file write;' > "$_SL_ETC/sepolicy-loop.rule" 2>/dev/null || true
+    if "$_SL_KS" sepolicy apply "$_SL_ETC/sepolicy-loop.rule" >>"$_SL_RUN/service.log" 2>&1; then
+        printf '[%s] [service.sh] 已应用 loop 写权限规则：allow kernel system_data_file file write;\n' \
+            "$(date '+%Y-%m-%d %H:%M:%S')" >>"$_SL_RUN/service.log" 2>/dev/null || true
+    else
+        printf '[%s] [service.sh] WARN: 应用 loop 写权限规则失败（loop 模式会挂不上可写层，原因见上一行）\n' \
+            "$(date '+%Y-%m-%d %H:%M:%S')" >>"$_SL_RUN/service.log" 2>/dev/null || true
+    fi
+fi
+
 #   2. 层齐了或者建完了 → `linuxctl start` 开机自启（与 App 完全无关，
 #      这就是"环境不被 App 杀死"的关键，architecture.md §1 / §6.1）。
 #

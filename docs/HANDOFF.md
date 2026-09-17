@@ -635,3 +635,15 @@ tail -40 /data/sunsetlinux/run/linux.log  # 现在会有内容了：卡在 loop/
   需要从频道/Release 装官方 `dsh`/`runtime` 层。
 - 顺带修：`stop.sh` 引用未定义的 `UPPER_IMG`（我的登记表改动暴露的）、`gather_android_facts` 里
   `ndc` 改为**默认不用**（`SUNSETLINUX_ALLOW_NDC=1` 才试）。
+
+### 第 37 轮三补（2026-09-17 11:20）：规则改成**开机自动应用**
+
+用户反馈"不太会操作，只能这样"——那就别让他每次手打 `ksud sepolicy patch`：
+`module/service.sh` 在调用 `linuxctl start` **之前**自动 `ksud sepolicy apply` 那条唯一的规则
+（`allow kernel system_data_file file write;`，写进 `/data/sunsetlinux/etc/sepolicy-loop.rule`），
+开关文件 `/data/sunsetlinux/etc/sepolicy-loop.disabled`（存在则不打），结果写进 `run/service.log`。
+规则是运行时会话级的、重启失效，所以必须每次开机打 —— 这就是放在 service.sh 的原因。
+
+真机状态（11:08 日志）：0.3.3 已确认**不再卡死**（DNS 在父进程采集）；仍倒在 `mount upper` 的
+I/O error 上 —— 因为重启后规则失效；本次改动正是为了消除这个手动步骤。剩下的一关是
+`supervise.sh` 的 `exit 78`（缺 DSH web profile），需要装官方 dsh/runtime 层（App「更新」页最省事）。
