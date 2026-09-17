@@ -503,6 +503,76 @@ su -c '/data/sunsetlinux/bin/linuxctl doctor'
 | 已装状态读不到时 | —— | **不给刷入按钮**，先让用户修 root 授权（与"读不到 ≠ 没装"一致） |
 | 重启 | —— | 只报告"重启后生效"（KernelSU 落 `modules_update/`），**App 不替用户重启**，脚本里有单测断言不许出现 `reboot` |
 
+### 3.10.42 「点了启动环境，然后就没了，点不了启动 DSH」：**命令卡住把整个启动区锁死** + 让路端口不落盘（模块 1.0.33 / App 0.3.12）
+
+**真机现场**（2026-09-18 02:49，App 0.3.11 + 模块 1.0.32）：按「分步启动 → 仅启动环境」之后，
+操作卡里**五张卡片全部 0.4 alpha 置灰**、「启动 DSH」点下去**毫无反应、也无报错**。
+用户原话两句：「点了启动环境，然后就没了，点不了启动 DSH」「找到问题了，端口被占，没有写偏移」。
+
+#### 一、先证伪了"按钮矩阵错了"
+
+截图里 `StopControls` 的矩阵**是对的**（`env-only + DSH 没跑` ⇒ 「启动 DSH」该亮、note 也该是
+"点它接上"）。两个反证：
+
+| 观察 | 结论 |
+|---|---|
+| 同一屏里「打开 DSH」的 label 亮度 p99=**42**（灰），「更新」p99=**255**（亮）—— 一张 ActionTile 对照组证明"灰/亮"在像素上可分 | 四张启动卡片的值**完全一致**（p99≈103~113），不是"各有各的对错"，是**整块被同一个开关关掉** |
+| 四张里「停止环境」在矩阵里**任何 running 分支都为真**（`envStopEnabled=true`） | 它也灰 ⇒ 排除"矩阵判错"，只剩 `busy` 这一个闸门 |
+
+#### 二、真正的根因：`linuxctl start` **永不返回**（设备实证）
+
+App 的 `runAction` 把 `busy` 置真，**等 `su -c '… linuxctl start --no-dsh'` 返回**才复位。
+而那条命令在设备上根本没返回过。证据（全部只读取得，`ps` + `/proc`）：
+
+| PID | 命令行 | 20 分钟后 |
+|---|---|---|
+| 3172 | `sh -c 'PATH=…; linuxctl start --no-dsh'`（App 的 su 进程） | 活着，`rt_sigsuspend` |
+| 3175 | `sh /data/sunsetlinux/bin/linuxctl start --no-dsh` | 活着，`rt_sigsuspend` |
+| 3224 | `sh …/start.sh --layer-mode loop --no-dsh` | 活着，`rt_sigsuspend` |
+| 3455 | `sh …/start.sh --inner --make-private` | 活着，`rt_sigsuspend` |
+| 4624 | `/bin/bash /opt/sunsetlinux/entry.sh 3080 --no-dsh` | 活着，`do_wait` + 一个 `sleep` |
+
+`rt_sigsuspend` = shell 在**等子进程**；链底是 `entry.sh --no-dsh`，而它**按设计永不退出**
+（`while :; do sleep 1; done`，full 模式是 `exec supervise.sh`）。也就是说：
+**`start.sh` 起守护进程时用了前台调用，父 shell 只好一直等这个"永不退出的孩子"**，
+于是 `start.sh` → `linuxctl` → App 的 `su` 全不退，`busy` 永久为真，
+`if (_ui.value.busy) return` 把之后每一次点击**静默丢弃**（这就是"点了没反应"）。
+
+> 顺带钉住一条：**环境本身是好的** —— `run/ready` 在 4 秒时就已写出、`supervisor.pid=3455`、
+> 挂载树 13 项齐全。"环境好了、按钮却全灰"是这个 bug 的典型脸。
+
+**修法（两层，缺一不可）**：
+
+| 层 | 改法 |
+|---|---|
+| 设备侧 `runtime/root/start.sh` | 新增 `spawn_daemon()`：`( spawn_detached … >>"$DAEMON_LOG" 2>&1 </dev/null & )` —— 后台子 shell 让守护进程被 init 收养，父脚本立刻返回；`</dev/null` 还回继承来的 stdin（真机上那条 fd0 就是 App 的 su 管道）。同时**删掉 `--fork` 那一支探测**：它存在的唯一理由是"拿前台 spawn 的退出码猜 unshare 认不认这组选项"，正是祸根；现在按 `unshare_propagation` 探测二选一，成功判据只剩 `run/ready` |
+| App 侧 `ui/LauncherViewModel` + `core/ActionTarget.kt` | ① `busy` 改成 `finally` **无条件复位**（以前只在成功/失败分支复位，抛异常或协程取消就永久为真）；② 新增纯函数 `ActionTarget`：每次动作带一个目标状态（环境 running / 已停止 / DSH running / 已停止），**状态轮询一旦观测到它达成，就立刻解锁** —— 哪怕命令还在跑也不再锁死界面（解锁后按钮矩阵按设备真实状态重算，不会放出不该点的按钮） |
+
+#### 三、第二件事：让路的端口**没有落盘**（用户说的"没有写偏移"，成立）
+
+设备上 `127.0.0.1:3080` 是 **DSHA**（另一个环境）在 LISTEN（`/proc/net/tcp` 里
+`0100007F:0C08 st=0A uid=10497`），3081 空着。代码里"让路"是有的（`port_pick_free`），
+但**落盘时机错了**：`run/dsh.port` 只在 `parse_url_stream` 抓到带令牌 URL **之后**才写
+（`supervise.sh` 原第 201 行）。DSH 起得慢或起不来时 ⇒ 端口文件不存在 ⇒ App 与用户都看不到
+"偏移到 3081"这件事，界面表现成"什么都没有"。
+
+改法：`supervise.sh` **一启动就把请求端口写进 `run/dsh.port`**（URL 就绪后仍以 URL 里的实际端口覆盖；
+`shutdown`/正常退出路径照旧删除，不留过期值）。顺带把 `start.sh` 外层那句旧口气的 WARN
+（"dsh 可能自行换端口"）改成"环境会让路到空闲端口（实际端口看 run/dsh.port）"——
+第 43 轮记的那条文案欠债一并还掉。
+
+#### 四、回归（都能在容器里跑）
+
+| 门禁 | 结果 |
+|---|---|
+| `tools/shell-compat-check.mjs` 新增**前台 spawn 闸门** | 7 组"必须抓到 / 不许误报"样本 + 自检；**变异测试实测**：把调用退回前台写法 → 判红并指出 `start.sh:1528`；改回 → 绿 |
+| `runtime/root/selftest.sh` 新增**行为级**断言 | 从真实脚本抽出 `spawn_daemon`，配一个"永不退出的守护"计时：**必须在 5s 内返回**；另加一条**对照样本**证明"前台 spawn 确实会等"（否则这条断言可能是空转）。总计 **86 → 88/0** |
+| App 单测 | 新增 `ActionTargetTest`（7 条：每个目标正反两面 + 动作→目标映射穷举 + NONE 永不达成）；`busy` 的 `finally` 复位无法用 JVM 单测覆盖（AndroidViewModel），因此判定逻辑全部推给了纯函数 |
+
+**没做但值得知道的**：`run/dsh.port` 里现在写的端口，在 DSH 真的起来之前是"**请求值**"
+（可能是让路后的 3081）—— 这是有意的：让"让路"可见比"等到 URL 才敢写"更有用；
+真正的权威值仍是 URL 里的端口，URL 一到就覆盖。
+
 ### 3.10.41 修完推上去才暴露的阻塞：⑤ 的 Release 上传挂住 1 小时+ ⇒ 改走「本地打包 → 直送手机 Download」（2026-09-18）
 
 **现象**：`454ed75`（模块 1.0.32）推上 main 后按并发组排队，前面 `d7a2795`（App 0.3.11 / 模块 1.0.31）那次

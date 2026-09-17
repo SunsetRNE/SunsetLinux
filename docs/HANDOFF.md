@@ -992,3 +992,58 @@ cp /tmp/sl/sunsetlinux-module-1.0.32*.zip* /sdcard/Download/
    ——「WARN: 端口 X 已被占用；dsh 可能自行换端口，实际端口以 run/dsh.port 为准」，而现在的行为是
    **环境主动让路**（环境内 `port_pick_free` 直接挑空闲端口）。改成"环境会让路到空闲端口（实际端口看
    run/dsh.port）"即可；外层只报信息、不参与选端口，别让它和里面的判定各说一套。
+
+## 第 44 轮（2026-09-18 凌晨）：用户截图「点了启动环境，然后就没了，点不了启动 DSH」——根因是**命令永不返回**，不是按钮矩阵
+
+用户两条原话：**「点了启动环境，然后就没了，点不了启动 DSH」**、**「找到问题了，端口被占，没有写偏移」**。
+两条都成立，但**主因是前者**：命令卡住 ⇒ `busy` 永久为真 ⇒ 启动区全灰 + 点击被静默丢弃。
+完整归因与实证表见 `docs/STATUS.md` §3.10.42；这里只留"下一轮必须知道"的部分。
+
+### 1. 这一轮改了什么（模块 **1.0.33** / App **0.3.12**）
+
+| 文件 | 改动 |
+|---|---|
+| `runtime/root/start.sh` | 新增 `spawn_daemon()`：`( spawn_detached … >>"$DAEMON_LOG" 2>&1 </dev/null & )`；删掉 `--fork` 那一支探测与 `uc_ok` 退出码判定（前台 spawn 是祸根）；端口预检 WARN 改真口气 |
+| `runtime/root/supervise.sh` | 起 DSH 后**立刻**把请求端口写进 `run/dsh.port`（URL 就绪后以 URL 内端口覆盖；退出路径照旧删） |
+| `app/.../ui/LauncherViewModel.kt` | `busy` 改 `finally` 无条件复位；新增 `actionTarget`，`refresh()` 观测到状态到位即解锁 |
+| `app/.../core/ActionTarget.kt`（新） | 动作 → 目标状态的**纯函数**判据 + 穷举单测 `ActionTargetTest`（7 条） |
+| `tools/shell-compat-check.mjs` | 新增**前台 spawn 闸门** + 自检（7 组样本）；变异测试实测会红 |
+| `runtime/root/selftest.sh` | 新增行为断言：`spawn_daemon` 必须在 5s 内返回 + 一条"前台确实会等"的对照样本 |
+
+回归：`selftest.sh` **86 → 88/0**、`shell-compat-check.mjs` 绿（含变异测试）、App 单测 **264 → 271/0 × 2 变体**
+（新增 `ActionTargetTest` 7 条；跑法见下面第 3 条的 locale 坑）。
+
+### 2. 装完这个模块，验的顺序（**先验"能不能点"再验"起不起得来"**）
+
+1. 装 `/sdcard/Download/sunsetlinux-module-1.0.33*.zip` → **重启**（`bin/` 是开机同步到 `/data/sunsetlinux/bin` 的）；
+2. 开 App → 「分步启动 → 仅启动环境」：**环境起来之后几秒内五张卡片就该恢复可点**
+   （以前会一直灰到 App 进程被杀）。若仍是灰的：看 `ps -A | grep sh` 里那条
+   `linuxctl start --no-dsh` 链是否还活着 —— 活着说明本修复没生效，把 `/proc/<pid>/wchan` 发我；
+3. 点「启动 DSH」：3080（DSHA 占着）应让路到 **3081**，`run/dsh.port` 里立刻有值，
+   URL 出现后 App 的「打开 DSH」可点；
+4. `stop` 之后挂载与 loop 干净（第 43 轮那条一直没验完）。
+
+### 3. 本轮踩到的构建环境坑（**不是代码问题，但会挡住你**）
+
+`app/` 的单测任务在本容器里会以 `Internal compiler error` 失败，根因是 **locale 是 ASCII**：
+
+```
+$ java -XshowSettings:properties -version | grep sun.jnu
+    sun.jnu.encoding = ANSI_X3.4-1968
+```
+
+于是 Kotlin 写不出名字带中文的测试类文件（本仓测试函数名全是反引号中文）：
+
+```
+e: java.nio.file.InvalidPathException: Malformed input or input contains unmappable characters:
+   .../OfflineBundleTest$?????dist-bundles ???????????????$$inlined$sortedBy$1.class
+```
+
+修法（跑构建时带上即可，别改代码）：
+
+```bash
+cd app && LANG=C.UTF-8 LC_ALL=C.UTF-8 ./gradlew --offline :app:testRootFullDebugUnitTest
+```
+
+（`org.gradle.jvmargs` 里已经有 `-Dfile.encoding=UTF-8`，但 `sun.jnu.encoding` 是 JVM 启动时
+按 locale 定的，`-D` 覆盖不了 —— 所以必须给 `LANG`。下一轮可以把它写进 CI/构建脚本的注释里。）

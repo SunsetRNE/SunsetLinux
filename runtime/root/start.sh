@@ -180,6 +180,32 @@ spawn_detached() {  # spawn_detached <use_setsid> <cmd> [args...]
     fi
 }
 
+# 起守护进程：**后台子 shell + `</dev/null`**，父脚本立刻返回、绝不等它。
+#
+# ### 为什么必须后台（真机事故 · 2026-09-18 · 用户截图「点了启动环境，然后就没了，
+# ### 点不了启动 DSH」）
+#
+# 以前调用点是 `if spawn_detached "$use_setsid" …; then uc_ok=1; fi` —— **前台**执行，
+# 父 shell 必须等这条命令结束。而守护链的最后一段 `entry.sh` 是**按设计永不退出**的
+# （`--no-dsh` 是 `while :; do sleep 1; done`，full 模式是 `exec supervise.sh` 长住），
+# 于是整条链一起挂住：
+#
+#     start.sh（本脚本）不退 → `linuxctl start` 不退 → App 的
+#     `su -c '… linuxctl start --no-dsh'` 不退 → App 的 `busy` 一直是 true
+#     ⇒ 启动区五张卡片全置灰；「启动 DSH」点下去被 `if (_ui.value.busy) return` 丢弃。
+#
+# 设备实证（修复前现场）：那条链
+#     `sh -c(3172) → linuxctl(3175) → start.sh(3224) → start.sh --inner(3455) → entry.sh(4624)`
+# **20 分钟后仍全部停在 `rt_sigsuspend`**（= 在等子进程），而环境本身 4 秒时就已就绪
+# （`run/ready` 已写、`supervisor.pid` 已写）——"环境好了、按钮却全灰"就是这么来的。
+#
+# `( … & )` 让守护进程被 init 收养：父脚本不等它，App 的 su 会话结束也不影响环境
+# （"与 App 生命周期解耦"本来就是设计目标）。`</dev/null` 断开继承来的 stdin ——
+# 真机上那条 fd0 就是 App 的 su 管道，不还回去等于占着 App 的通道。
+spawn_daemon() {  # spawn_daemon <use_setsid> <cmd> [args...]
+    ( spawn_detached "$@" >>"$DAEMON_LOG" 2>&1 </dev/null & )
+}
+
 probe_get() {  # probe_get <key> [default]
     local v=""
     # `|| true`：读探测文件失败不能让整个 start.sh 退出（set -e + pipefail 下很容易踩）
@@ -1462,21 +1488,23 @@ main() {
     if [ "$LAYER_MODE" != "dir" ]; then
         [ -f "$LH/upper.img" ] || die "缺少可写层镜像 $LH/upper.img（先跑 linuxctl provision；或用 --layer-mode dir）"
     fi
-    # 端口占用提前查（doctor 也会查；这里失败要 fail fast）
+    # 端口占用提前查：**只报信息、不参与选端口**（选端口在内层，见下面的 entry.sh --port）。
+    #   ⚠️ 这里的口气必须是"环境会让路"，不能说成"dsh 可能自行换端口" —— 后者是旧行为，
+    #   现在由 `port_pick_free` 主动挑空闲端口，真实端口一定落在 run/dsh.port 里。
+    #   两边各说一套，用户就会照着错的去查端口。
     local port; port="$(config_port)"
     if port_busy "$port"; then
-        log "WARN: 端口 $port 已被占用；dsh 可能自行换端口，实际端口以 run/dsh.port 为准"
+        log "WARN: 端口 $port 已被占用 → 环境会让路到空闲端口（实际端口看 run/dsh.port）"
     fi
 
-    # 启动方式：setsid + unshare(-m -u) --fork，双 fork 脱离终端与生命周期
+    # 启动方式：setsid + unshare(-m -u) + 守护子进程。
     # （原来用数组装 launcher，改成布尔开关 + spawn_detached()，见该函数注释）
     local use_setsid=0
     if [ -x "$SETSID" ] && [ "$FOREGROUND" = "0" ]; then
         use_setsid=1
     fi
 
-    # 启动方式：setsid + unshare(-m -u) + 守护子进程。
-    # 选项语法按探测结果选择（toybox 可能不认 --propagation / --fork）。
+    # 选项语法按**探测结果**选择（toybox 可能不认 --propagation）。
     run_probes 0
     local prop
     prop="$(probe_get unshare_propagation no)"
@@ -1490,30 +1518,20 @@ main() {
     gather_android_facts
     log "启动守护进程：unshare -m -u（propagation=$prop, layer_mode=$LAYER_MODE）$SELF_DIR/start.sh --inner"
 
-    local uc_ok=0
+    # 起守护进程：**两选一**，按探测结果决定；成功与否只看下面的 wait_ready。
+    #
+    #   ★ 不再用 `--fork`：脱离子进程现在由 spawn_daemon 的后台子 shell 负责（见该函数
+    #     注释里的真机事故）。以前三种写法 + `uc_ok`（拿**前台** spawn 的退出码猜
+    #     "unshare 认不认这组选项"）—— 正是那个前台 spawn 把整条调用链卡死的。
     if [ "$prop" = "yes" ]; then
         # 首选：显式要求私有传播（一步到位，最干净）
-        if spawn_detached "$use_setsid" "$UNSHARE" -m -u --propagation private --fork \
-                "$SELF_DIR/start.sh" --inner >>"$DAEMON_LOG" 2>&1; then
-            uc_ok=1
-        fi
-    fi
-    if [ "$uc_ok" != "1" ] && [ "$prop" = "yes" ]; then
-        # --propagation 认了但 --fork 不认 → 去掉 --fork（用 setsid 兜底脱离）
-        log "提示：unshare --fork 可能不支持，改用不带 --fork 的形式"
-        if spawn_detached "$use_setsid" "$UNSHARE" -m -u --propagation private \
-                "$SELF_DIR/start.sh" --inner >>"$DAEMON_LOG" 2>&1; then
-            uc_ok=1
-        fi
-    fi
-    if [ "$uc_ok" != "1" ]; then
+        spawn_daemon "$use_setsid" "$UNSHARE" -m -u --propagation private \
+            "$SELF_DIR/start.sh" --inner
+    else
         # 退化：只 unshare -m -u，然后在**内层**自己把传播设为 private
         log "提示：unshare 不支持 --propagation，改为内层 make-rprivate"
-        if spawn_detached "$use_setsid" "$UNSHARE" -m -u "$SELF_DIR/start.sh" --inner --make-private >>"$DAEMON_LOG" 2>&1; then
-            uc_ok=1
-        fi
+        spawn_daemon "$use_setsid" "$UNSHARE" -m -u "$SELF_DIR/start.sh" --inner --make-private
     fi
-    [ "$uc_ok" = "1" ] || log "WARN: unshare 发起进程退出码非 0（继续等 ready 判定，真正结果以 ready 为准）"
 
     if wait_ready "${READY_WAIT:-45}"; then
         ns_pid="$(running_ns_pid)"

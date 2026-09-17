@@ -1175,6 +1175,62 @@ for _f in "$SELF_DIR/linuxctl.sh" "$SELF_DIR/stop.sh"; do
     fi
 done
 
+# ---------------------------------------------------------------------------
+# 守护进程必须**后台脱离**：父脚本不许等它
+#
+# 真机事故（2026-09-18）：`if spawn_detached …; then` 把守护进程**前台**起，
+# 而守护链最后的 entry.sh 按设计永不退出 ⇒ start.sh → linuxctl → App 的 su 全不退
+# ⇒ App 的 busy 永久为真、启动区五张卡片全灰（用户："点了启动环境，然后就没了，
+# 点不了启动 DSH"）。设备现场：那条链 20 分钟后仍全部停在 rt_sigsuspend。
+#
+# 这条断言**行为级**验证"父不等"：从真实脚本里抽取 spawn_detached/spawn_daemon
+# （不复制实现、也不 source 整个脚本 —— 那会执行它的主体），配一个"永不退出"的守护，
+# 计时；再配一个前台 spawn 的对照样本，证明这个计时确实能区分两种写法。
+# 静态闸门（变异测试）见 tools/shell-compat-check.mjs 的 foregroundSpawnSelfCheck。
+# ---------------------------------------------------------------------------
+head_ "守护进程脱离：父脚本不许等它"
+if [ -f "$SELF_DIR/start.sh" ]; then
+    _sp="$TMP/spawn-funcs.sh"
+    {
+        # 只抽两个函数；SETSID 给个真二进制，use=0 时用不到它
+        echo 'SETSID=/bin/true'
+        echo 'DAEMON_LOG=/dev/null'
+        sed -n '/^spawn_detached()/,/^}/p' "$SELF_DIR/start.sh"
+        sed -n '/^spawn_daemon()/,/^}/p'   "$SELF_DIR/start.sh"
+    } > "$_sp"
+    if [ -s "$_sp" ] && grep -q '^spawn_daemon()' "$_sp"; then
+        cat > "$TMP/spawn-bg.sh" <<EOF
+. '$_sp'
+spawn_daemon 0 /bin/sh -c 'sleep 20'
+EOF
+        _t0="$(date +%s)"
+        "$SH_BIN" "$TMP/spawn-bg.sh" >/dev/null 2>&1 || true
+        _dt=$(( $(date +%s) - _t0 ))
+        if [ "$_dt" -le 5 ]; then
+            ok "spawn_daemon 在 ${_dt}s 内返回（守护进程仍在后台跑）"
+        else
+            bad "spawn_daemon 等了 ${_dt}s —— 前台 spawn 又回来了：App 会永久 busy、启动区全灰"
+        fi
+        # 对照样本：前台调用必须**真的会等**，否则上面那条断言可能是"测不到东西"
+        cat > "$TMP/spawn-fg.sh" <<EOF
+. '$_sp'
+spawn_detached 0 /bin/sh -c 'sleep 3'
+EOF
+        _t0="$(date +%s)"
+        "$SH_BIN" "$TMP/spawn-fg.sh" >/dev/null 2>&1 || true
+        _dt2=$(( $(date +%s) - _t0 ))
+        if [ "$_dt2" -ge 2 ]; then
+            ok "对照样本：前台 spawn 确实在等（${_dt2}s）—— 计时能区分两种写法"
+        else
+            bad "对照样本没有体现出「前台会等」（${_dt2}s）：这条断言可能测不到东西"
+        fi
+    else
+        bad "没能从 start.sh 抽出 spawn_daemon/spawn_detached（函数改名了？闸门要跟着改）"
+    fi
+else
+    skip_ "找不到 $SELF_DIR/start.sh"
+fi
+
 printf '\n=========================================\n'
 printf '  通过 %d，失败 %d\n' "$pass" "$fail"
 printf '=========================================\n'

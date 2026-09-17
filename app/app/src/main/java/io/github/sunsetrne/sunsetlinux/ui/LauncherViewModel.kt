@@ -3,6 +3,7 @@ package io.github.sunsetrne.sunsetlinux.ui
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import io.github.sunsetrne.sunsetlinux.core.ActionTarget
 import io.github.sunsetrne.sunsetlinux.core.CtlResult
 import io.github.sunsetrne.sunsetlinux.core.Diagnoser
 import io.github.sunsetrne.sunsetlinux.core.DshRuntime
@@ -60,6 +61,12 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
         val status: DshStatus? = null,
         /** 正在执行 start/stop/restart/reset */
         val busy: Boolean = false,
+        /**
+         * 当前动作**要设备达成的状态**（[ActionTarget]）。`busy == true` 时有意义：
+         * 状态轮询一旦观测到它已达成，就立刻解锁启动区 —— 这条兜底路径存在的理由
+         * （一条永不返回的 `linuxctl start` 曾把整个启动区锁死）见 `core/ActionTarget.kt`。
+         */
+        val actionTarget: ActionTarget = ActionTarget.NONE,
         /** 一次性提示 */
         val message: String? = null,
         val updateCount: Int = 0,
@@ -214,6 +221,11 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
 
             _ui.update { prev ->
                 val stage = Diagnoser.stage(status, exists, su, mode)
+                // ★ 兜底解锁：命令还在跑（甚至卡住），但**设备状态已经到位** ⇒ 立刻解锁启动区。
+                //   理由与设备实证见 core/ActionTarget.kt 的注释（一条永不返回的
+                //   `linuxctl start` 曾让五张卡片永久置灰、「启动 DSH」点不动）。
+                //   解锁后按钮矩阵会按"设备现在真实的状态"重算，所以不会放出不该点的按钮。
+                val reachedTarget = prev.busy && prev.actionTarget.reached(status)
                 prev.copy(
                     loading = false,
                     mode = mode,
@@ -221,6 +233,8 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
                     suAvailable = su,
                     provisioned = exists,
                     status = status,
+                    busy = prev.busy && !reachedTarget,
+                    actionTarget = if (reachedTarget) ActionTarget.NONE else prev.actionTarget,
                     stage = stage,
                     hints = Diagnoser.hints(
                         status = status,
@@ -303,11 +317,11 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
 
     // ------------------------------------------------------------ 生命周期动作
 
-    fun start() = runAction("已提交启动请求") { it.start() }
+    fun start() = runAction("已提交启动请求", ActionTarget.ENV_RUNNING) { it.start() }
 
-    fun stop() = runAction("已提交停止请求") { it.stop() }
+    fun stop() = runAction("已提交停止请求", ActionTarget.ENV_STOPPED) { it.stop() }
 
-    fun restart() = runAction("已提交重启请求") { it.restart() }
+    fun restart() = runAction("已提交重启请求", ActionTarget.ENV_RUNNING) { it.restart() }
 
     // ── 拆开的启动路径（仅 Root 版）
     //
@@ -318,13 +332,13 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
     /** 只起环境、不起 DSH；起来之后终端就能用，DSH 由「启动 DSH」单独接。 */
     fun startEnvOnly() {
         if (!Edition.showsSplitStartUi) return
-        runAction("已提交「仅启动环境」请求（未启动 DSH）") { it.startEnvOnly() }
+        runAction("已提交「仅启动环境」请求（未启动 DSH）", ActionTarget.ENV_RUNNING) { it.startEnvOnly() }
     }
 
     /** 单独启动 DSH（环境必须已在运行）。 */
     fun dshStart() {
         if (!Edition.showsSplitStartUi) return
-        runAction("已提交「启动 DSH」请求") { it.dshStart() }
+        runAction("已提交「启动 DSH」请求", ActionTarget.DSH_RUNNING) { it.dshStart() }
     }
 
     /**
@@ -335,16 +349,32 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
      */
     fun dshStop() {
         if (!Edition.showsSplitStartUi) return
-        runAction("已提交「停止 DSH」请求（环境继续运行）") { it.dshStop() }
+        runAction("已提交「停止 DSH」请求（环境继续运行）", ActionTarget.DSH_STOPPED) { it.dshStop() }
     }
 
     /** 恢复出厂：清空可写层。破坏性操作，调用方必须先确认。 */
-    fun resetEnvironment() = runAction("已清空可写层（恢复出厂），请重新启动环境") { it.reset() }
+    fun resetEnvironment() =
+        runAction("已清空可写层（恢复出厂），请重新启动环境", ActionTarget.NONE) { it.reset() }
 
-    private fun runAction(pending: String, block: suspend (LinuxCtl) -> CtlResult) {
+    /**
+     * 跑一条生命周期命令。
+     *
+     * ## `busy` 的两条退出路径（**都必须有**，真机事故见 [ActionTarget] 的注释）
+     *
+     * 1. **命令返回**（正常路径）：`finally` 里无条件复位 —— 以前只在成功/失败分支复位，
+     *    一旦命令抛异常或协程被取消，`busy` 就永久为真，整个启动区跟着死掉；
+     * 2. **状态到位**（兜底路径）：状态轮询（4 秒一次）在 [refresh] 里看到设备已经达到
+     *    [target] 就立刻解锁。这样"一条慢命令/卡命令"不再能把界面锁死 —— 真机上那条
+     *    `linuxctl start` 永不返回时，用户看到的是"五张卡片全灰、点「启动 DSH」没反应"。
+     *
+     * 提前解锁是安全的：解锁后按矩阵重新算出来的按钮，恰好是"设备现在真实状态"下该亮的
+     * 那几个（[StartControls] 是纯函数，判定唯一）；而**设备侧**对重复/混用的 start
+     * 同样会拒绝（退出码 1 + 中文 last_error），不会因为提前解锁就把环境搞坏。
+     */
+    private fun runAction(pending: String, target: ActionTarget, block: suspend (LinuxCtl) -> CtlResult) {
         if (_ui.value.busy) return
         viewModelScope.launch {
-            _ui.update { it.copy(busy = true) }
+            _ui.update { it.copy(busy = true, actionTarget = target) }
             val app = getApplication<Application>()
             val ctl = LinuxCtl(app, _ui.value.mode)
             val result = try {
@@ -352,12 +382,12 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
                     ?: CtlResult.fail("操作超时（${ACTION_TIMEOUT_MS / 1000} 秒未返回），请查看日志区确认环境是否已启动")
             } catch (t: Throwable) {
                 CtlResult.fail(t.message ?: "操作失败")
+            } finally {
+                // ★ 无条件复位：成功、失败、超时、抛异常、协程取消，一个都不能漏
+                _ui.update { it.copy(busy = false, actionTarget = ActionTarget.NONE) }
             }
             _ui.update {
-                it.copy(
-                    busy = false,
-                    message = if (result.ok) pending else "操作失败：${result.message}",
-                )
+                it.copy(message = if (result.ok) pending else "操作失败：${result.message}")
             }
             delay(600)
             refresh()

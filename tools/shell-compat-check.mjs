@@ -340,6 +340,72 @@ function nsenterOptionScan(rel) {
 }
 
 /**
+ * **守护进程不许被前台 spawn**（`spawn_detached` 必须后台化）。
+ *
+ * 真机事故（2026-09-18，用户截图「点了启动环境，然后就没了，点不了启动 DSH」）：
+ * `start.sh` 里原来是 `if spawn_detached …; then uc_ok=1; fi` —— **前台**执行，
+ * 父 shell 必须等它结束；而守护链最后的 `entry.sh` **按设计永不退出**
+ * （`--no-dsh` 是 `while :; do sleep 1; done`，full 模式 `exec supervise.sh`）。
+ * 于是整条链一起挂住：start.sh 不退 → `linuxctl start` 不退 → App 的 su 命令不退 →
+ * App 的 `busy` 永久为真 ⇒ 启动区五张卡片全灰、「启动 DSH」的点击被静默丢弃。
+ * 设备实证：那条链 20 分钟后仍全部停在 `rt_sigsuspend`，而环境本身 4 秒就 ready 了。
+ *
+ * 判据：调 `spawn_detached` 的那条**逻辑行**（已合并 `\` 续行）必须以 `&` 或 `& )`
+ * 收尾，也就是"父不等它"。宽严取舍的样本见 FOREGROUND_SPAWN_FIXTURES。
+ */
+function foregroundSpawnInText(text) {
+  const hits = [];
+  for (const { line, text: whole } of logicalLines(text)) {
+    if (/^\s*#/.test(whole)) continue;                        // 整行注释
+    const code = whole.replace(/(^|\s)#.*$/, '');              // 行尾注释（本仓注释里到处提 spawn_detached）
+    if (!/\bspawn_detached\b/.test(code)) continue;
+    if (/spawn_detached\s*\(\s*\)/.test(code)) continue;       // 函数定义
+    if (/&\s*\)?\s*$/.test(code)) continue;                    // 已后台：( … & ) 或 … &
+    hits.push({
+      line,
+      text: whole.trim().slice(0, 160),
+      why: '守护进程被前台 spawn：父 shell 会一直等它，而 entry.sh 按设计永不退出 ⇒ ' +
+           '整条链（start.sh → linuxctl → App 的 su）永不返回，App 的 busy 永久为真、启动区全灰。' +
+           '改成 `( spawn_detached … >>"$DAEMON_LOG" 2>&1 </dev/null & )`（见 start.sh 的 spawn_daemon）。',
+    });
+  }
+  return hits;
+}
+
+function foregroundSpawnScan(rel) {
+  return foregroundSpawnInText(readFileSync(join(REPO, rel), 'utf8'));
+}
+
+/** 同上的闸门自检：不许假绿（本项目的老规矩：扫描器自己也得证明会红）。 */
+const FOREGROUND_SPAWN_FIXTURES = [
+  { bad: true, why: '修复前的原样（前台 spawn 放进 if 条件）',
+    text: 'if spawn_detached "$use_setsid" "$UNSHARE" -m -u "$SELF_DIR/start.sh" --inner --make-private >>"$DAEMON_LOG" 2>&1; then\n    uc_ok=1\nfi' },
+  { bad: true, why: '续行拆开的前台 spawn（逐行扫会漏）',
+    text: 'if spawn_detached "$use_setsid" "$UNSHARE" -m -u --propagation private \\\n        "$SELF_DIR/start.sh" --inner >>"$DAEMON_LOG" 2>&1; then' },
+  { bad: true, why: '裸前台调用（不与 if 搭配也要抓）',
+    text: 'spawn_detached 1 "$UNSHARE" -m -u "$SELF_DIR/start.sh" --inner' },
+  { bad: false, why: '修好后的形态：后台子 shell + 重定向 + & 收尾',
+    text: 'spawn_daemon() {\n    ( spawn_detached "$@" >>"$DAEMON_LOG" 2>&1 </dev/null & )\n}' },
+  { bad: false, why: '函数定义本身不是调用',
+    text: 'spawn_detached() {  # spawn_detached <use_setsid> <cmd> [args...]' },
+  { bad: false, why: '注释里提到 spawn_detached',
+    text: '# 以前这里是 `if spawn_detached …; then uc_ok=1; fi` —— 前台执行，父 shell 必须等' },
+  { bad: false, why: '直接用 & 后台（父也不等）',
+    text: 'spawn_detached 1 "$UNSHARE" -m -u "$SELF_DIR/start.sh" --inner >>"$DAEMON_LOG" 2>&1 &' },
+];
+
+function foregroundSpawnSelfCheck() {
+  const failed = [];
+  for (const f of FOREGROUND_SPAWN_FIXTURES) {
+    const got = foregroundSpawnInText(f.text).length > 0;
+    if (got !== f.bad) {
+      failed.push(`${f.bad ? '漏报' : '误报'}：${f.why} → ${JSON.stringify(f.text.slice(0, 80))}`);
+    }
+  }
+  return failed;
+}
+
+/**
  * **闸门自检**：闸门自己也得证明"它会红"。
  * 起因：这个 nsenter 扫描器第一版在真实代码上**一直是空转的**（`"$NSENTER"` 的收尾引号
  * 把 token 解析卡死），当轮变异测试全绿 —— 与 §六「能解析 ≠ 函数真的存在」同一类事故。
@@ -407,6 +473,10 @@ for (const dir of DEVICE_SIDE) {
           `${rel}:${h.line} nsenter 选项不被设备（toybox）接受：${h.text}\n       ${h.why}`,
         );
       }
+      // 守护进程必须后台化（前台 spawn ⇒ 调用链永不返回 ⇒ App 启动区全灰）
+      for (const h of foregroundSpawnScan(rel)) {
+        problems.push(`${rel}:${h.line} ${h.why}\n       ${h.text}`);
+      }
       if (VERBOSE) notations.push(`${rel} ✅ ${shellKind(rel)}`);
     }
   }
@@ -458,6 +528,9 @@ for (const rel of allDeviceFiles) {
 // （先跑这个：如果扫描器本身失效，"全部通过"是假绿 —— 2026-09-17 真发生过一次。）
 for (const f of nsenterSelfCheck()) {
   problems.push(`闸门自检失败（nsenter 选项面扫描器失效）：${f}`);
+}
+for (const f of foregroundSpawnSelfCheck()) {
+  problems.push(`闸门自检失败（前台 spawn 扫描器失效）：${f}`);
 }
 
 // ---- 输出 ------------------------------------------------------------------
