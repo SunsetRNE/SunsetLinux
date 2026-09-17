@@ -160,9 +160,13 @@ console.log(`\n== 模块安装脚本（${MKSHS.join(' ')}）==`);
   else bad(`${tag}：自启文案没给"只起环境"的路`);
   if (/modules_update/.test(out) && /重启后/.test(out)) ok(`${tag}：写明了生效时机（modules_update → 重启后生效）`);
   else bad(`${tag}：没写生效时机（用户会以为装完就生效）`);
-  // 挂载文案不许再把"不向系统分区放文件"说成"不挂载任何东西"（同一反馈的第二半）
-  if (/不向系统分区放/.test(out)) ok(`${tag}：挂载结论限定在"系统分区"`);
-  else bad(`${tag}：挂载结论又成了"不挂载任何系统路径"那种容易被误读的说法`);
+  // 挂载文案不许再把"不向系统分区放文件"说成"不挂载任何东西"（同一反馈的第二半）。
+  // ★ 只认**安装器自己**打印的行（把 detect-mount 报告的行滤掉）：报告走哪条分支取决于
+  //   这台机器能不能看到 /data/adb，CI 上就是"不适用"那条 —— 拿报告的行来断言会变成
+  //   "本地绿、CI 红"的假红（2026-09-17 CI 上真红过一次）。
+  const ownLines = out.split('\n').filter((l) => !/结论|是否需要挂载/.test(l)).join('\n');
+  if (/不向系统分区放文件/.test(ownLines)) ok(`${tag}：安装器自己把挂载结论限定在"系统分区"`);
+  else bad(`${tag}：安装器没自己说清"只是系统分区"（那句只在 detect-mount 报告里，分支一变就没了）`);
   if (/私有 mount namespace/.test(out)) ok(`${tag}：说明了环境自己的挂载在私有 ns 里`);
   else bad(`${tag}：没区分"系统分区挂载"与"环境自己的挂载"（用户就是这么误读的）`);
 
@@ -175,6 +179,13 @@ console.log(`\n== 模块安装脚本（${MKSHS.join(' ')}）==`);
   const shellName = existsSync(join(REPO, 'module/lib/detect-mount.sh'));
   if (shellName) ok('detect-mount.sh 在仓库里（安装时会装载它做挂载实现探测）');
   else bad('module/lib/detect-mount.sh 不存在，安装时探测会跳过');
+  // 报告自己的结论也改成了"不向系统分区放文件"（静态断言：这条文案在哪种机器上都会出现，
+  // 不像运行分支那样依赖 /data/adb 可不可见）
+  if (shellName && /不向系统分区放任何文件/.test(readFileSync(join(REPO, 'module/lib/detect-mount.sh'), 'utf8'))) {
+    ok('detect-mount.sh 的结论也说"不向系统分区放文件"（不再让人读成"不挂载任何东西"）');
+  } else if (shellName) {
+    bad('detect-mount.sh 的结论还是"不挂载任何系统路径"那种容易被误读的说法');
+  }
   if (/profiles\//.test(readFileSync(join(REPO, 'module/mkmodule.sh'), 'utf8'))) {
     ok('mkmodule.sh 会打包 profiles/（1.0.5 漏过，设备侧构建会退化成空壳）');
   } else {

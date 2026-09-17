@@ -190,9 +190,9 @@ if [ -f "$DETECT" ]; then
   if module_needs_mount; then
     ui_print "- 结论：module/ 下有 system/ 等目录，需要 metamodule 才能把系统路径覆盖上"
   else
-    ui_print "★ 上面那句「不挂载任何系统路径」说的是**系统分区**，别读成「这模块不挂载任何东西」："
-    ui_print "  · 本模块确实不向 /system、/vendor 等系统分区放文件 → 不需要 metamodule，"
-    ui_print "    也不会和 KernelSU / metamodule 的挂载实现冲突（纯脚本模块）；"
+    ui_print "★ 上面那句说的是**系统分区**，别读成「这模块不挂载任何东西」："
+    ui_print "  · 本模块不向系统分区放文件（/system、/vendor 等目录里都没有我们的东西）"
+    ui_print "    → 不需要 metamodule，也不会和 KernelSU / metamodule 的挂载实现冲突；"
     ui_print "  · 但环境自己要挂载：overlayfs + 三层 erofs 只读镜像 + 可写层 ext4(loop)，"
     ui_print "    全部在 linuxctl start 起的**私有 mount namespace** 里，挂载点在 $LINUX_HOME/… 下；"
     ui_print "  ⚠ 如果本机 toybox mount 不支持 --make-rprivate（unshare 也不支持 --propagation），"
