@@ -1022,8 +1022,13 @@ printf '%s\n' "$$" > "$_ES/run/supervisor.pid"
 : > "$_ES/run/ready"
 printf 'env-only\n' > "$_ES/run/env-mode"
 _es_ctl() { LINUX_HOME="$_ES" "$SH_BIN" "$SELF_DIR/linuxctl.sh" "$@"; }
+# ★ status 的**空白必须先去掉**再断言：CI 上装了 jq，`dsh_status_json` 走 jq 路径 →
+#   输出是**美化多行**的（`"state": "running"`，冒号后带空格）；本机没 jq 时是紧凑单行。
+#   照紧凑形式写 case，就会出现"本机全绿、CI 全红"的假红（2026-09-17 CI 上真红过一次，
+#   三条断言全挂）。去掉空白后两种形式都能匹配（我们只匹配没有空格的键值）。
+_es_json() { _es_ctl status 2>/dev/null | tr -d ' \n\t'; }
 if [ -r "/proc/$$/ns/mnt" ]; then
-    _es_j="$(_es_ctl status 2>/dev/null)"
+    _es_j="$(_es_json)"
     case "$_es_j" in
         *'"state":"running"'*) ok "status：环境在跑（state=running）" ;;
         *) bad "status 没把假环境判成 running：$_es_j" ;;

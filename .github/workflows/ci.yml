@@ -216,12 +216,32 @@ jobs:
       # 终端用的原生 PTY（src/main/cpp/pty.c）需要 NDK 来编：
       # 我们不走 AGP 的 externalNativeBuild（官方 NDK 只有 x86_64 宿主工具链，
       # 而 aarch64 环境上那个 clang 跑不了），由 tools/ndk-build-pty.sh 自己驱动。
-      - name: 安装 NDK（编译终端用的原生 PTY）
+      - name: 安装 NDK（编译终端用的原生 PTY；带重试）
         run: |
-          set -euo pipefail
+          set -uo pipefail
+          NDK_VER=26.1.10909125
+          DEST="$ANDROID_SDK_ROOT/ndk/$NDK_VER"
+          # 镜像里已经带了就直接用（多数 runner 镜像都预装了若干 NDK）
+          if [ -d "$DEST" ]; then
+            echo "NDK 已在镜像里：$DEST（跳过安装）"
+            exit 0
+          fi
           yes | sdkmanager --licenses >/dev/null 2>&1 || true
-          sdkmanager --install "ndk;26.1.10909125" >/dev/null
-          echo "NDK 就绪：$ANDROID_SDK_ROOT/ndk/26.1.10909125"
+          # ★ 为什么要重试（2026-09-17 CI 实测）：sdkmanager 报
+          #   `Error reading Zip content from a SeekableByteChannel` = 下载/解包拿到半截坏包。
+          #   这是 CDN 侧偶发，与提交内容无关，但会把整条门禁挡在编译之前。
+          #   重试前必须清掉半截产物：否则 sdkmanager 复用坏缓存、每次都报同一个错。
+          for i in 1 2 3; do
+            rm -rf "$DEST" "$ANDROID_SDK_ROOT/.downloadIntermediates" 2>/dev/null || true
+            if sdkmanager --install "ndk;$NDK_VER" >/dev/null 2>&1 && [ -d "$DEST" ]; then
+              echo "NDK 就绪：$DEST（第 $i 次尝试）"
+              exit 0
+            fi
+            echo "::warning::NDK 第 $i 次安装失败（多为 CDN 返回坏 zip），10s 后重试"
+            sleep 10
+          done
+          echo "::error::NDK $NDK_VER 三次都没装上：sdkmanager 下载/解包失败（不是本次代码的问题）"
+          exit 1
 
       - name: 准备签名密钥（有 Secret 用发布密钥，否则用仓库内固定调试密钥）
         env:
