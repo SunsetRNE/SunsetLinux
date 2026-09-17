@@ -129,6 +129,13 @@ console.log(`\n== 模块安装脚本（${MKSHS.join(' ')}）==`);
   if (bareSh.length === 0) ok(`${tag}：建议命令都用 /system/bin/sh（没有裸 sh）`);
   else bad(`${tag}：有裸 sh 建议命令：${bareSh[0].trim()}`);
 
+  // 自启/分离启动的文案在**首次部署**这条路上也要有（与"已有层"那条路同一份实情）：
+  //   用户看不到 autostart 开关与 start --no-dsh，就只能靠猜"开机到底起了什么"。
+  if (/autostart/.test(out)) ok(`${tag}：文案点明了 autostart 开关`);
+  else bad(`${tag}：没提 autostart（用户不知道开机到底会不会起、怎么关）`);
+  if (/--no-dsh/.test(out)) ok(`${tag}：文案给了"只起环境"的路（start --no-dsh）`);
+  else bad(`${tag}：没给"只起环境"的路`);
+
   rmSync(box.root, { recursive: true, force: true });
 }
 
@@ -143,6 +150,21 @@ console.log(`\n== 模块安装脚本（${MKSHS.join(' ')}）==`);
   if (/已检测到 DSH 层/.test(out)) ok(`${tag}：提示"开机自动启动"`); else bad(`${tag}：没检测到层`);
   if (!/device-provision\.sh --seeds/.test(out)) ok(`${tag}：不再念首次部署那一大段`);
   else bad(`${tag}：已有层却还在提示 provision`);
+
+  // ★ 自启文案必须说**实情**（用户 2026-09-17 反馈："开机自启相关的文案不对"）：
+  //   以前只有一句「开机将由 service.sh 自动启动」，既没说是"一键启动（环境 + DSH）"，
+  //   也没提 autostart 开关与"只起环境"那条路，更没说模块装在 modules_update 要重启才生效。
+  if (/autostart/.test(out)) ok(`${tag}：自启文案点明了 autostart 开关`);
+  else bad(`${tag}：自启文案没提 autostart（用户不知道开机到底会不会起、怎么关）`);
+  if (/--no-dsh/.test(out)) ok(`${tag}：自启文案给了"只起环境"的路（start --no-dsh）`);
+  else bad(`${tag}：自启文案没给"只起环境"的路`);
+  if (/modules_update/.test(out) && /重启后/.test(out)) ok(`${tag}：写明了生效时机（modules_update → 重启后生效）`);
+  else bad(`${tag}：没写生效时机（用户会以为装完就生效）`);
+  // 挂载文案不许再把"不向系统分区放文件"说成"不挂载任何东西"（同一反馈的第二半）
+  if (/不向系统分区放/.test(out)) ok(`${tag}：挂载结论限定在"系统分区"`);
+  else bad(`${tag}：挂载结论又成了"不挂载任何系统路径"那种容易被误读的说法`);
+  if (/私有 mount namespace/.test(out)) ok(`${tag}：说明了环境自己的挂载在私有 ns 里`);
+  else bad(`${tag}：没区分"系统分区挂载"与"环境自己的挂载"（用户就是这么误读的）`);
 
   rmSync(box.root, { recursive: true, force: true });
 }

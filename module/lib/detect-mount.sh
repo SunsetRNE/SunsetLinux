@@ -213,7 +213,7 @@ detect_mount_json() {
     if [ "$needs" = "null" ]; then
         concl="无法判定本模块是否需要挂载（不知道模块根在哪）：请显式指定 MODULE_ROOT=<模块目录> 后重试"
     elif [ "$needs" = "false" ]; then
-        concl="本模块不挂载任何系统路径，无需 metamodule 支持；KernelSU 的挂载实现变动不影响它"
+        concl="本模块不向系统分区放任何文件（module/ 下无 system/ 等目录），无需 metamodule 支持；KernelSU 的挂载实现变动不影响它"
     else
         if [ "$impl" = "kernelsu" ] && [ "$mm_present" = "no" ] && [ -z "$mm_ids" ]; then
             concl="本模块需要挂载系统路径，但当前 KernelSU 没有任何 metamodule：请先安装一个 metamodule 实现"
@@ -268,9 +268,11 @@ detect_mount_report() {
         fi
     else
         printf '本模块是否需要挂载: 否\n'
-        printf '结论            : 本模块**不挂载任何系统路径**（module/ 下没有 system/、vendor/ 等目录），\n'
+        printf '结论            : 本模块**不向系统分区放任何文件**（module/ 下没有 system/、vendor/ 等目录），\n'
         printf '                  是纯脚本模块，**无需 metamodule 支持**。KernelSU 删掉自带挂载实现\n'
         printf '                  这件事对本模块没有影响。\n'
+        printf '                  （只说系统分区这一件事；环境自己的 overlay/erofs/loop 挂载在\n'
+        printf '                    linuxctl start 的私有 mount ns 里，见 linuxctl doctor §1d。）\n'
         if [ "$impl" = "kernelsu" ] && [ "$mm_present" = "no" ]; then
             printf '提醒            : 当前 KernelSU 环境中没有检测到 metamodule。若你以后要装**需要挂载**的\n'
             printf '                  模块（很多社区模块是自动挂载型），需要先装一个 metamodule；\n'

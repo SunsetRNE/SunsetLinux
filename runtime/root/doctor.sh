@@ -440,7 +440,8 @@ else
                 if [ "$nd" = "true" ]; then nd_zh="是"; else nd_zh="否"; fi
                 printf '  %-22s %s\n' "本模块是否需要挂载" "${nd_zh}"
                 if [ "$nd" = "false" ]; then
-                    ok "本模块是纯脚本模块，**不挂载任何系统路径，无需 metamodule 支持**（不受 KernelSU 删除自带挂载实现的影响）"
+                    ok "本模块是纯脚本模块：**不向系统分区放任何文件**，无需 metamodule 支持（不受 KernelSU 删除自带挂载实现的影响）"
+                    info "  这句只说系统分区：环境自己的 overlay/erofs/loop 挂载在私有 mount ns 里，见 §1d"
                     add_finding ok detect_mount "kernelsu=${ri:-?} metamodule=${mn:-none} needs_mount=false"
                     if [ "$ri" = "kernelsu" ] && [ "$mp" = "no" ] && [ -z "$mn" ]; then
                         info "提醒：当前 KernelSU 没有 metamodule。以后若要装**需要挂载**的社区模块，需先装一个；"

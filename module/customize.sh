@@ -88,7 +88,7 @@ if [ -f "$MODDIR/dsh/manifest.json" ]; then
   if [ -f "$_CTL" ]; then
     _OUT="$(LINUX_HOME="$LINUX_HOME" /system/bin/sh "$_CTL" dsh builtin --module-dir "$MODDIR" 2>&1)"
     case "$_OUT" in
-      *'"ok":true'*) ui_print "  内置 DSH 已就位（重启后开机自建 base/runtime 时直接用它）" ;;
+      *'"ok":true'*) ui_print "  内置 DSH 已就位：这一版已在 $LINUX_HOME/layers/（本步幂等：已有就不重复解压）" ;;
       *) ui_print "! 内置 DSH 没展开成功（原因见下）——可在 root 终端重试同样这条命令" ;;
     esac
     printf '%s\n' "$_OUT" | while IFS= read -r _line; do
@@ -146,12 +146,22 @@ if [ "$DSH_PRESENT" = "0" ]; then
   ui_print " 部署完成后（也可以只看 App 的状态卡）："
   ui_print "   /system/bin/sh $LINUX_HOME/bin/linuxctl.sh status    # 看 JSON 状态"
   ui_print "   /system/bin/sh $LINUX_HOME/bin/linuxctl.sh start     # 手动启动（开机也会自动启）"
+  ui_print " 开机自启的开关：$LINUX_HOME/etc/config.json 的 autostart（false = 不自动启动）"
+  ui_print " 只把环境起来、不起 DSH：/system/bin/sh $LINUX_HOME/bin/linuxctl.sh start --no-dsh"
+  ui_print "  （之后用 linuxctl dsh start / dsh stop 单独控制 DSH；App 首页也有同样几个按钮）"
   ui_print ""
   [ -n "$VER" ] && ui_print " 本次安装的模块版本：$VER"
   ui_print ""
 else
-  ui_print "- 已检测到 DSH 层，开机将由 service.sh 自动启动"
+  ui_print "- 已检测到 DSH 层（$LINUX_HOME/layers/）。开机自启由模块 service.sh 负责，实情是："
+  ui_print "  · 它在 late_start 调 linuxctl start = **一键启动**（环境 + DSH）；"
+  ui_print "  · 开关在 $LINUX_HOME/etc/config.json 的 autostart（false = 开机不自动启动）；"
+  ui_print "  · 只想把环境起来、不起 DSH：/system/bin/sh $LINUX_HOME/bin/linuxctl.sh start --no-dsh"
+  ui_print "    之后用 linuxctl dsh start / dsh stop 单独控制 DSH（App 首页也有同样几个按钮）。"
 fi
+ui_print ""
+ui_print "- 生效时机：本次安装落在 /data/adb/modules_update/sunsetlinux，**重启后**才迁到"
+ui_print "  /data/adb/modules/sunsetlinux 生效（确认：看后者 module.prop 里的 version）"
 
 # --- 4) 挂载实现探测（用户明确要求：刷写流程里做自动挂载检测） ----------------
 # 背景：KernelSU 某版本起**删掉了自带的模块挂载实现**，完全交给第三方 metamodule
@@ -178,12 +188,16 @@ if [ -f "$DETECT" ]; then
   fi
   ui_print ""
   if module_needs_mount; then
-    ui_print "- 结论：本模块需要挂载系统路径（module/ 下有 system/ 等目录）"
+    ui_print "- 结论：module/ 下有 system/ 等目录，需要 metamodule 才能把系统路径覆盖上"
   else
-    ui_print "★ 本模块不挂载任何系统路径，无需 metamodule 支持。"
-    ui_print "  （module/ 下没有 system/、system_ext/、vendor/、product/、odm/，"
-    ui_print "    只有脚本与 webroot/，因此 KernelSU 删除自带挂载实现这件事"
-    ui_print "    对本模块没有影响，也不会和任何 metamodule 冲突。）"
+    ui_print "★ 上面那句「不挂载任何系统路径」说的是**系统分区**，别读成「这模块不挂载任何东西」："
+    ui_print "  · 本模块确实不向 /system、/vendor 等系统分区放文件 → 不需要 metamodule，"
+    ui_print "    也不会和 KernelSU / metamodule 的挂载实现冲突（纯脚本模块）；"
+    ui_print "  · 但环境自己要挂载：overlayfs + 三层 erofs 只读镜像 + 可写层 ext4(loop)，"
+    ui_print "    全部在 linuxctl start 起的**私有 mount namespace** 里，挂载点在 $LINUX_HOME/… 下；"
+    ui_print "  ⚠ 如果本机 toybox mount 不支持 --make-rprivate（unshare 也不支持 --propagation），"
+    ui_print "    这些挂在私有 ns 里的东西会出现在**全局**挂载表里（只是看得见，不覆盖系统分区）——"
+    ui_print "    linuxctl doctor 的 §1d 会把它们一条条列出来。"
   fi
 else
   ui_print "  警告：找不到 $DETECT，跳过挂载实现探测"
@@ -193,7 +207,7 @@ fi
 ui_print ""
 ui_print "- 建议把 SunsetLinux 加入「墓碑调度/冻结类」模块的豁免名单（若你装了这类模块），"
 ui_print "  以及系统电池优化白名单，否则 App 侧状态卡与 WebView 会被冻住。"
-ui_print "  环境本体（node 进程）由本模块在 late_start 启动，不依附 App。"
+ui_print "  环境本体（node 进程）由本模块在 late_start 启动（默认一键启动：环境 + DSH），不依附 App。"
 
 set_perm_recursive "$MODDIR" 0 0 0755 0644 2>/dev/null || true
 set_perm_recursive "$MODDIR/bin" 0 0 0755 0755 2>/dev/null || true
