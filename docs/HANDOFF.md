@@ -1234,3 +1234,44 @@ service.sh ──────── 先起 sunsetd（dex + app_process），再�
 - **CI 保守重发**：站点 `index.json` 取不到时会重发整轮（1.3 GB）并改写同 tag 的字节。
   现在先退 `releases/latest/download/index.json`。
 
+## 第 48 轮（2026-09-18 05:xx）：**收束** —— P1 收尾 + 决策记录 + 修 CI 不变式
+
+用户要求："开始收束，把所有相关决策记录文档，准备更换对话框。"
+
+### 0. 换对话框后从这里开始读
+
+1. **决策记录**：`docs/decisions-core-v2.md`（产品级 D1–D5 / 架构级 A1–A9 / 实现级 B1–B9 / CI C1–C2 /
+   被否决选项 / 开放问题）—— 这是"为什么这么做"的单一事实源；
+2. **设计边界**：`docs/core-v2-design.md`（§6 已定案、§8 P1 工作项与完成判据）；
+3. **进度与证据**：`docs/STATUS.md` §3.10.45–§3.10.47；
+4. **真机验证清单**：`/sdcard/Download/本轮交付说明-模块1.0.36-内核P1验证.md`（六条）。
+
+### 1. P1 现在的状态
+
+| 项 | 状态 |
+|---|---|
+| P1-a 状态模型 + 契约 JSON + 单测 | ✅ 内核单测 34/0 |
+| P1-b 控制 socket + `state.json` + 心跳/看护 | ✅ |
+| P1-c 相位驱动（驱动现有脚本 + 观察 v1 标记） | ✅ |
+| P1-d `status` 以内核为准（v1 键不变 + 降级） | ✅ `selftest` 116/0；`contract-check` 认 `kernel` 为允许的附加键 |
+| P1-e dex 进模块 + `service.sh` 起内核 | ✅ 代码与打包都通；**真机 SELinux 域未验证**（唯一风险点，失败按 v1） |
+| P1-f 回归/CI 接线 | ✅ `:sunsetd:test` 进 CI；模块包"有 dex 必进包 / 没给要出声"；入口类名闸门 |
+| "在不在跑"删到只剩一份 | 🟡 `linuxctl`（以内核为准）与 `start.sh`（本轮）都改了；**App 那份是"读契约"，不算重复实现**；剩 `start.lock` 作为内核不在时的兜底 |
+
+### 2. 本轮改动
+
+- `runtime/common/kernel-state.sh`（新）：内核状态的**唯一读取实现**，`linuxctl` 与 `start.sh` 共用。
+- `start.sh`：幂等判断加"内核说 running ⇒ 直接返回"。
+- `module/mkmodule.sh`：`BIN_COMMON` 加 `kernel-state.sh`（打包闸门会盯着）。
+- `.github/workflows/pipeline.yml`：prep 加不变式"要编 APK 且要内嵌离线包 ⇒ 强制重打离线包"
+  （**回读 `$GITHUB_OUTPUT`**，别在同一步引用自己的 outputs）。
+- `module/module.prop` → **1.0.37**；交付 `/sdcard/Download/sunsetlinux-module-1.0.37.zip`。
+
+### 3. 下一轮第一件事
+
+1. **收真机验证结果**（六条清单）。若 `sunsetd.log` 有"控制面已就绪"而 `state.json` 的
+   `owner=foreign-observer` ⇒ P1 主线完成，可以进 P2；
+   若是"SELinux 域/ART 问题" ⇒ 先解决启动方式（退路：App 进程内起内核）。
+2. 之后按 `docs/decisions-core-v2.md` §六的开放问题推进（`start.lock` 去留、App 何时切 socket、
+   免 root 前台服务、P3 的挂载表数据化）。
+

@@ -196,6 +196,26 @@ jobs:
             --force-publish "${{ inputs.force_publish || 'false' }}" \
             --github-output
 
+          # ★ 不变式：**要编 APK、且 APK 要内嵌离线包 ⇒ 离线包必须产出**。
+          #   为什么：编译节点是否去取 `offline-bundles` 制品看的是 `embed_bundles`（默认 true），
+          #   而 ② 是否产出它看的是变更集的 `build_bundles`（"没改离线包输入就不重打" 的优化）。
+          #   两者不一致时，编译节点会去下载一个**不存在的制品** ⇒ 六个节点全红
+          #   （2026-09-18 实跑踩到：只改了 app/内核与模块脚本 ⇒ build_bundles=false、embed=true）。
+          #   更坏的情况是"跳过去包、发出不带环境的 APK"（0.2.6 事故）。所以这里强制打一次：
+          #   代价约 40 秒，比发错包或整轮红都便宜。
+          #   注：`build_bundles` 只影响"要不要重打"，不影响"要不要发布"。
+          #   ⚠️ 这里**回读 `$GITHUB_OUTPUT`**，不用 `${{ steps.plan.outputs.* }}`：
+          #   本条就在 plan 这一步里，GitHub 要等这一步结束才设置它自己的 outputs ⇒
+          #   在同一步里引用自己的 outputs 会拿到空串，条件永远为假（那样这层保险就是摆设）。
+          _out_get() { grep "^$1=" "$GITHUB_OUTPUT" 2>/dev/null | tail -n1 | cut -d= -f2-; }
+          _apks="$(_out_get build_apks)"
+          _embed="$(_out_get embed_bundles)"
+          _bundles="$(_out_get build_bundles)"
+          if [ "$_apks" = "true" ] && [ "$_embed" = "true" ] && [ "$_bundles" != "true" ]; then
+            echo "::notice::本次要编 APK 且要内嵌离线包 ⇒ 强制重打离线包（避免取不到制品 / 发出不带环境的包）"
+            echo "build_bundles=true" >> "$GITHUB_OUTPUT"
+          fi
+
           {
             echo ""
             echo "### 变更集判定"

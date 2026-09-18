@@ -1435,6 +1435,26 @@ fi
 #   ① 内核在线时，即使 v1 标记说"running"，status 也照内核的 phase 说（唯一状态源）；
 #   ② 心跳过期时**绝不拿过期状态冒充** —— 退回 v1 标记判据。
 # ---------------------------------------------------------------------------
+head_ "内核 v2：start 的幂等判断也以内核为准（第五份"在不在跑"删掉）"
+# 为什么单开一组：`start.sh` 原来自己用 running_ns_pid 判"在不在跑"，那是同一件事的
+# 第 N 份实现（今晚第 3 条事故：它判成"没在跑"⇒ 又建一棵树）。现在内核在线时以内核为准。
+_KI="$TMP/kernelidem"
+mkdir -p "$_KI/run" "$_KI/etc" "$_KI/layers"
+_now2="$(date +%s)"
+printf '%s000\n' "$_now2" > "$_KI/run/heartbeat"
+printf '%s\n' '{"schema":1,"generation":5,"phase":"running","since":1,"busy":false,"up":true,"backend":"chroot","envMode":"full","port":3081,"pid":4190,"jobId":null,"owner":"foreign-observer","lastError":null}' > "$_KI/run/state.json"
+_ki_out="$(LINUX_HOME="$_KI" "$SH_BIN" "$SELF_DIR/start.sh" 2>&1 || true)"
+case "$_ki_out" in
+    *"环境已在运行（内核"*) ok "内核说 running ⇒ start 直接返回，不重复启动" ;;
+    *) bad "start 没有按内核的 running 短路：$(printf '%s' "$_ki_out" | tail -n2)" ;;
+esac
+# 心跳过期 ⇒ 不许拿过期状态冒充：此时没有 v1 标记（没 ready/没 supervisor）⇒ 会继续走启动流程
+printf '%s000\n' "$(( _now2 - 600 ))" > "$_KI/run/heartbeat"
+case "$(cat "$_KI/run/state.json")" in
+    *'"phase":"running"'*) ok "（夹带断言）假内核状态确实是 running" ;;
+    *) bad "夹具坏了" ;;
+esac
+
 head_ "内核 v2：status 相位以内核为准（v1 键不变 + 心跳过期退回）"
 # 说明：**内核压过 v1** 那几条不依赖 /proc/<pid>/ns/mnt 可读（proot 沙箱里读不到），
 # 所以放在守卫外面 —— 本机也跑得到；只有"退回 v1 判据"那两条需要 v1 真的能判 running。

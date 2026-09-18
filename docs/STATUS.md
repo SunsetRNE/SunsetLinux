@@ -503,6 +503,29 @@ su -c '/data/sunsetlinux/bin/linuxctl doctor'
 | 已装状态读不到时 | —— | **不给刷入按钮**，先让用户修 root 授权（与"读不到 ≠ 没装"一致） |
 | 重启 | —— | 只报告"重启后生效"（KernelSU 落 `modules_update/`），**App 不替用户重启**，脚本里有单测断言不许出现 `reboot` |
 
+### 3.10.47 收束（P1 收尾 + 把"在不在跑"的第 N 份实现删掉 + 修 CI 不变式）
+
+**一、`start.sh` 的幂等判断也改成"内核在线时以内核为准"**（本轮删掉的又一份实现）：
+
+- 内核状态读取抽成 **`runtime/common/kernel-state.sh`**（`linuxctl` 与 `start.sh` **共用一份** ——
+  这正是要治的病：v1 里同一件事四五处各自推导）。打包清单 `BIN_COMMON` 同步加了它
+  （上一轮新加的"common 脚本必须全部进包"闸门自动盯着这件事）。
+- `start.sh` 在 `running_ns_pid` 之前先问内核：内核说 `running` ⇒ 直接 `exit 0`（不重复启动）；
+  心跳过期/内核不在 ⇒ 照旧走 v1 判据。
+- 回归：`selftest.sh` **114 → 116/0**（bash 与 mksh）：新增"内核说 running ⇒ start 直接返回"。
+
+**二、修 CI 的一处不变式（这轮实跑踩到，六个编译节点全红）**：
+
+| 现象 | 根因 | 修法 |
+|---|---|---|
+| `③ 编译 *` 六个节点全红在"取回内嵌离线包（bundles）"，而 `② 内嵌离线包` 被跳过 | 编译节点是否去取 `offline-bundles` 制品看 `embed_bundles`（默认 true），而 ② 是否产出它看变更集的 `build_bundles`（"没改离线包输入就不重打"的优化）。**两者不一致** ⇒ 去下载一个不存在的制品 | prep 里加不变式：**要编 APK 且要内嵌离线包 ⇒ 强制 `build_bundles=true`**。代价约 40 秒，比整轮红或"发出不带环境的 APK"（0.2.6 事故）都便宜。注意这里**回读 `$GITHUB_OUTPUT`**，不用 `steps.<当前步>.outputs`（同一步读自己的 outputs 是空串，条件永远为假 —— 第一版就是这么写的） |
+
+**三、决策记录成文件**：新增 **`docs/decisions-core-v2.md`** —— 产品级（D1–D5，含 D1 的复核过程）、
+架构级（A1–A9）、实现级（B1–B9）、CI 侧（C1–C2）、被否决选项、留给下一轮的开放问题。
+
+**四、本轮交付**：`/sdcard/Download/sunsetlinux-module-1.0.37.zip`（50,875,146 B，含 `bin/sunsetd.dex`）。
+**App 不用换**（v1 契约兼容）。
+
 ### 3.10.46 内核 v2 · P1 后半：`status` 的相位以内核为准（模块 1.0.36）+ 修 CI 的保守重发兜底
 
 #### 一、`linuxctl status` 变成瘦客户端（App 无感）

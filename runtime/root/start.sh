@@ -1594,6 +1594,16 @@ main() {
     fi
 
     # ---- 默认：幂等启动 ----------------------------------------------------
+    # ★ 内核 v2 在线 ⇒ "在不在跑"**以它为准**（唯一状态源），不再拿 v1 标记去猜。
+    #   这是 P1 收尾的一部分：v1 里同一件事有四五处各自推导，今晚第 2、3 条事故就是这么来的。
+    #   内核不在/心跳过期 ⇒ `kernel_phase_v1` 返非 0，照旧走下面的 v1 判据（兼容降级）。
+    local kphase=""
+    if kphase="$(kernel_phase_v1 2>/dev/null)"; then
+        if [ "$kphase" = "running" ]; then
+            log "环境已在运行（内核 state.json 说 running；世代/作业见同文件），无需重复启动"
+            exit 0
+        fi
+    fi
     local ns_pid=""
     if ns_pid="$(running_ns_pid)"; then
         if [ -f "$READY_FILE" ]; then
@@ -1740,6 +1750,11 @@ if [ -n "$_PORT_PROBE" ]; then
     for _hr in "$SELF_DIR/common/host-residue.sh" "$SELF_DIR/../common/host-residue.sh" \
                "$SELF_DIR/../../runtime/common/host-residue.sh"; do
         [ -f "$_hr" ] && { SUNSETLINUX_SOURCED=1 . "$_hr"; break; }
+    done
+    # 内核 v2 的状态读取（与 linuxctl 共用一份；见 runtime/common/kernel-state.sh）
+    for _ks in "$SELF_DIR/common/kernel-state.sh" "$SELF_DIR/../common/kernel-state.sh" \
+               "$SELF_DIR/../../runtime/common/kernel-state.sh"; do
+        [ -f "$_ks" ] && { SUNSETLINUX_SOURCED=1 . "$_ks"; break; }
     done
 else
     die "缺 port-probe.sh（应与 start.sh 同目录的 common/ 或 ../common/）：端口占用判定无法进行"
