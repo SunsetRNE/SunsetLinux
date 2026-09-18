@@ -568,7 +568,18 @@ su -c '/data/sunsetlinux/bin/linuxctl doctor'
 2. **可观测**：更新页「频道检查」卡多一行 `验签实现：…`（实际用的是哪一层），真机再出问题一眼定性。
 3. **不许再说"已是最新"**：新增纯函数 `channelsAllFailed()` / `channelNotice()`（四种形状都钉了单测）—— 检查全挂时说「频道检查失败：N 个频道都没能给出可用清单 —— 这不代表已是最新」，部分失败时说明"结论可能不完整"；首页「更新」磁贴同步显示「检查失败」；诊断页新增一条"更新信息不可用"的提示。
 
-#### ⑤ 自测与闸门
+#### ⑤ 发布核验（run 61）
+
+| 项 | 结果 |
+|---|---|
+| 流水线 | run 61（`a840a0e`）**全绿**；`releases/latest` = **v0.3.19** |
+| Release 资产 | 16 个：6 APK（root/proot × minimal/base/full）+ 6 个离线包 + 模块 **1.0.43** full/bare |
+| **修复真的在产物里** | `SunsetLinux-0.3.19-root-minimal-debug.apk`（13,977,102 B，sha256 `45dec214…`、`versionCode=35`、`versionName=0.3.19-20260919-0145-a840a0e`）的 dex 里：公开测试向量 **2** 次、`内置 Ed25519` **1** 次、`验签实现` **4** 次、`不代表已是最新` **3** 次、`AndroidOpenSSL`/`解公钥(` 各 **1** 次（判据脚本 `/root/Q/verify-0319-apk.sh`） |
+| 判据不是摆设（反面样本） | 同一组判据跑本地 `0.3.0` 的旧 APK ⇒ 新特征**全部 ✗**（只有 0.2.5 起就有的那句 ✓） |
+| 线上数据与夹具 | 线上下载的 `channel.json`（2274 B）与 `channel.json.sig`（89 B）与 `testdata/channel/` **逐字节一致**；node 独立验签 `true` |
+| 装得下来 | 清单里 `runtime 1.0.1` 的 `url_gz` 回退产物在（78,570,744 B，HEAD 200）⇒ 本机没有 zstd 也能装 |
+
+#### ⑥ 自测与闸门
 
 - App 单测 **278 → 297 通过 / 0 失败**：`Ed25519Test` **8** 条（RFC 8032 §7.1 官方向量 4 条 + 改消息/改签名/换公钥/S≥L/长度/非规范编码**全拒** + 真实清单 + 性能）、`ChannelSignatureTest` +4（坏 provider 跳过、平台全挂退内置、失败理由、自证可用）、`UpdateNoticeTest` **6**、`DiagnoserTest` +1。
 - **变异验证**：把 `Ed25519.verify` 的判据改成"永远返回 true"（最危险的缺陷方向）⇒ 相关用例如期判红，改回即绿。
