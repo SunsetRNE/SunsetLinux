@@ -1973,3 +1973,68 @@ loop52 指向 `dsh-0.1.6-alpha.2.erofs`，挂载层版本 `0.1.6-alpha.2`。
 | 设备 | 模块 1.0.42 → 正在刷 **1.0.43**；App 0.3.17 → 可装 **0.3.18**；**无障碍已开**；`etc/channels.json` 已由 App 同步写入（300 B，00:31） |
 | 发布 | `releases/latest` = **v0.3.18**（6 APK + 6 离线包 + 模块 1.0.43 full/bare）；频道未变（base 24.04.3-l1 / runtime 1.0.1 / dsh 0.1.6-alpha.2） |
 | 本轮新工具 | `/root/Q/sl-ui.sh`（App 界面操作，自动确认前台）、`/root/Q/verify-module-zip.mjs`（HTTP range 抽查 zip 内容）、`/root/Q/cmp-crosscheck.sh`（shell↔JS 版本比较对拍） |
+
+---
+
+# ★★ 第 54 轮（2026-09-19 01:xx）：真机核验 v0.3.18 落地 + 找到「用户自己更新不了」的根因（App 0.3.19）
+
+**用户原话**：「继续，已更新相应 APK 和 root 模块，继续推进」。两件事都做完了，而且顺手挖出了本轮最重的一条。
+
+## 1. 交接单里「第一件事」：内置切换**生效** ✓
+
+| 事项 | 证据 |
+|---|---|
+| 模块 1.0.43 已装 | `module.prop` = `1.0.43 / 10043`；生效的 `$LINUX_HOME/bin/linuxctl.sh` 里 `dsh_ver_cmp` ×4 |
+| **切换发生在刷模块那一刻**（00:41:32） | `etc/state.json` mtime = 00:41:32；`customize.sh` 用的是**模块自带**的 `$MODDIR/bin/linuxctl.sh`（= 新代码）⇒ 规则③当场把 `state.json` 从 `0.1.5-rc.2` 改指 `0.1.6-alpha.2` |
+| 00:43:36 开机没再动 | `service.log` 有新代码路径「载荷已在盘上 → 同步跑完再自启」，随后 `启用更新=false`（= 无需再动） |
+| 生效层 = 0.1.6 | `loop52 → dsh-0.1.6-alpha.2.erofs`；挂载层 `package.json` = `0.1.6-alpha.2` |
+| 环境/DSH 健康 | `run/state.json`：`running / up=true / chroot / full`；`dsh.pid=5395`；HTTP 200；App 首页「DSH 版本 0.1.6-alpha.2、Web 健康 正常」 |
+
+## 2. 交接单里「第二件事」：WebView（0.1.6）**渲染正常** ✓
+
+截图里是完整的 DSH 界面（探索未至之境 / 预览版 / 创造模式 / 对话输入 / 侧边栏），**不白屏**；`logcat` 里 `CONSOLE` **0 条**。
+服务端独立复核：首页 200 / 32160 B、60+ 客户端插件 bundle 齐全。⚠️ 仍然要记住：**DSHA 会时不时抢前台**，点按前先 `/root/Q/sl-ui.sh fg`。
+
+## 3. ★ 本轮真正的收获：**原生 Android 没有 Ed25519 的 KeyFactory**
+
+上一轮只记到「频道被拒、界面却说已是最新」。这一轮把「为什么验签会失败」查到了底（完整证据表见 STATUS §3.10.57 ③）：
+
+- App 报的那句 `InvalidKeySpecException：To generate a key pair in Android Keystore…`，在 AOSP 里是
+  `AndroidKeyStoreKeyFactorySpi.engineGeneratePublic()` 的**一句无条件 throw**（名字占位，只认自己生成的密钥）。
+- AOSP 的 Conscrypt **只注册 `KeyFactory.RSA/EC/XDH`** —— **原生没有任何 Ed25519 KeyFactory**；
+  上游 2025 才加的 `OpenSslEdDsaKeyFactory` 还没进 AOSP（设备 `conscrypt.jar` 里 `eddsa` 0 次，对照 `25519` 12 次）。
+- Android 自带的 BouncyCastle 是裁剪版（设备 `bouncycastle.jar` 里 `ed25519` 0 次）。
+- 平台的失败转移确实在（`nextSpi`/`serviceIterator` 都在设备 `core-oj.jar` 里），但转完**仍然**抛 AndroidKeyStore 那句
+  ⇒ **这台机器上没有任何 provider 能用 SPKI 造出 Ed25519 公钥**。
+
+⇒ **不是厂商魔改**（官方 `user/release-keys`、`ro.debuggable=0`）；`KeyFactory.getInstance("Ed25519")+generatePublic(SPKI)` 在**任何 Android 设备**上都必然失败。
+⇒ 频道永远验签失败 ⇒ `merge()` 收不到 OK ⇒ 界面写「已是最新」⇒ **用户以为自己更新不了，其实是一次都没查成**。CLI（node）侧一直正常，所以这条链一直藏着。
+
+## 4. 本轮改了什么（App **0.3.19 / 35**，模块不变）
+
+| 文件 | 改动 |
+|---|---|
+| `core/Ed25519.kt`（新） | 随包的纯 Kotlin Ed25519 **验签**（只用 `MessageDigest("SHA-512")`，不依赖任何 provider）；RFC 8032 §5.1.7 |
+| `core/Net.kt` | 验签改三层：点名 provider → **随包实现** → 才算不可用；每层都要用公开测试向量真验一遍；新增 `describe()` |
+| `core/Update.kt` | 纯函数 `channelsAllFailed()` / `channelNotice()`（"检查没成"不许说成"没有更新"）；异常文案带上"本机验签实现" |
+| `ui/UpdatePane.kt` | 顶部结论走 `channelNotice()`；「频道检查」卡新增 `验签实现：…` 一行 |
+| `ui/LauncherViewModel.kt` + `ui/LauncherHomePane.kt` | 首页「更新」磁贴：检查全挂显示「检查失败」；`UiState.updateFailed` |
+| `core/Diagnoser.kt` | 新增一条"频道检查失败：更新信息不可用"的提示 |
+| 自测 | App 单测 **278 → 297 / 0**：`Ed25519Test` 8（RFC 官方 4 向量 + 全反例）、`ChannelSignatureTest` 10、`UpdateNoticeTest` 6、`DiagnoserTest` +1；**变异验证**：把 `verify` 改成"永远 true" ⇒ 反面用例如期红 |
+
+## 5. 这一轮的坑（别再犯）
+
+- **本机跑 App 单测必须 `LC_ALL=C.UTF-8`**：不然中文测试方法名的 class 文件名编解码失败，Kotlin 编译器直接 ICE
+  （`Malformed input or input contains unmappable characters: …OfflineBundleTest$…class`）。CI 那一步一直设着这个变量，本机这次才踩到。
+- **Gradle 增量缓存会带着上一次失败留下的脏产物**：ICE 之前先报的是 `Failed to create MD5 hash for file … does not exist`；
+  清 `app/build/intermediates/built_in_kotlinc/<变体>UnitTest` 即可。
+- **JVM 上无法复现"默认顺序挑到坏 provider 就会挂"**：JDK 的 `KeyFactory` 自带失败转移（后面还有 SunEC 顶着）。
+  真机挂掉是因为**一个能用的 provider 都没有** —— 所以那条用例改成"平台全挂 ⇒ 退到随包实现"，别写不忠实的夹具。
+- 老账重申：**"层文件在盘上" ≠ "生效"**、**"取了新代码" ≠ "用上了新代码"**（`customize.sh` 用的是模块自带那份 linuxctl，
+  这一次正是它在刷模块时完成了切换）。
+
+## 6. 待办（按优先级）
+
+1. **用户装 App 0.3.19**，然后：更新页点「刷新」—— 这次应当**报出 runtime 1.0.1 与 dsh 的更新**（而不是「已是最新」），
+   并且「频道检查」卡里能看到 `验签实现：内置 Ed25519（纯 Kotlin…）` 或 provider 那一行。**这是本轮唯一的真机验证缺口。**
+2. 模块侧无待办；`runtime` 层若重出记得**版本 +1**，顺手修 dsh 层里那 5 个重复入口脚本副本。

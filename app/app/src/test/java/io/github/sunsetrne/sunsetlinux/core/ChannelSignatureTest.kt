@@ -92,4 +92,166 @@ class ChannelSignatureTest {
             Regex("^ed25519(:[0-9a-f]{2}){8}$").matches(other),
         )
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // 2026-09-19 真机（Android 16）回归：默认顺序取到的 Ed25519 实现**用不了**
+    //
+    // 现场：`KeyFactory.getInstance("Ed25519")` 取得到，但 `generatePublic(SPKI)` 抛
+    // InvalidKeySpecException，消息就是平台 AndroidKeyStore 那句（文本可在设备
+    // /system/framework/framework.jar 里搜到）⇒ 频道永远验签失败 ⇒ 更新页显示"已是最新"。
+    //
+    // 下面用一个**模拟 AndroidKeyStore 的坏 provider**把那个形状搬进单测：它注册了
+    // "Ed25519"，但解不了 SPKI。验签器必须跳过它、退到能用的实现，而不是整体失败。
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /** 只在测试里注册一次（进程级）。 */
+    private val brokenProvider = BrokenKeyStoreProvider()
+
+    private fun brokenProviderName(): String {
+        val name = brokenProvider.name
+        if (java.security.Security.getProvider(name) == null) {
+            java.security.Security.addProvider(brokenProvider)
+        }
+        return name
+    }
+
+    /** 能用的那个（把 JVM 上的 SunEC 包一层，扮演真机上的 Conscrypt）。 */
+    private fun goodProviderName(): String {
+        val name = "SunsetGoodKS"
+        if (java.security.Security.getProvider(name) == null) {
+            java.security.Security.addProvider(GoodProvider())
+        }
+        return name
+    }
+
+    /**
+     * 坏 provider 排在候选**最前面**时必须被跳过、挑中后面那个能用的，且能验过真实清单。
+     *
+     * ⚠️ 这里**不**断言"默认顺序的写法会挂"：JVM 的 `KeyFactory` 自带失败转移
+     * （JDK 9 的 delayed provider selection，设备上也有 —— `nextSpi`/`serviceIterator`
+     * 两个符号在 `/apex/com.android.art/javalib/core-oj.jar` 里），坏 provider 后面还有
+     * SunEC 顶着，所以"默认顺序"在 JVM 上永远不会失败。真机上之所以挂，是因为
+     * **一个能用的 provider 都没有**（AOSP 只注册 RSA/EC/XDH 三个 KeyFactory）——
+     * 那个形状由下面"平台一层都不可用"那条用例覆盖。
+     */
+    @Test
+    fun `坏 provider 排在最前面时，点名候选必须跳过它挑中能用的那个`() {
+        // 先坐实进程级缓存，免得这段临时改动影响别的用例（缓存的是一次性的 lazy）
+        assertEquals(null, SignatureVerifier.availability())
+        val broken = brokenProviderName()
+        val good = goodProviderName()
+        // ⚠️ `insertProviderAt` 对**已安装**的 provider 会直接返回 -1（不动位置）——
+        //    所以必须先摘掉再插到第一位，否则夹具根本没生效。
+        java.security.Security.removeProvider(broken)
+        assertEquals("坏 provider 必须真的被插到第一位", 1, java.security.Security.insertProviderAt(brokenProvider, 1))
+        try {
+            val impl = SignatureVerifier.pick(listOf(broken, good, null), listOf(broken, good, null)).getOrElse {
+                throw AssertionError("点名候选后仍然挑不出可用实现：${it.message}")
+            }
+            assertFalse("坏 provider 不该被选中：${impl.label}", impl.label.contains(broken))
+            assertTrue("应当挑中能用的那个：${impl.label}", impl.label.contains(good))
+            assertTrue("挑中的实现必须能验真实清单", verifyWith(impl, Channel.OFFICIAL.pubkey, manifest, signature))
+            assertFalse(
+                "改一个字节就该验不过（否则等于没验）",
+                verifyWith(impl, Channel.OFFICIAL.pubkey, manifest.copyOf().also { it[0] = (it[0] + 1).toByte() }, signature),
+            )
+        } finally {
+            java.security.Security.removeProvider(broken)
+        }
+    }
+
+    @Test
+    fun `平台一层都不可用时，必须退到随包的纯 Kotlin 实现并照样验过真实清单`() {
+        val broken = brokenProviderName()
+        // 只给坏 provider、且关掉兜底 ⇒ 这就是"平台全挂"（= 真机上真实发生的事）
+        assertTrue(
+            "平台全挂时不该假装成功",
+            SignatureVerifier.pick(listOf(broken), listOf(broken), bundledFallback = false).isFailure,
+        )
+        // 打开兜底（= 真机上的实际配置）：必须挑到内置实现，而且真的能验过线上那份清单
+        val impl = SignatureVerifier.pick(listOf(broken), listOf(broken)).getOrElse {
+            throw AssertionError("兜底也没顶上：${it.message}")
+        }
+        assertTrue("应当退到内置实现：${impl.label}", impl.label.contains("内置 Ed25519"))
+        assertTrue("内置实现必须能验真实清单", verifyWith(impl, Channel.OFFICIAL.pubkey, manifest, signature))
+        assertFalse(
+            "改一个字节就该验不过（否则等于没验）",
+            verifyWith(impl, Channel.OFFICIAL.pubkey, manifest.copyOf().also { it[0] = (it[0] + 1).toByte() }, signature),
+        )
+    }
+
+    @Test
+    fun `所有候选都不能用时必须说清楚，而不是含糊地失败`() {
+        val broken = brokenProviderName()
+        val result = SignatureVerifier.pick(listOf(broken), listOf(broken), bundledFallback = false)
+        assertTrue("全都不可用就该是失败", result.isFailure)
+        val note = result.exceptionOrNull()!!.message ?: ""
+        assertTrue("理由里要点出是哪个 provider、哪一步不行：$note", note.contains(broken) && note.contains("解公钥"))
+    }
+
+    @Test
+    fun `本机的验签实现必须自证可用，并说得出用的是谁`() {
+        assertEquals("验签必须可用（平台给不出 Ed25519 公钥时就该退到内置实现）", null, SignatureVerifier.availability())
+        val label = SignatureVerifier.describe()
+        assertTrue("要能说出实际用的实现（真机排障就靠这一行）：$label", label.isNotBlank())
+    }
+
+    /** 用挑中的那一层验一遍（与 [SignatureVerifier.verify] 同一条路径，只是绕过进程级缓存）。 */
+    private fun verifyWith(impl: SignatureVerifier.Impl, pubkey: String, data: ByteArray, sig: String): Boolean =
+        impl.verify(Base64.getDecoder().decode(pubkey), data, Base64.getDecoder().decode(sig))
+
+    /** 模拟平台的 AndroidKeyStore：名字答得上来，密钥解不出来。 */
+    class BrokenKeyStoreProvider : java.security.Provider("SunsetBrokenKS", 1.0, "模拟 AndroidKeyStore 的 Ed25519 行为") {
+        init {
+            put("KeyFactory.Ed25519", BrokenKeyFactorySpi::class.java.name)
+        }
+    }
+
+    class BrokenKeyFactorySpi : java.security.KeyFactorySpi() {
+        override fun engineGeneratePublic(keySpec: java.security.spec.KeySpec): java.security.PublicKey =
+            throw java.security.spec.InvalidKeySpecException(
+                "To generate a key pair in Android Keystore, use KeyPairGenerator initialized with " +
+                    "android.security.keystore.KeyGenParameterSpec",
+            )
+
+        override fun engineGeneratePrivate(keySpec: java.security.spec.KeySpec): java.security.PrivateKey =
+            throw java.security.spec.InvalidKeySpecException("not supported")
+
+        override fun <T : java.security.spec.KeySpec?> engineGetKeySpec(
+            key: java.security.Key?,
+            keySpec: Class<T>?,
+        ): T = throw java.security.spec.InvalidKeySpecException("not supported")
+
+        override fun engineTranslateKey(key: java.security.Key?): java.security.Key =
+            throw java.security.spec.InvalidKeySpecException("not supported")
+    }
+
+    /**
+     * 扮演真机上那个**能用的** provider（Conscrypt）：把 JVM 的 SunEC 包一层。
+     *
+     * 显式点名 "SunEC" 而不是走默认顺序 —— 默认顺序在测试里被坏 provider 占着，
+     * 不点名就变成自己调自己。
+     */
+    class GoodProvider : java.security.Provider("SunsetGoodKS", 1.0, "模拟 Conscrypt：真正能解 SPKI、能验签") {
+        init {
+            put("KeyFactory.Ed25519", GoodKeyFactorySpi::class.java.name)
+        }
+    }
+
+    class GoodKeyFactorySpi : java.security.KeyFactorySpi() {
+        private fun delegate(): java.security.KeyFactory = java.security.KeyFactory.getInstance("Ed25519", "SunEC")
+
+        override fun engineGeneratePublic(keySpec: java.security.spec.KeySpec): java.security.PublicKey =
+            delegate().generatePublic(keySpec)
+
+        override fun engineGeneratePrivate(keySpec: java.security.spec.KeySpec): java.security.PrivateKey =
+            delegate().generatePrivate(keySpec)
+
+        override fun <T : java.security.spec.KeySpec?> engineGetKeySpec(
+            key: java.security.Key?,
+            keySpec: Class<T>?,
+        ): T = delegate().getKeySpec(key, keySpec)
+
+        override fun engineTranslateKey(key: java.security.Key?): java.security.Key = delegate().translateKey(key)
+    }
 }

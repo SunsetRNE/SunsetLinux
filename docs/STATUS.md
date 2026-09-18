@@ -519,6 +519,61 @@ su -c '/data/sunsetlinux/bin/linuxctl doctor'
 | 已装状态读不到时 | —— | **不给刷入按钮**，先让用户修 root 授权（与"读不到 ≠ 没装"一致） |
 | 重启 | —— | 只报告"重启后生效"（KernelSU 落 `modules_update/`），**App 不替用户重启**，脚本里有单测断言不许出现 `reboot` |
 
+### 3.10.57 真机核验 v0.3.18 落地 + 找到「用户自己更新不了」的根因：**原生 Android 根本没有 Ed25519 的 KeyFactory**（2026-09-19）
+
+#### ① 内置切换**生效了**（v0.3.18 的三处修复确实到了设备）
+
+| 事项 | 证据（时间戳为准） |
+|---|---|
+| 模块 **1.0.43** 已装 | `/data/adb/modules/sunsetlinux/module.prop` = `1.0.43 / 10043` |
+| 生效的 `linuxctl.sh` 是**带修复的那份** | `$LINUX_HOME/bin/linuxctl.sh` 里 `dsh_ver_cmp` 出现 **4** 次、`newer_than_active` 在 `dsh info` 的输出里 |
+| **切换发生在刷模块那一刻** | `etc/state.json` mtime = **00:41:32**，正是 `customize.sh` 跑的时刻；而 `customize.sh` 用的是**模块自带**的 `$MODDIR/bin/linuxctl.sh`（= 1.0.43 的新代码）⇒ 规则③「内置比生效层新就切」当场生效，把 `state.json` 从 `0.1.5-rc.2` 改指到 `0.1.6-alpha.2` |
+| 开机没再切（因为已经切好了） | `service.log` 00:43:36：`内置 DSH 自愈：载荷已在盘上 → 同步跑完再自启`（**1.0.43 的新代码路径**），随后 `内置 DSH 就位：…0.1.6-alpha.2.erofs（启用更新=false）` —— `false` 是"无需再动"，不是"没切" |
+| 生效层真的是 0.1.6 | `cat /sys/block/loop52/loop/backing_file` → `/data/sunsetlinux/layers/dsh-0.1.6-alpha.2.erofs`；挂载层里 `@deepseek-ai/dsh/package.json` 的 `version` = **0.1.6-alpha.2** |
+| 环境与 DSH 都健康 | `run/state.json`：`phase=running / up=true / backend=chroot / envMode=full`；`dsh.pid` = 5395；HTTP `127.0.0.1:3080` 首页 200（32160 B）；App 首页「DSH 版本 **0.1.6-alpha.2**、Web 健康 正常、PID 5395、端口 3080」 |
+
+#### ② WebView（0.1.6，唯一还没验的一环）：**渲染正常**
+
+- 打开 DSH 网页 → 截图：完整界面（「探索未至之境 / 预览版 / 创造模式 / 对话输入框 / 侧边栏」都在），**不是白屏**，也没有错误横幅。
+- `logcat` 里 `CONSOLE` **0 条**（没有 JS 报错）。
+- 服务端独立复核：`curl` 首页 200 / 32160 B，60+ 个客户端插件 bundle 都在页面里。
+- 环境提示：**DSHA 会时不时抢回前台**，每次点按前先确认前台（本轮用 `/root/Q/sl-ui.sh`）。
+
+#### ③ ★ 更新页那条的**根因**：平台没有可用的 Ed25519 KeyFactory ⇒ 频道永远验签失败
+
+上一轮只记到「频道被 `REJECTED：签名校验失败`，界面却写已是最新」，本轮把**为什么验签会失败**查到底：
+
+| 环节 | 证据 | 结论 |
+|---|---|---|
+| App 报的异常文本 | `InvalidKeySpecException：To generate a key pair in Android Keystore, use KeyPairGenerator initialized with android.security.keystore.KeyGenParameterSpec`；同一句在设备 `/system/framework/framework.jar` 里 grep 得到 | 来自**平台自己的代码**，不是我们的 |
+| AOSP `AndroidKeyStoreKeyFactorySpi.engineGeneratePublic()` | 源码里就是一句**无条件 `throw`** | AndroidKeyStore 只给自己生成的密钥当 KeyFactory，喂 X.509/SPKI 必抛 |
+| AOSP `AndroidKeyStoreProvider`（API 36） | `putKeyFactoryImpl("ED25519")`（只注册 KeyPairGenerator + KeyFactory，**没有** Signature） | 这个名字被它占了 |
+| AOSP Conscrypt `OpenSSLProvider` | 只注册 **`KeyFactory.RSA` / `.EC` / `.XDH`** 三个 | **原生 Android 没有任何 Ed25519 KeyFactory** |
+| 上游 google/conscrypt | `OpenSslEdDsaKeyFactory`（2025 新增）在**上游有、AOSP 分支里 404** | 还没进 Android |
+| 设备 `conscrypt.jar` | `eddsa`（不分大小写）**0** 次；对照 `25519` 12 次、`rsa` 17 次 | 与 AOSP 一致 |
+| 设备 `bouncycastle.jar` | `ed25519` **0** 次 | Android 自带的 BC 是裁剪版 |
+| 设备 `core-oj.jar` | `nextSpi` / `serviceIterator` 两个符号都在 | 平台的**失败转移**（JDK 9 的 delayed provider selection）确实存在 |
+| ⇒ 推论 | 失败转移**转完仍然抛出** AndroidKeyStore 那句 | 这台机器上**没有任何 provider** 能用 SPKI 造出 Ed25519 公钥 |
+
+**⇒ 这是原生 Android 的空缺，不是厂商魔改**（系统本身是 `OnePlus/PJD110/OP5929L1:16/…:user/release-keys` 官方 release 版，`ro.debuggable=0`）。也就是说：`KeyFactory.getInstance("Ed25519") + generatePublic(SPKI)` 这条路在**任何 Android 设备**上都必然失败。
+
+后果极重：频道**永远验签失败** ⇒ `UpdateChecker.merge()` 收不到任何 `OK` ⇒ 更新页/首页落回「已是最新」—— 用户以为"没有更新"，其实"根本没查成"。**这就是"用户自己更新不了层"的根因**；CLI 侧（node/OpenSSL）一直正常，所以环境自己更新从来没出过问题，掩盖了这条链。
+
+#### ④ 修法（App **0.3.19**，模块不变）
+
+1. **验签改成三层**（每一层都要用公开测试向量**真验一遍**才算数）：
+   ① 逐个点名 provider（`Conscrypt` / `AndroidOpenSSL` / 平台默认）—— 将来 AOSP 有了 EdDSA KeyFactory 就走它（快、走原生）；
+   ② 都不行 ⇒ **随包的纯 Kotlin Ed25519**（`core/Ed25519.kt`，只依赖 `MessageDigest("SHA-512")`）—— 保证"一定能验"；
+   ③ 连自带实现都过不了自检才算"无可用实现"（那时是代码 bug，如实报）。
+2. **可观测**：更新页「频道检查」卡多一行 `验签实现：…`（实际用的是哪一层），真机再出问题一眼定性。
+3. **不许再说"已是最新"**：新增纯函数 `channelsAllFailed()` / `channelNotice()`（四种形状都钉了单测）—— 检查全挂时说「频道检查失败：N 个频道都没能给出可用清单 —— 这不代表已是最新」，部分失败时说明"结论可能不完整"；首页「更新」磁贴同步显示「检查失败」；诊断页新增一条"更新信息不可用"的提示。
+
+#### ⑤ 自测与闸门
+
+- App 单测 **278 → 297 通过 / 0 失败**：`Ed25519Test` **8** 条（RFC 8032 §7.1 官方向量 4 条 + 改消息/改签名/换公钥/S≥L/长度/非规范编码**全拒** + 真实清单 + 性能）、`ChannelSignatureTest` +4（坏 provider 跳过、平台全挂退内置、失败理由、自证可用）、`UpdateNoticeTest` **6**、`DiagnoserTest` +1。
+- **变异验证**：把 `Ed25519.verify` 的判据改成"永远返回 true"（最危险的缺陷方向）⇒ 相关用例如期判红，改回即绿。
+- ⚠️ **本机跑 App 单测必须带 `LC_ALL=C.UTF-8`**：否则中文测试方法名生成的 class 文件名会编解码失败，Kotlin 编译器直接 ICE（`Malformed input or input contains unmappable characters`）—— CI 那一步一直设着这个变量，本机这次才踩到。
+
 ### 3.10.56 真机核验 v0.3.17 落地：一处「更新了却没生效」+ 一次 git 事故 + 三处修复（2026-09-18 深夜）
 
 #### ① 落地核验（**以时间戳为准**，都是设备实测）

@@ -19,6 +19,7 @@ import io.github.sunsetrne.sunsetlinux.core.StartControls
 import io.github.sunsetrne.sunsetlinux.core.StartMode
 import io.github.sunsetrne.sunsetlinux.core.TransportSupport
 import io.github.sunsetrne.sunsetlinux.core.UpdateChecker
+import io.github.sunsetrne.sunsetlinux.core.channelsAllFailed
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -71,6 +72,14 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
         val message: String? = null,
         val updateCount: Int = 0,
         val updateChecked: Boolean = false,
+        /**
+         * 上一次频道检查**没拿到任何可用清单**（全部频道都失败）。
+         *
+         * 为什么单列：`merge()` 只收 OK 的频道，"都失败"与"都没更新"的合并结果都是空表
+         * ⇒ 首页磁贴会写成「已是最新」。真机（2026-09-19）就是这样：频道被
+         * `REJECTED：签名校验失败`，磁贴却写着"已是最新"。
+         */
+        val updateFailed: Boolean = false,
         val doctorRunning: Boolean = false,
         val doctorOutput: String? = null,
         val showDoctor: Boolean = false,
@@ -243,6 +252,7 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
                         mode = mode,
                         zstdUnavailableReason = prev.zstdReason,
                         updateCount = prev.updateCount,
+                        updateFailed = prev.updateFailed,
                     ),
                     lastSyncedAt = System.currentTimeMillis(),
                 )
@@ -463,7 +473,8 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
     private fun maybeCheckUpdates(status: DshStatus) {
         val channels = prefs.channels
         if (channels.none { it.enabled }) {
-            _ui.update { it.copy(updateChecked = true, updateCount = 0) }
+            // 没有启用中的频道 = 没得查（不是"已是最新"，也不是"检查失败"）
+            _ui.update { it.copy(updateChecked = true, updateCount = 0, updateFailed = false) }
             return
         }
         if (updateJob?.isActive == true) return
@@ -471,16 +482,21 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
         if (now - lastUpdateCheckAt < UPDATE_CHECK_INTERVAL_MS) return
         lastUpdateCheckAt = now
         updateJob = viewModelScope.launch {
+            var failed = false
             val count = try {
                 val reports = UpdateChecker.check(channels, status)
+                failed = channelsAllFailed(reports)
                 UpdateChecker.merge(reports).count { it.key != prefs.ignoredUpdate }
             } catch (_: Throwable) {
+                // 连检查本身都没跑成（网络/解析异常）—— 同样不许说"已是最新"
+                failed = true
                 0
             }
             _ui.update { prev ->
                 prev.copy(
                     updateChecked = true,
                     updateCount = count,
+                    updateFailed = failed,
                     hints = Diagnoser.hints(
                         status = prev.status,
                         provisioned = prev.provisioned,
@@ -488,6 +504,7 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
                         mode = prev.mode,
                         zstdUnavailableReason = prev.zstdReason,
                         updateCount = count,
+                        updateFailed = failed,
                     ),
                 )
             }

@@ -605,6 +605,8 @@ private fun OperationCard(
                     label = "更新",
                     supporting = when {
                         ui.updateCount > 0 -> "${ui.updateCount} 个层可更新"
+                        // 检查没成时**不许**写"已是最新"（真机：频道全被拒，磁贴却写已是最新）
+                        ui.updateFailed -> "检查失败"
                         ui.updateChecked -> "已是最新"
                         else -> "未检查"
                     },

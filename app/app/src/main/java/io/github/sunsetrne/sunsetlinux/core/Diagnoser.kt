@@ -179,6 +179,14 @@ object Diagnoser {
         mode: EnvMode,
         zstdUnavailableReason: String? = null,
         updateCount: Int = 0,
+        /**
+         * 上一次频道检查**全部失败**（没有一个频道给出可用清单）。
+         *
+         * 为什么要有：`merge()` 只收 OK 的频道，"都失败"与"都没更新"合并后都是空表，
+         * 于是首页写着"已是最新"。真机（2026-09-19）就是这样：频道被
+         * `REJECTED：签名校验失败`，用户以为没有更新，其实根本没查成。
+         */
+        updateFailed: Boolean = false,
     ): List<Hint> = buildList {
         // 1) 未授权 root（选择了 root 模式但没有 su）
         if (mode == EnvMode.ROOT && !suAvailable) {
@@ -303,6 +311,19 @@ object Diagnoser {
                 Hint(
                     title = "有 $updateCount 个层可更新",
                     detail = "频道里已有新版本。更新只下载变化的那一层，装完会自动重启环境。",
+                    action = "去更新",
+                    target = HintTarget.UPDATES,
+                )
+            )
+        }
+
+        // 5b) 频道检查失败 ⇒ 更新信息不可用（不许让用户以为"没有更新"）
+        if (updateFailed) {
+            add(
+                Hint(
+                    title = "频道检查失败：更新信息不可用",
+                    detail = "所有频道都没能给出可用清单（拿不到清单，或清单验签没过）——" +
+                        "这不代表已是最新。去「更新」页看每个频道的具体原因与验签实现。",
                     action = "去更新",
                     target = HintTarget.UPDATES,
                 )

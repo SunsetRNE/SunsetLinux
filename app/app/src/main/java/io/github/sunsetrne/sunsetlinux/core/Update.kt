@@ -128,7 +128,8 @@ object UpdateChecker {
                     else SignatureVerifier.diagnose(channel.pubkey, body, sigText)
                 } catch (t: Throwable) {
                     "验签过程抛异常：${t.javaClass.simpleName}${t.message?.let { "：$it" } ?: ""}" +
-                        "（若为 NoSuchAlgorithmException，说明本机缺 Ed25519 Signature 实现，" +
+                        "（本机验签实现：${SignatureVerifier.describe()}；" +
+                        "若为 NoSuchAlgorithmException，说明本机缺 Ed25519 Signature 实现，" +
                         "与「清单不对」是两回事）"
                 }
                 if (problem != null) {
@@ -506,4 +507,38 @@ internal fun needsInstallDecision(localVersion: String?, remoteVersion: String?)
     localVersion == null -> true
     localVersion != remoteVersion -> true
     else -> false
+}
+
+/**
+ * 这次频道检查里，**有没有任何一个频道给出了可用清单** —— 纯函数，便于单测。
+ *
+ * 为什么单列：`UpdateChecker.merge()` 只收 `state == OK` 的频道，于是"所有频道都失败"
+ * 与"所有频道都说没有更新"在 merge 的结果上**长得一模一样**（都是空表）—— 界面据此
+ * 说"已是最新"就是撒谎。真机（2026-09-19，App 0.3.18）正是这个形状：频道被
+ * `REJECTED：签名校验失败（本机 Ed25519 实现取到 AndroidKeyStore）`，更新页却写着
+ * 「已是最新」。
+ */
+internal fun channelsAllFailed(reports: List<ChannelReport>): Boolean =
+    reports.isNotEmpty() && reports.none { it.state == ReportState.OK }
+
+/**
+ * 「可用更新」那一栏的结论文案。**纯函数**，四种情况都要说实话。
+ *
+ * 真机踩过的两条：① 检查全挂时说"已是最新"（用户以为没更新，其实根本没查成）；
+ * ② 部分频道挂掉时照样说"已是最新"（结论可能不完整，得说明）。
+ */
+internal fun channelNotice(
+    reportCount: Int,
+    failedCount: Int,
+    mergedCount: Int,
+    updatesCount: Int,
+): String = when {
+    mergedCount == 0 && reportCount > 0 && failedCount >= reportCount ->
+        "频道检查失败：$failedCount 个频道都没能给出可用清单 —— 这不代表已是最新。"
+    mergedCount == 0 && failedCount > 0 ->
+        "已是最新：能连上的频道都说没有更新（另有 $failedCount 个频道检查失败，结论可能不完整）。"
+    mergedCount == 0 -> "已是最新：所有层与频道清单一致。"
+    updatesCount == 0 -> "有可用更新，但你已选择忽略。"
+    else ->
+        "发现 $updatesCount 个层可更新" + if (failedCount > 0) "（另有 $failedCount 个频道检查失败）。" else "。"
 }

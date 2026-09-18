@@ -208,8 +208,38 @@ class DiagnoserTest {
         assertEquals(HintTarget.SETTINGS_PORT, hints.first().target)
     }
 
-    /** 层名里带 "dsh" 不能被误判成"Node/DSH 运行环境问题"。 */
+    /**
+     * 频道检查全挂时，首页必须给出「更新信息不可用」的提示。
+     *
+     * 真机（2026-09-19）：频道被 `REJECTED：签名校验失败`，而首页一直显示"已是最新"
+     * —— 用户以为没有更新，其实根本没查成。
+     */
     @Test
+    fun `频道检查全挂时要提示更新信息不可用`() {
+        val status = DshStatus.unavailable("频道检查失败（夹具）")
+        val failed = Diagnoser.hints(
+            status = status,
+            provisioned = true,
+            suAvailable = true,
+            mode = EnvMode.ROOT,
+            updateFailed = true,
+        )
+        val hint = failed.firstOrNull { it.title.contains("频道检查失败") }
+        assertTrue("检查全挂必须有一条明确提示：${failed.map { it.title }}", hint != null)
+        assertEquals("提示要能一键跳到更新页", HintTarget.UPDATES, hint!!.target)
+        assertTrue("不能让它看起来像「没有更新」：${hint.detail}", hint.detail.contains("不代表已是最新"))
+
+        val fine = Diagnoser.hints(
+            status = status,
+            provisioned = true,
+            suAvailable = true,
+            mode = EnvMode.ROOT,
+            updateFailed = false,
+        )
+        assertTrue("没失败时不该有这条提示", fine.none { it.title.contains("频道检查失败") })
+    }
+
+    /** 层名里带 "dsh" 不能被误判成"Node/DSH 运行环境问题"。 */    @Test
     fun `层名里的 dsh 不会误判成运行时问题`() {
         assertEquals(
             FailureKind.MOUNT,

@@ -62,9 +62,11 @@ import io.github.sunsetrne.sunsetlinux.core.OfflineApplier
 import io.github.sunsetrne.sunsetlinux.core.OfflineBundle
 import io.github.sunsetrne.sunsetlinux.core.ProotRuntime
 import io.github.sunsetrne.sunsetlinux.core.ReportState
+import io.github.sunsetrne.sunsetlinux.core.SignatureVerifier
 import io.github.sunsetrne.sunsetlinux.core.TransportSupport
 import io.github.sunsetrne.sunsetlinux.core.UpdateApplier
 import io.github.sunsetrne.sunsetlinux.core.UpdateChecker
+import io.github.sunsetrne.sunsetlinux.core.channelNotice
 import io.github.sunsetrne.sunsetlinux.core.formatBytes
 import io.github.sunsetrne.sunsetlinux.ui.components.DshCard
 import io.github.sunsetrne.sunsetlinux.ui.components.InfoRow
@@ -288,11 +290,13 @@ class UpdatePaneState internal constructor(
             updates = merged.filter { it.key != prefs.ignoredUpdate }
             checking = false
             checked = true
-            notice = when {
-                merged.isEmpty() -> "已是最新：所有层与频道清单一致。"
-                updates.isEmpty() -> "有可用更新，但你已选择忽略。"
-                else -> "发现 ${updates.size} 个层可更新。"
-            }
+            // 结论文案走纯函数（见 Update.kt 的同名函数）：**检查失败不许说"已是最新"**。
+            notice = channelNotice(
+                reportCount = result.size,
+                failedCount = result.count { it.state != ReportState.OK },
+                mergedCount = merged.size,
+                updatesCount = updates.size,
+            )
         }
     }
 
@@ -747,6 +751,13 @@ fun UpdatePane(
                                 mono = !ok,
                             )
                         }
+                        // 验签用的是哪一组 provider —— 真机上"验签失败"曾无从定性，这行是排障入口
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            text = "验签实现：${SignatureVerifier.describe()}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = TextMuted,
+                        )
                     }
                 }
             }
