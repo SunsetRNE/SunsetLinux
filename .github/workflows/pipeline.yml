@@ -207,10 +207,16 @@ jobs:
           #   ⚠️ 这里**回读 `$GITHUB_OUTPUT`**，不用 `${{ steps.plan.outputs.* }}`：
           #   本条就在 plan 这一步里，GitHub 要等这一步结束才设置它自己的 outputs ⇒
           #   在同一步里引用自己的 outputs 会拿到空串，条件永远为假（那样这层保险就是摆设）。
-          _out_get() { grep "^$1=" "$GITHUB_OUTPUT" 2>/dev/null | tail -n1 | cut -d= -f2-; }
+          #   ⚠️ 两个坑都踩过：
+          #     ① `GITHUB_OUTPUT` 是**每步一个文件** ⇒ 在同一步里读**上一步**写的
+          #        `embed_bundles` 永远读不到（grep 失败 + `set -e` ⇒ 整步退出 1）。
+          #        所以它走上一步的 outputs 表达式。
+          #     ② 读自己的 outputs 必须容错（`|| true`）：键不在时 grep 返 1，
+          #        在 `set -e` 下会把整步干掉。
+          _out_get() { grep "^$1=" "$GITHUB_OUTPUT" 2>/dev/null | tail -n1 | cut -d= -f2- || true; }
           _apks="$(_out_get build_apks)"
-          _embed="$(_out_get embed_bundles)"
           _bundles="$(_out_get build_bundles)"
+          _embed="${{ steps.norm.outputs.embed_bundles }}"
           if [ "$_apks" = "true" ] && [ "$_embed" = "true" ] && [ "$_bundles" != "true" ]; then
             echo "::notice::本次要编 APK 且要内嵌离线包 ⇒ 强制重打离线包（避免取不到制品 / 发出不带环境的包）"
             echo "build_bundles=true" >> "$GITHUB_OUTPUT"

@@ -1275,3 +1275,10 @@ service.sh ──────── 先起 sunsetd（dex + app_process），再�
 2. 之后按 `docs/decisions-core-v2.md` §六的开放问题推进（`start.lock` 去留、App 何时切 socket、
    免 root 前台服务、P3 的挂载表数据化）。
 
+### 收束补记（同日）：CI 不变式那处修复自己踩的坑
+
+第一版在 plan 步里**回读上一步**写的 `embed_bundles` —— `GITHUB_OUTPUT` 是**每步一个文件**，
+读不到 ⇒ `grep` 返 1 ⇒ `set -euo pipefail` 把整步干掉（① 环境准备红）。
+修法：`embed_bundles` 用 `steps.norm.outputs.embed_bundles`，读自己 outputs 的地方一律 `|| true`。
+**本地用真实 changeset + 真实 git diff 端到端复现过**（`build_bundles=false → 强制 true`）。
+

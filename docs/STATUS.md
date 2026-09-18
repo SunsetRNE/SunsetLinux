@@ -520,6 +520,18 @@ su -c '/data/sunsetlinux/bin/linuxctl doctor'
 |---|---|---|
 | `③ 编译 *` 六个节点全红在"取回内嵌离线包（bundles）"，而 `② 内嵌离线包` 被跳过 | 编译节点是否去取 `offline-bundles` 制品看 `embed_bundles`（默认 true），而 ② 是否产出它看变更集的 `build_bundles`（"没改离线包输入就不重打"的优化）。**两者不一致** ⇒ 去下载一个不存在的制品 | prep 里加不变式：**要编 APK 且要内嵌离线包 ⇒ 强制 `build_bundles=true`**。代价约 40 秒，比整轮红或"发出不带环境的 APK"（0.2.6 事故）都便宜。注意这里**回读 `$GITHUB_OUTPUT`**，不用 `steps.<当前步>.outputs`（同一步读自己的 outputs 是空串，条件永远为假 —— 第一版就是这么写的） |
 
+**二·补：这处修复的第一版自己又踩了一个坑（已修，并留档）**
+
+第一版在 plan 步里用 `_out_get embed_bundles` 读上一步写的输出 —— **读不到**：
+`GITHUB_OUTPUT` 是**每步一个文件**，同一步里只能看到**自己这一步**写进去的东西。
+`grep` 返 1，而该步是 `set -euo pipefail` ⇒ 整步退出 1，① 环境准备直接红。
+
+修法：`embed_bundles` 走上一步的 outputs 表达式（`steps.norm.outputs.embed_bundles`），
+读自己 outputs 的地方一律 `|| true` 容错。**本地已用真实 changeset + 真实 git diff 端到端复现过**：
+输出里能看到 `build_bundles=false` → `::notice::…强制重打离线包` → 最终 `build_bundles=true`。
+
+> 留档一条通用事实：**Actions 的 `GITHUB_OUTPUT` 是每步独立的文件**，别在同一步里回读上一步的输出。
+
 **三、决策记录成文件**：新增 **`docs/decisions-core-v2.md`** —— 产品级（D1–D5，含 D1 的复核过程）、
 架构级（A1–A9）、实现级（B1–B9）、CI 侧（C1–C2）、被否决选项、留给下一轮的开放问题。
 
