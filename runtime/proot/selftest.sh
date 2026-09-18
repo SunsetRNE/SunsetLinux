@@ -111,5 +111,25 @@ persist_url "http://127.0.0.1:4321/?token=$TOKEN"
 cleanup_run_files
 [ -e "$URLFILE" ] && bad "cleanup_run_files 删除 dsh.url" "不存在" "存在" || ok "cleanup_run_files 删除 dsh.url"
 
+# --- 11. 启动器契约：entry.sh 必须带 --expose-internals -----------------------
+# 免 root 模式的启动行在同一条链上的另一个点：DSH 0.1.6 的 HMR 硬要求
+# （见 runtime/root/supervise.sh 的注释与 docs/dsh-profile.md §7.3）。
+# 这条脚本随 APK 的 assets/proot-runtime/ 分发，改错了只有真机才看得出来 —— 静态钉住。
+ENT="$SELF_DIR/entry.sh"
+if [ -f "$ENT" ]; then
+    if grep -q -- '--expose-internals' "$ENT"; then
+        ok "entry.sh 里有 --expose-internals"
+    else
+        bad "entry.sh 缺少 --expose-internals（DSH 0.1.6+ 启动即失败）" "存在该 flag" "没有"
+    fi
+    if grep -qE '"\$NODE_BIN"[[:space:]]+--expose-internals[[:space:]]+"\$DSH_BIN"[[:space:]]+web' "$ENT"; then
+        ok "entry.sh 的启动行 = node --expose-internals <dsh> web"
+    else
+        bad "entry.sh 的启动行不是 node --expose-internals <dsh> web" "node --expose-internals <dsh> web" "其它"
+    fi
+else
+    ok "本机看不到 entry.sh（跳过?）"
+fi
+
 printf '\n== 结果：%d 通过 / %d 失败 ==\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

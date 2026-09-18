@@ -1658,3 +1658,12 @@ App 版本 **0.3.15（versionCode 31）**；模块不变（1.0.40）。
   (a) 把 `libreoffice-kit-wasm` 拆成独立层（每层 `.gz` 都回到 100 MB 以下）；
   (b) 让 CLI 侧能解 `.zst`（runtime 层有 node，仓库已自带 Node 版 zstd 过滤器），
       这样 `.gz` 只留给"node 还不存在"的 base/runtime。
+
+### 补（同轮）：两条**启动器契约**回归断言
+
+`--expose-internals` 这个修复太容易被"顺手简化"掉，而症状是"环境起来后 DSH 立刻退出"。
+所以在两个自测里各钉了一条静态断言（真 root 的 `supervise.sh`、免 root 的 `entry.sh`）：
+
+- `runtime/root/selftest.sh` → **118 通过 / 0 失败**（新增 2 条）
+- `runtime/proot/selftest.sh` → **20 通过 / 0 失败**（新增 2 条）
+- 反面验证：把 `--expose-internals` 从脚本里删掉，断言会判红 ✓

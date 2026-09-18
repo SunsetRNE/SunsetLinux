@@ -1538,6 +1538,34 @@ else
     skip_ "本机看不到 /proc/<pid>/ns/mnt（proot 沙箱）→ 跳过「退回 v1 判据」那两条；CI 与真机会跑"
 fi
 
+# ---------------------------------------------------------------------------
+# 启动器契约：`supervise.sh` 必须用 `node --expose-internals <dsh> web` 起 DSH
+# ---------------------------------------------------------------------------
+# 为什么值得一条**静态**断言（别的都是行为测试）：
+#   DSH 0.1.6 起 `dsh-base` 的补丁里多了 `hmr`（@deepseek-ai/dsh-hmr）条目，而 HMR 服务
+#   **硬要求** node 以 `--expose-internals` 启动（docs/dsh-profile.md §7.3 有实测）。
+#   `dsh` 的入口是 `#!/usr/bin/env node`，shebang 带不了它；`NODE_OPTIONS` 也被 node 拒绝。
+#   一旦有人"顺手简化"回直接跑 `dsh web`，症状是**环境起来后 DSH 立刻退出**
+#   （linux.log 里是 plugin tree failed to load），排查成本很高 —— 这条断言几秒就能钉住。
+head_ "单元：启动器必须带 --expose-internals（DSH 0.1.6 的 HMR 硬要求）"
+SUP="$SELF_DIR/supervise.sh"
+if [ -f "$SUP" ]; then
+    if grep -q -- '--expose-internals' "$SUP"; then
+        ok "supervise.sh 里有 --expose-internals"
+    else
+        bad "supervise.sh 里找不到 --expose-internals：DSH 0.1.6+ 会启动即失败"
+    fi
+    # 必须是"用 node 起"，而不是把 flag 传给 dsh 自己（dsh 不认这个 flag）
+    if grep -qE '"\$NODE_BIN"[[:space:]]+--expose-internals[[:space:]]+"\$DSH_BIN"[[:space:]]+web' "$SUP"; then
+        ok "supervise.sh 的启动行 = node --expose-internals <dsh> web"
+    else
+        bad "supervise.sh 的启动行不是 node --expose-internals <dsh> web"
+    fi
+else
+    skip_ "本机看不到 supervise.sh（模块安装后自带）→ 跳过启动器契约断言"
+fi
+
+
 printf '\n=========================================\n'
 printf '  通过 %d，失败 %d\n' "$pass" "$fail"
 printf '=========================================\n'
