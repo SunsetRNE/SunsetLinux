@@ -606,7 +606,15 @@ DSH 的沙箱与审批由一条变量决定（`dsh-base` 组合原文）：
 真要做的人直接 `chroot /proc/1/root` 就行且不留痕。
 ⚠️ 本项目自己的 AI 会话**不会**用这条通道去执行设备 shell 守卫拒绝过的命令（换入口绕过设备策略）。
 
-#### ⑤ 待办（本轮没做）
+#### ⑤ 自述文件重写（同轮）
+
+`README.md` 重写：去掉别的 Android 移植项目那套「上游同步/对比」叙事，改成**对接真正的 DSH 上游**——
+`@deepseek-ai/dsh`（内置在 dsh 层，当前 0.1.6-alpha.2）、`dsh web` = `--profile web`、
+profile 工作区与 bundle/patch 机制、`--expose-internals` 硬要求、`DSH_PERMISSION_MODE` 权限模型、
+凭据不进命令行；新增「视角、路径与权限」一节；快速开始与层体积按当前发布/线上清单校正。
+第三方组件与分发义务统一指向 `THIRD_PARTY_NOTICES.md`（那里的表本来就全）。
+
+#### ⑥ 待办（本轮没做）
 
 1. **挂载回流的修复**：要自己实现 propagation（`mount --make-rprivate /` 之类），先按 §1f 的判据确认范围，再动手。
 2. ~~宿主 root 通道~~ ⇒ **已做（0.3.21 / 模块 1.0.45）**：见 §3.10.58 ⑥ 与 `docs/host-channel.md`。
