@@ -1799,7 +1799,7 @@ dsh 这类"装它时 node 一定在"的层，CLI 现在可以走 `.zst`（79.1 M
 逐字节一致，**16 秒**（流式）。闸门：`shell-compat` ✓、`cmp-consistency` 16/16 ✓、
 `module-variant-selftest` 43/0 ✓、`runtime/root/selftest.sh` 126/0 ✓。
 
-## 4. 待你拍板
+## 4. ~~待你拍板~~ ⇒ 已裁定（见文末「## 5」）
 
 **要不要发一轮把 (b) 真推出去？** 三个版本号得一起动（只动一个会造成"App 版本没变但 APK 字节变了"）：
 
@@ -1812,3 +1812,35 @@ dsh 这类"装它时 node 一定在"的层，CLI 现在可以走 `.zst`（79.1 M
 **另一件（随时可做，需要你在手机边上）**：真机端到端 —— 手机现在还装着 runtime 1.0.0 /
 dsh rc.1+rc.2 / 模块 1.0.41，把三个新层更上去，用 App 的 WebView 打开 0.1.6 界面
 （移动端是**客户端**插件，服务端起得来 ≠ 浏览器里没 JS 报错，这是唯一还没验的一环）。
+
+## 5. 用户裁定与本轮发布（2026-09-18 14:5x）
+
+用户两条原话：**「现在就发（App 0.3.17 + 模块 1.0.42 + runtime 层 1.0.2）」**；
+关于真机：**「随着模块更新验证，改环境容易报错，被厂商限制」**（⇒ 不手工改环境，走正常更新路径）。
+
+**实际发的是 v0.3.17：App 0.3.17/33 + 模块 1.0.42/10042；runtime 层没重出、频道清单不变（仍 1.0.1）。**
+偏离"三层一起动"的理由（有证据，不是图省事）：
+
+1. **生效的 `update.sh` 在模块里**：`module/post-fs-data.sh` 每次开机把模块 `bin/` 同步到
+   `$LINUX_HOME/bin/`，而 `linuxctl.sh` 调的就是 `$SELF_DIR/update.sh`；`start.sh` 的
+   `install_runtime_entry()` 只从模块拷 `entry.sh` + `supervise.sh`。⇒ 模块 1.0.42 一个人就把 (b) 送到设备。
+2. **重出 runtime 层 = 让所有用户白下 50 MB**（层变了离线包也得跟着重打），而层里那份 `update.sh`
+   只是极少走到的兜底路径 ⇒ 行为收益 0、代价实打实。
+   （另：本容器**没有 chroot**，重出层只能复用 `/var/tmp/sl-runtime-clean` 的树重打包；
+   树还在，真要发随时能重打 —— 但**发之前必须把 runtime 版本号 +1**。）
+3. "同版本两种内容"的风险本轮消解：**没有重出 1.0.1**，线上仍是那次一致构建的产物。
+
+**顺带记录一个"静默吞改动"的结构问题（只记录，未改构建脚本）**：dsh 层里有 5 个**冗余的入口脚本副本**
+（`doctor.sh`/`entry.sh`/`linuxctl.sh`/`oneshot-setup.sh`/`selftest.sh`，与 runtime 层实测**逐字节相同**；
+`update.sh`、`supervise.sh` 不在其中）。dsh 在栈顶 ⇒ **这 5 个文件以后在 runtime 层里怎么改都不会生效**
+（本轮 `selftest.sh` 已经出现新旧不一致：dsh 层里是 91559 B 的旧版）。根治要让 dsh 的增量打包**排除**
+`$LAYER_RUNTIME_ENTRY_DIR`，而 dsh 层版本 == npm 包版本（不能凭空 +1）⇒ **留到下一次 dsh 升级时一起修**。
+
+**下一步（按优先级）**：
+
+1. 收 v0.3.17 的发布结果：`releases/latest` 应指向 v0.3.17；并抽查
+   `sunsetlinux-module-1.0.42.zip` 里**确实有** `bin/zstd-filter.mjs`（上一版 1.0.41 就没有）。
+   办法不必下 115 MB：HTTP range 抠 zip 中央目录 + 单文件 inflate（`/root/Q/verify-module-zip.mjs`）。
+2. 真机：按用户要求**随模块更新走** —— 在 App 里把模块更到 1.0.42、重启，再看 0.1.6 的 WebView
+   （移动端是**客户端**插件，服务端起得来 ≠ 浏览器里没 JS 报错）。
+3. runtime 层若以后要重出：记得版本 +1，并顺手修上面那条 dsh 层重复副本的问题。
