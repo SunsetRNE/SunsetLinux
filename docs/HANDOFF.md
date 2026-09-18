@@ -1838,9 +1838,12 @@ dsh rc.1+rc.2 / 模块 1.0.41，把三个新层更上去，用 App 的 WebView �
 
 **下一步（按优先级）**：
 
-1. 收 v0.3.17 的发布结果：`releases/latest` 应指向 v0.3.17；并抽查
-   `sunsetlinux-module-1.0.42.zip` 里**确实有** `bin/zstd-filter.mjs`（上一版 1.0.41 就没有）。
-   办法不必下 115 MB：HTTP range 抠 zip 中央目录 + 单文件 inflate（`/root/Q/verify-module-zip.mjs`）。
+1. ~~收 v0.3.17 的发布结果~~ ✅ **已收（run 58 / `1d7fdb4`）**：`releases/latest` = **v0.3.17**；
+   模块 **1.0.42** 里**确实有** `bin/zstd-filter.mjs`（1.0.41 没有），`bin/update.sh`（46894 B）
+   含新选择逻辑（`SUNSET_HAVE_ZSTD` 两处），`bin/supervise.sh` 仍带 `--expose-internals`；
+   频道未变（base 24.04.3-l1 / runtime 1.0.1 / dsh 0.1.6-alpha.2）。
+   抽查办法：HTTP range 抠 zip 中央目录 + 单文件 inflate（`/root/Q/verify-module-zip.mjs`），不必下 115 MB。
 2. 真机：按用户要求**随模块更新走** —— 在 App 里把模块更到 1.0.42、重启，再看 0.1.6 的 WebView
    （移动端是**客户端**插件，服务端起得来 ≠ 浏览器里没 JS 报错）。
+   ⚠️ 模块更新要**重启**才生效，而重启会结束当前会话里跑着的 agent —— 所以这一步留给用户自己挑时间。
 3. runtime 层若以后要重出：记得版本 +1，并顺手修上面那条 dsh 层重复副本的问题。

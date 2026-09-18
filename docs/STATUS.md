@@ -619,6 +619,18 @@ dsh 层里有 5 个**冗余的入口脚本副本**（`doctor.sh` / `entry.sh` / 
 **仍未做**：真机端到端（0.1.6 的 WebView / 客户端插件那唯一一环）。手机现装
 runtime 1.0.0 / dsh rc.1+rc.2 / 模块 1.0.41；按用户要求**随模块更新走**（不手工改环境）。
 
+**发布结果（已核实，run 58 / commit `1d7fdb4`）**：`releases/latest` → **v0.3.17**；
+Release 上是 6 个 APK + 6 个离线包 + 模块 1.0.42（full 115,023,785 B / bare 1,073,259 B）；
+`index.json` 自述 `run_number=58 app_version=0.3.17 module_version=1.0.42`。
+**逐件抽查（HTTP range 抠 zip 单文件，不必下 115 MB）**：
+
+| 抽查 | 结果 |
+|---|---|
+| 模块 1.0.42 里有 `bin/zstd-filter.mjs` | ✅（**1.0.41 没有** —— 这就是"同版本两种内容"的实证） |
+| 模块 1.0.42 的 `bin/update.sh`（46894 B）含新选择逻辑 | ✅ 两处：`process.env.SUNSET_HAVE_ZSTD === '1'` 与 `SUNSET_HAVE_ZSTD="$have_zstd"` |
+| `bin/supervise.sh` 仍带 `--expose-internals` | ✅ 没被这轮改动碰掉 |
+| 频道清单 | ✅ 未变：base 24.04.3-l1 / runtime 1.0.1 / dsh 0.1.6-alpha.2 |
+
 ### 3.10.54 设备侧也能解 `.zst`：CLI 不再被 `.gz` 绑死（选项 b，2026-09-18）
 
 **为什么做**：0.1.6 的 dsh 层 `.gz` 产物 **109.5 MB**，同时撞上三件事 ——
