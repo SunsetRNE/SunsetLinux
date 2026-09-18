@@ -5,7 +5,8 @@
 # sunsetlinux · runtime/root/supervise.sh
 #
 # 环境内 supervisor（无 systemd，findings §2）。跑：
-#   /usr/local/bin/dsh web --no-open --host 127.0.0.1 --port <port>
+#   node --expose-internals /usr/local/bin/dsh web --no-open --host 127.0.0.1 --port <port>
+#   （`--expose-internals` 是 DSH 0.1.6+ 的硬要求 —— HMR 服务要它，见下面 §2 的注释）
 #
 # 为什么**不能** `exec node ...`（这是与 architecture.md §3.2 初版的关键差异，
 # 依据 §3.3 的实测鉴权模型）：
@@ -161,10 +162,22 @@ log "profile 检查通过：$PROFILE_DIR（DSH_HOME=$DSH_HOME）"
 # 解析器还没起来，那一行就被跳过了（会表现为 run/dsh.url 一直不出现）。
 LOG_LINES="$(wc -l < "$LOG" 2>/dev/null | tr -dc '0-9' || echo 0)"
 case "${LOG_LINES:-}" in ''|*[!0-9]*) LOG_LINES=0 ;; esac
-log "启动：$DSH_BIN web --no-open --host 127.0.0.1 --port $PORT（日志起始行 $LOG_LINES）"
+log "启动：$NODE_BIN --expose-internals $DSH_BIN web --no-open --host 127.0.0.1 --port $PORT（日志起始行 $LOG_LINES）"
 # stdout/stderr 直接追加到日志文件：**不经管道**，避免缓冲导致 URL 行迟迟不落盘；
 # 同时保留原始输出便于排查（§3.3 要求日志里能看到那一行）。
-"$DSH_BIN" web --no-open --host 127.0.0.1 --port "$PORT" >> "$LOG" 2>&1 &
+#
+# ★ 为什么显式 `node --expose-internals <dsh> web`（而不是直接跑 `dsh web`）：
+#   DSH 0.1.6 起，`@deepseek-ai/dsh-base` 的补丁里多了一个 `hmr` 条目
+#   （`@deepseek-ai/dsh-hmr`），而 HMR 服务要求 **node 以 `--expose-internals` 启动**
+#   （`dsh-hmr` 的构造函数里 `if (!ctx.loader.internal) throw "--expose-internals is required"`）。
+#   `dsh` 的入口是 `#!/usr/bin/env node`，shebang **带不了**这个 flag；而
+#   `NODE_OPTIONS=--expose-internals` 也会被 node 拒绝（"not allowed in NODE_OPTIONS"）。
+#   实测（真 rootfs + 真 profile，2026-09-18）：不带的后果是**启动即失败**——
+#       Error: dsh: plugin tree failed to load: failed to apply loader entry include
+#         caused by: --expose-internals is required for HMR service
+#   带上之后同一棵 profile 秒起，鉴权链路 401 → 303 → 200 全通（见 docs/STATUS.md §3.10.53）。
+#   0.1.5 及更早没有这个条目，带着这个 flag 也**没有副作用**，所以无条件带上。
+"$NODE_BIN" --expose-internals "$DSH_BIN" web --no-open --host 127.0.0.1 --port "$PORT" >> "$LOG" 2>&1 &
 DSH_PID=$!
 printf '%s\n' "$DSH_PID" > "$PID_FILE" 2>/dev/null || true
 log "dsh 已后台启动，pid=$DSH_PID"

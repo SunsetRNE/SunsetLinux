@@ -104,6 +104,17 @@ jobs:
           files="$(printf '%s\n%s\n' "$layers" "$extra" | sed '/^$/d')"
           echo "待上传："
           printf '  %s\n' $files
+
+          # ★ 分片（`<层>.erofs.gz.part-aa` / `-ab` …）：**git 单文件 100 MB 硬限**的绕法。
+          #   0.1.6-alpha.2 的 dsh 层因为上游多带一个 186 MB 的 LibreOffice WASM，
+          #   回退产物 `.gz` 涨到 109.5 MB —— 直接推 `layers` 分支会被 GitHub 拒
+          #   （实测：`GH001: Large files detected`）。分片过 git、在这里**拼回整份**再上传，
+          #   清单里的 `url_gz` 仍然是**一个完整文件**，下载端与既有工具链都不用改。
+          parts="$(ls -1 *.erofs.gz.part-* 2>/dev/null || true)"
+          if [ -n "$parts" ]; then
+            echo "发现分片（将在上传后拼回）："
+            printf '  %s\n' $parts
+          fi
           {
             echo 'files<<LAYERS_EOF'
             printf '%s\n' $files
@@ -143,6 +154,33 @@ jobs:
           fi
           # shellcheck disable=SC2086
           gh release upload "$TAG" $FILES --clobber
+
+      # ★ 把分片拼回整份再上传（见 scan 步骤里的说明）。
+      #   顺序必须稳定：`sort` 后按 part-aa/ab/… 拼接 ⇒ 逐字节等于分片前的那份文件。
+      - name: 重组分片并上传（`.erofs.gz.part-*` → `.erofs.gz`）
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          parts=( *.erofs.gz.part-* )
+          if [ "${#parts[@]}" -eq 0 ]; then
+            echo "没有分片，跳过"
+            exit 0
+          fi
+          targets=()
+          for f in "${parts[@]}"; do targets+=("${f%%.part-*}"); done
+          mapfile -t uniq < <(printf '%s\n' "${targets[@]}" | sort -u)
+          for full in "${uniq[@]}"; do
+            echo "==> 拼接 $full"
+            # shellcheck disable=SC2046
+            cat $(ls -1 "$full".part-* | sort) > "$full"
+            got="$(stat -c %s "$full")"
+            [ "$got" -gt 0 ] || { echo "::error::拼出来的 $full 是空文件"; exit 1; }
+            echo "    $full = $got 字节；sha256=$(sha256sum "$full" | cut -d' ' -f1)"
+            gh release upload "$TAG" "$full" --clobber
+          done
 
       - name: 打印 base-url 与校验值（给 publish-channel 用）
         env:

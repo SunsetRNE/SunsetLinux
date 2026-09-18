@@ -155,7 +155,7 @@ App 不需要关心模式差异，只读 `status` 里的 `mode` 字段。
     "url": "http://127.0.0.1:3080/?token=<launchToken>",
     "base_url": "http://127.0.0.1:3080",
     "port": 3080,
-    "version": "0.1.5-rc.2",
+    "version": "0.1.6-alpha.2",
     "healthy": true
   },
   "layers": {
@@ -364,19 +364,19 @@ Node 服务）本来就是两层东西，但 `linuxctl start` 一直把它们绑
 {
   "schema": 1,
   "name": "官方频道",
-  "generated_at": "2026-09-15T12:00:00Z",
+  "generated_at": "2026-09-18T12:28:51Z",
   "layers": [
     {
       "id": "dsh",
       "version": "0.1.5-rc.2",
 
-      "url": "dsh-0.1.5-rc.2.erofs.zst",   "transport": "zstd",
-      "sha256": "<.zst 文件本身的 sha256>",  "size": 32715571,
+      "url": "dsh-0.1.6-alpha.2.erofs.zst",   "transport": "zstd",
+      "sha256": "00e004e549898c9f14bc34f01ece2c9ece1183e0a3c28acf869e1a07a1296dac",  "size": 79078686,
 
-      "url_gz": "dsh-0.1.5-rc.2.erofs.gz",  "transport_gz": "gzip",
-      "sha256_gz": "<.gz 文件本身的 sha256>", "size_gz": 50123456,
+      "url_gz": "dsh-0.1.6-alpha.2.erofs.gz",  "transport_gz": "gzip",
+      "sha256_gz": "6d6452bd00791770192947d3260edae1b1731016b26444a0e7dd26b92f9a919b", "size_gz": 114833160,
 
-      "sha256_raw": "<解压后裸 .erofs 的 sha256>", "size_raw": 211259392
+      "sha256_raw": "1f1e5dd51333b1e1047ee64532bef1fd2931a38a44c59d3f0f124cd6b6dccc64", "size_raw": 443654144
     }
   ],
   "dsh_npm": { "dist_tag": "next", "package": "@deepseek-ai/dsh" }

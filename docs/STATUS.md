@@ -47,13 +47,15 @@
 | `sunsetlinux-launcher-debug.apk` | Android 启动器（Compose M3） | ⚠️ 单色化后**待重建**（源码已通过编译） |
 | `sunsetlinux-module-0.1.0.zip` | KernelSU 模块（开机自启 + 挂载探测 + 模块 WebUI） | ⚠️ 单色化后**待重打** |
 | `base-24.04.3-l1.erofs.{zst,gz}` | base 层 | ✅ 已产出并验证 |
-| `runtime-1.0.0.erofs.{zst,gz}` | runtime 层（Node 24.21.0 + pnpm 12.4.2 + 入口脚本） | ✅ |
-| `dsh-0.1.5-rc.2.erofs.{zst,gz}` | dsh 层（DSH + 191 依赖 + profile 工作区） | ✅ |
+| `runtime-1.0.1.erofs.{zst,gz}` | runtime 层（Node 24.21.0 + pnpm 12.4.2 + 入口脚本；1.0.1 只改 `supervise.sh`：`--expose-internals`） | ✅ 2026-09-18 重打并逐项验证 |
+| `dsh-0.1.6-alpha.2.erofs.{zst,gz}` | dsh 层（DSH 0.1.6-alpha.2 + 其依赖 + profile 工作区） | ✅ 2026-09-18 重打：层内 `dsh web` 起得来、鉴权 401→303→200、页面含 `dsh-web-mobile` |
 | `channel/` | **已签名、可发布的频道**（三层两式 + 清单 + 签名） | ✅ 全链路跑通 |
 | `sunsetlinux-seed-*.tar.zst` | 离线种子（ubuntu-base + Node 官方包） | ✅ |
 | `proot-bundle-arm64.tar.gz` | 非 root 模式的 proot（GPLv2 合规，随附许可与 SOURCE） | ✅ |
 
-**分发体积**：全量 **96.3 MB**（zstd）；**DSH 单层升级 31.2 MB**。
+**分发体积**：全量 **141.6 MB**（zstd：base 18.6 + runtime 47.6 + dsh 75.4）；
+**本轮升级要下 123.2 MB**（runtime 47.6 + dsh 75.4；base 未变）。
+涨的原因单一：0.1.6 多带 `@deepseek-ai/libreoffice-kit-wasm`（186 MB），见 §3.10.53。
 
 ---
 
@@ -516,6 +518,69 @@ su -c '/data/sunsetlinux/bin/linuxctl doctor'
 | 版本比较 | 没有（不比较） | `compareModuleVersion` **逐段数字比**：`1.0.10 > 1.0.9`（字符串比会得出相反结论）；`1.0` 与 `1.0.0` 视为同版，避免假更新提示 |
 | 已装状态读不到时 | —— | **不给刷入按钮**，先让用户修 root 授权（与"读不到 ≠ 没装"一致） |
 | 重启 | —— | 只报告"重启后生效"（KernelSU 落 `modules_update/`），**App 不替用户重启**，脚本里有单测断言不许出现 `reboot` |
+
+### 3.10.53 移植目标版本推进到 DSH **0.1.6-alpha.2**：两处"启动即失败"的坑 + 层重打 + 频道（2026-09-18）
+
+**用户原话**：「移植性推进：内置目标版本 `0.1.6-alpha.2`，频道同步更新。继续推进相关项目进度。」
+
+#### 一、上游事实（快照 2026-09-18 10:38Z，只查**移植目标** DSH 本体）
+
+| 源 | 事实 |
+|---|---|
+| npm `@deepseek-ai/dsh` | `latest` = `next` = **0.1.5-rc.2**（09-10 14:57Z）；`alpha` = **0.1.6-alpha.2**（09-17 13:52Z） |
+| GitHub Releases | `dsh-v0.1.6-alpha.2`（09-17 13:30Z，commit `ddefc45`）、`dsh-v0.1.6-alpha.1`（09-15）；tag 之后 main **0 条新提交** |
+| 子包 | `alpha` tag 同步到 0.1.6-alpha.2；`latest` 仍冻在 `0.0.1-rc.1`（⇒ §5.2 的"软链到 DSH 自身 node_modules"配方继续成立） |
+
+#### 二、三处必须改的地方（都不是口味问题，不改就是失败）
+
+| # | 现象（实测） | 根因 | 改法 |
+|---|---|---|---|
+| 1 | 增量构建启动即报 `/usr/local/bin/dsh 不存在`，DSH 被装到 `/opt/node/lib/node_modules` | runtime 层里**没有任何 npmrc**（构建期 `npm config set prefix /usr/local --global` 写的 `/opt/node/etc/npmrc` 没进层）⇒ 只有"复用 base/runtime 树"的增量路径会踩 | `build_dsh` 显式 `npm i -g --prefix /usr/local` |
+| 2 | 原生件没准备好（`node-pty/prebuilds/linux-arm64/pty.node` 是 `0600`，旧层里是 `0755`） | npm 11.7+ **默认拦截** install 脚本，**只 warn 不报错** —— 典型的"静默发出残缺产物" | `--allow-scripts=<5 个包>`（`DSH_ALLOW_SCRIPTS`）＋ 装完核对 npm 输出，只要还有"not yet covered"就 **die** |
+| 3 | **`dsh web` 起不来**：`plugin tree failed to load … --expose-internals is required for HMR service`，并连带 `Cannot find package 'dsh-web-mobile'` | 0.1.6 的 `dsh-base` 补丁新增 `hmr`（`@deepseek-ai/dsh-hmr`）条目；HMR 服务要求 node 以 `--expose-internals` 启动。shebang 带不了、`NODE_OPTIONS` 也被 node 拒绝 | 两个真正的启动点都改成 `"$NODE_BIN" --expose-internals "$DSH_BIN" web …`：`runtime/root/supervise.sh`、`runtime/proot/entry.sh` |
+
+**★ 第 3 条最容易误判**：那两条 `Cannot find package 'dsh-web-mobile' / 'dsh-task-notifier'` 是
+**连锁反应**（条目组整体失败 ⇒ 解析路由没建起来 ⇒ 插件名退回原生解析），不是 profile 配方错了。
+带上 flag 后同一棵 profile **一条插件错误都没有** —— 千万别照着第二条去改 profile。
+
+顺带修掉两处**假警报**（它们会把真问题淹掉）：
+- `build_dsh` 数 profile 软链下的包数用了不带 `-L` 的 `find`，实测把 260 个包数成 0 个并警告"疑点"；
+- 层间删除检测拿**未过滤**的文件列表比对，把 `EXCLUDES` 里本来就不进层的路径（`/tmp/*` 等，
+  `build_dsh` 自己会清 `$DSH_ROOT/tmp/*`）算成"删除了上一层的 70 个文件"。
+
+#### 三、实测结果（真 rootfs，chroot 内跑真 `dsh web`）
+
+| 项 | 结果 |
+|---|---|
+| `dsh --version` | `0.1.6-alpha.2` ✅ |
+| profile 插件自检（install-web-profile.sh 内置） | 4 个包 import 全 `ok`（`dsh-web-mobile@2.4.1`、`dsh-task-notifier@1.1.0`、`dsh-base`、`dsh-web-app`）✅ |
+| `dsh web`（带 `--expose-internals`） | 启动**无任何插件错误**，只打印带令牌 URL ✅ |
+| 鉴权链路 | 裸 `/` → **401**，带 token → **303**，与 0.1.5 一致 ✅ |
+| 不带 flag | 启动即失败（见上表 #3）——这条本身就是证据 |
+
+⇒ **现有 profile 配方（npm 装进 profile `node_modules` + `@deepseek-ai` 相对软链）在 0.1.6 下不用改**。
+
+#### 四、体积：这一版的真实代价
+
+| 层 | 0.1.5-rc.2 | 0.1.6-alpha.2 | 备注 |
+|---|---|---|---|
+| dsh 裸镜像 | 201.5 MB | **443.7 MB** | `@deepseek-ai/libreoffice-kit-wasm` **单包 186 MB**（侧边栏 Office 预览的 WASM），@deepseek-ai 子树 45 MB → 237 MB |
+| dsh 分发 `.zst` | 31.2 MB | **79.1 MB** | 用户更新要多下 48 MB；含 proot 的"完整离线版"APK 也会跟着涨 |
+
+**待拍板**：要不要在层里裁掉 `libreoffice-kit-wasm`（代价：侧边栏 Word/Excel/PPT 预览不可用）。
+不裁 = 忠实于 npm 版本、`layer-spec` 的"dsh 层版本 == npm 版本"不变式完好；裁 = 层不再等于上游包。
+**本轮先按"不裁"发**，把这个取舍留给用户，而不是默默裁掉。
+
+#### 五、顺带记下的两个**宿主侧**坑（只影响"在这台手机上重建层"）
+
+1. **本工作容器的 Android 内核 + f2fs 上，`nlink > 1` 的文件在 chroot 内不可见**（`stat` 能过、
+   `test -e`/`exec` 报 ENOENT）。从层镜像里 `fsck.erofs --extract` 出的树保留硬链，
+   合并/复制时必须**不保留硬链**（`rsync -aX`，不带 `-H`），否则 `node`/`pnpm` 在 chroot 里
+   直接"找不到"——曾据此误判为"层坏了"。CI runner 不是这个内核，不受影响。
+2. **本机 `mount` 进 chroot 会踩坑**：目标目录里存在挂载点时 `chroot(2)` 返回 `ENOSYS`
+   （本内核/容器策略），所以本地重建用 `mount` 空实现垫片跳过 `bind_mounts`（`/proc`、`/dev`
+   本就不需要：npm/node 在无挂载的 chroot 里实测可跑）。这两条只写在构建记录里，
+   **没有**为了让本地能跑而改 `bind_mounts` 的语义。
 
 ### 3.10.52 DSH 网页改为**覆盖整窗**渲染 + 回壳出口（App 0.3.15）
 

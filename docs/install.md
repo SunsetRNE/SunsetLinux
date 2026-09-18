@@ -134,12 +134,12 @@ App 自己会解 `.zst`（共 96 MB），装完点「启动环境」。
 > B=https://github.com/SunsetRNE/SunsetLinux/releases/download/layers-20260916
 > cd /data/sunsetlinux/cache
 > curl -fsSL -o base.erofs.gz    $B/base-24.04.3-l1.erofs.gz
-> curl -fsSL -o runtime.erofs.gz $B/runtime-1.0.0.erofs.gz
-> curl -fsSL -o dsh.erofs.gz     $B/dsh-0.1.5-rc.2.erofs.gz
+> curl -fsSL -o runtime.erofs.gz $B/runtime-1.0.1.erofs.gz
+> curl -fsSL -o dsh.erofs.gz     $B/dsh-0.1.6-alpha.2.erofs.gz
 > gzip -d base.erofs.gz runtime.erofs.gz dsh.erofs.gz
 > /data/sunsetlinux/bin/linuxctl update base    /data/sunsetlinux/cache/base.erofs    --version 24.04.3-l1
-> /data/sunsetlinux/bin/linuxctl update runtime /data/sunsetlinux/cache/runtime.erofs --version 1.0.0
-> /data/sunsetlinux/bin/linuxctl update dsh     /data/sunsetlinux/cache/dsh.erofs     --version 0.1.5-rc.2
+> /data/sunsetlinux/bin/linuxctl update runtime /data/sunsetlinux/cache/runtime.erofs --version 1.0.1
+> /data/sunsetlinux/bin/linuxctl update dsh     /data/sunsetlinux/cache/dsh.erofs     --version 0.1.6-alpha.2
 > /data/sunsetlinux/bin/linuxctl start
 > ```
 

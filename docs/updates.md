@@ -48,8 +48,8 @@ DSH 换版本时通常只有 `dsh-<版本>.erofs.zst` 变了，**不需要重下
 ```
 base-24.04.3-l1.erofs.zst   ← 主产物（zstd，体积最小）→ App 走这条
 base-24.04.3-l1.erofs.gz    ← 回退产物（gzip，零依赖）→ 设备侧纯 CLI 走这条
-runtime-1.0.0.erofs.zst / .gz
-dsh-0.1.5-rc.2.erofs.zst / .gz
+runtime-1.0.1.erofs.zst / .gz
+dsh-0.1.6-alpha.2.erofs.zst / .gz
 ```
 
 * **为什么两种都要发**：设备侧实测**没有 zstd，也没有 xz**，只有 toybox 的 `gzip`
@@ -61,12 +61,14 @@ dsh-0.1.5-rc.2.erofs.zst / .gz
   解压出来的裸 `.erofs` 直接挂载。
 * 每层的 `sha256`/`size` 对应**它自己那个压缩产物**；裸镜像用 `sha256_raw`/`size_raw`。
   App 解压后要用 `sha256_raw`/`size_raw` 再校验一次。
-* 实测参照（真实 dsh 层，`0.1.5-rc.2`）：裸镜像 201.5 MB → `.zst` 31.2 MB（6.5×）
-  → `.gz` 47.8 MB（4.2×）。**更新一次只需下载 31.2 MB。**
+* 实测参照（真实 dsh 层，`0.1.6-alpha.2`）：裸镜像 443.7 MB → `.zst` 79.1 MB（5.6×）
+  → `.gz` 114.8 MB（3.9×）。**更新一次要下 79.1 MB。**
+  （`0.1.5-rc.2` 时是 201.5 MB → 31.2 MB；涨的原因是上游 0.1.6 多带了一个
+  `@deepseek-ai/libreoffice-kit-wasm`（186 MB），见 `docs/dsh-profile.md` §7.4。）
 * ⚠️ **zstd 窗口必须锁在 8 MiB（windowLog ≤ 23）**：App 用的是**纯 Java** zstd 解码器
   （`io.airlift:aircompressor` —— `zstd-jni` 没有 Android ABI），窗口上限就是 8 MiB。
   若发布时用了 `--long=27`、`zstd -22` 之类放大窗口的参数，App 会**自动退回 gzip**
-  （不报错，但 dsh 层从 31.2 MB 涨到 47.8 MB，用户白下 16 MB）。
+  （不报错，但 dsh 层从 79.1 MB 涨到 114.8 MB，用户白下 35 MB）。
   * 构建侧：`build-layers.sh` 固定用 `zstd -19 --zstd=wlog=23`（Node 回退实现也锁 23）。
   * 工具侧：`gen-manifest`/`verify` 会**直接解析 zstd 帧头**核对窗口（常数级开销），
     超限时警告，`--strict`（含 `publish-check`）直接失败。
@@ -278,8 +280,8 @@ CI 侧（`channel` 分支的工作流）本来就会做这件事：它用 Secret
   ```
   base-24.04.3-l1.erofs        # 镜像（挂载用；构建期也会做 fsck.erofs 校验）
   base-24.04.3-l1.erofs.zst    # 分发产物（频道里发布的是这个）
-  runtime-1.0.0.erofs[.zst]
-  dsh-0.1.5-rc.2.erofs[.zst]
+  runtime-1.0.1.erofs[.zst]
+  dsh-0.1.6-alpha.2.erofs[.zst]
   ```
   默认 `--erofs-compress none`（镜像不压缩，见 §0 的理由）+
   分发时**同时产出** `.erofs.zst`（主）与 `.erofs.gz`（回退，`--no-gzip-fallback` 可关）。
@@ -354,12 +356,12 @@ tools/channel/sunsetlinux-channel gen-manifest \
   "name": "某开发者的内测",
   "generated_at": "2026-09-15T12:00:00Z",
   "layers": [
-    { "id": "dsh", "version": "0.1.5-rc.2", "fs": "erofs",
+    { "id": "dsh", "version": "0.1.6-alpha.2", "fs": "erofs",
       "transport": "zstd",
-      "url":   "https://example.org/sunsetlinux/dsh-0.1.5-rc.2.erofs.zst",
+      "url":   "https://example.org/sunsetlinux/dsh-0.1.6-alpha.2.erofs.zst",
       "sha256": "…", "size": 92103456,
       "transport_gz": "gzip",
-      "url_gz": "https://example.org/sunsetlinux/dsh-0.1.5-rc.2.erofs.gz",
+      "url_gz": "https://example.org/sunsetlinux/dsh-0.1.6-alpha.2.erofs.gz",
       "sha256_gz": "…", "size_gz": 118336512,
       "sha256_raw": "…", "size_raw": 356515840 },
     { "id": "runtime", "version": "1.0.0", "…": "（同上结构）" },
@@ -369,25 +371,25 @@ tools/channel/sunsetlinux-channel gen-manifest \
 }
 ```
 
-真实产物示例（本机实测的 dsh 层，`dsh-0.1.5-rc.2`）：
+真实产物示例（本机实测的 dsh 层，`dsh-0.1.6-alpha.2`）：
 
 ```json
 {
-  "id": "dsh", "version": "0.1.5-rc.2", "transport": "zstd",
-  "url": "dsh-0.1.5-rc.2.erofs.zst",
+  "id": "dsh", "version": "0.1.6-alpha.2", "transport": "zstd",
+  "url": "dsh-0.1.6-alpha.2.erofs.zst",
   "sha256": "04ddce5f5edee710fc7466d46db40c70b06b11cbdc3d4bad0e2b9d8b9e25e820",
   "size": 32753059,
   "sha256_raw": "d9674df77923341e39759750c36f57bb53e481296129dd4e1cb80864faa60c29",
   "size_raw": 211259392,
   "transport_gz": "gzip",
-  "url_gz": "dsh-0.1.5-rc.2.erofs.gz",
+  "url_gz": "dsh-0.1.6-alpha.2.erofs.gz",
   "sha256_gz": "30333242466252e5b0099bf1e14a34003b1d58fb93c8541b20fd18e4c247c1d9",
   "size_gz": 50146411
 }
 ```
 
-即：裸镜像 **201.5 MB** → 主产物 `.zst` **31.2 MB**（压缩 6.5×）→ 回退 `.gz` **47.8 MB**（4.2×）。
-**用户更新 DSH 只需下载 31.2 MB。** 字段顺序固定为
+即：裸镜像 **443.7 MB** → 主产物 `.zst` **79.1 MB**（压缩 5.6×）→ 回退 `.gz` **114.8 MB**（3.9×）。
+**用户更新 DSH 要下 79.1 MB。** 字段顺序固定为
 `id, version, transport, url, sha256, size, sha256_raw, size_raw, transport_gz, url_gz, sha256_gz, size_gz`
 （`fs` 字段默认不输出，用 `--include-fs` 才会加，避免严格 JSON 解析器报未知字段）。
 

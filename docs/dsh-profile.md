@@ -314,3 +314,87 @@ const result = spawnSync("pnpm", args.map(...), { ... });
   → 语义正确：`reset` 之后用户自装的插件会消失，回到出厂的 4 个 bundle。
   → 若要把某个第三方插件"固化进发行版"，应改 `web-profile/package.json` 重新构建层，
     **不要**依赖设备上的手工安装。
+
+---
+
+## 7. DSH 0.1.6-alpha.2 实测：三处会让人踩空的变化（2026-09-18）
+
+本节是**把内置/目标版本从 `0.1.5-rc.2` 推到 `0.1.6-alpha.2`** 时逐条踩出来的，全部有实测证据
+（构建脚本、`dsh web` 真启动、鉴权链路）。三条都不是"配置口味"，**不处理就是启动即失败或层残缺**。
+
+### 7.1 `npm i -g` 必须显式带 `--prefix /usr/local`
+
+`build-layers.sh` 的 runtime 阶段确实跑过 `npm config set prefix /usr/local --global`，
+但那份配置写在 `<node prefix>/etc/npmrc`（= `/opt/node/etc/npmrc`）——**它没有进 runtime 层**
+（`dump.erofs`/解包核对过：runtime 层里没有任何 npmrc）。
+
+后果只在**增量构建**路径上暴露：`--skip-base --skip-runtime`（= "只重出 dsh 层"的标准姿势，
+CI 的 `layers.yml` 选 `dsh` 就是这条）会把 DSH 装到 `/opt/node/lib/node_modules`，
+然后在本函数的断言上报 `/usr/local/bin/dsh 不存在`——报错点离原因很远。
+
+**改法**：`build_dsh` 里 `npm i -g --prefix /usr/local …` 显式写死。dsh 层从此不再依赖
+"上一次构建留在树里的残渣"。
+
+### 7.2 npm 11.7+ 默认**拦截** install 脚本（只 warn，不报错）
+
+`@deepseek-ai/dsh@0.1.6-alpha.2` 的依赖里有 5 个包带 install/postinstall 脚本
+（`@deepseek-ai/dsh-subprocess-local`、`koffi`、`node-pty`、`@google/genai`、`protobufjs`）。
+npm 新版会把它们**静默跳过**，只打印一段 `install-scripts` 警告 —— 正是本项目最怕的
+"装完了但原生件没准备好"。实测差异：旧层里 `node-pty/prebuilds/linux-arm64/pty.node` 是 `0755`
+（脚本跑过），不处理时是 `0600`（脚本没跑）。
+
+**改法**：`--allow-scripts=<这 5 个包>`（build-layers.sh 的 `DSH_ALLOW_SCRIPTS`，
+可用 `--dsh-allow-scripts` 覆盖），并在装完后**检查 npm 输出**：只要还有
+"install scripts not yet covered" 就 `die`（依赖一变就红，绝不静默发残缺层）。
+
+### 7.3 ★ `dsh web` 必须用 `node --expose-internals` 启动（0.1.6 起）
+
+0.1.6 的 `@deepseek-ai/dsh-base` 补丁里多了一个条目：
+
+```yaml
+    - id: hmr
+      name: '@deepseek-ai/dsh-hmr'
+      disabled: !!js "!ctx.get('profileContext')"
+```
+
+而 HMR 服务（`dsh-hmr/lib/index.js`）的构造函数第一件事就是
+`if (!this.ctx.loader.internal) throw new Error("--expose-internals is required for HMR service")`。
+`loader.internal` 的取法（`cordis-plugin-loader/lib/internal.js`）只有两条：
+`process.execArgv.includes("--expose-internals")` 或 `node-addon-require-builtin` 兜底。
+
+**症状**（真 rootfs 实测）：`dsh web` 起来就退出，日志里是
+
+```
+Error: dsh: plugin tree failed to load: failed to apply loader entry include (cordis:include)
+  [cause]: AggregateError: loader entries failed to apply
+    Error: failed to apply loader entry hmr (@deepseek-ai/dsh-hmr): --expose-internals is required for HMR service
+    Error: failed to import loader entry dsh-web-mobile … Cannot find package 'dsh-web-mobile'
+    Error: failed to import loader entry task-notifier … Cannot find package 'dsh-task-notifier'
+```
+
+后两条**是第一条的连锁反应**（条目组整体失败 ⇒ `PluginPackages` 的路由没建起来 ⇒
+插件名退回原生解析 ⇒ 从 DSH 自己的目录里当然找不到 profile 里的插件）。
+**别被误导去改 profile**：带上 flag 后同一棵 profile 一条插件错误都没有。
+
+`dsh` 的入口是 `#!/usr/bin/env node`，shebang 带不了这个 flag；`NODE_OPTIONS=--expose-internals`
+也会被 node 直接拒绝（`--expose-internals is not allowed in NODE_OPTIONS`）。
+**所以只能在启动处显式用 node 起**：
+
+```sh
+"$NODE_BIN" --expose-internals "$DSH_BIN" web --no-open --host 127.0.0.1 --port "$PORT"
+```
+
+改动落在**两个**真正的启动点：`runtime/root/supervise.sh`（真 root 模式）与
+`runtime/proot/entry.sh`（免 root 模式）。0.1.5 及更早没有 hmr 条目，带着这个 flag 也无副作用。
+
+### 7.4 顺带记住的两件事
+
+- **插件解析模式变了**（0.1.6 release note："插件依赖解析模式调整为运行时解析"）：
+  `lib/profile-boot` 里 `resolutionMode` 默认 `"runtime"`，由 `dsh-app-boot` 的
+  `createProfileResolutionGeneration()` 按 **install anchor（DSH 自身 package.json）+ profile**
+  算出解析表，再由 `PluginPackages` 强制路由。实测**现有 profile 配方（npm 装进
+  `node_modules` + `@deepseek-ai` 相对软链）在 0.1.6 下仍然可用**（四个插件 import 自检全 ok），
+  但"插件必须能被 Node 从 profile 目录解析到"这条比 0.1.5 更硬。
+- **体积**：0.1.6 多了一个 `@deepseek-ai/libreoffice-kit-wasm`（**186 MB**，Office 预览的 WASM），
+  dsh 层因此从 201.5 MB 涨到 443.7 MB，分发 `.zst` 31.2 MB → 79.1 MB。这是移动端的真实代价，
+  要不要在层里裁掉它（并接受"侧边栏 Office 预览不可用"）是一个**待拍板**的取舍，别默默裁。

@@ -102,6 +102,9 @@ NODE_FALLBACK_VERSION="v24.21.0"
 NODE_MAJOR="24"
 NODE_TARBALL_URL_BASE="https://nodejs.org/dist"
 PNPM_VERSION="latest"                    # pnpm 是 dsh plugin 的硬依赖（dsh-profile.md §6）
+# DSH 依赖里带 install/postinstall 脚本的包（npm 11.7+ 默认拦截，只 warn 不报错 ⇒ 原生件缺失）。
+# 这一串就是 npm 自己打印的清单；DSH 换版本后若新增了带脚本的包，构建会**红**并要求补这里。
+DSH_ALLOW_SCRIPTS="@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs"
 
 OUT_DIR=""
 WORK_DIR=""
@@ -149,6 +152,9 @@ usage() {
   --dsh-version <ver>       直接指定 DSH 版本号（覆盖 --dsh-dist-tag 的解析结果）
   --node-version <vX.Y.Z>   Node 版本（默认：联网取 v24 最新 LTS，失败用 v24.21.0）
   --pnpm-version <ver>      pnpm 版本（默认：latest）—— dsh plugin 的硬依赖，见下
+  --dsh-allow-scripts <列表> 逗号分隔的包名：允许这些包在安装时跑 install/postinstall 脚本
+                            （npm 11.7+ 默认拦截；默认值是 DSH 0.1.6-alpha.2 依赖里带脚本的那 5 个。
+                             漏掉会**红**，不会静默发残缺层）
   --arch <arm64|amd64>      目标架构（默认：arm64）
   --runtime-dir <目录>      把该目录内容复制到 **runtime 层** /opt/sunsetlinux（entry.sh/supervise.sh）
                             （默认自动尝试 runtime/root；见 layer-spec.sh 的 LAYER_RUNTIME_PATHS）
@@ -202,6 +208,7 @@ while [ $# -gt 0 ]; do
     --dsh-package)      DSH_PACKAGE="${2:?}"; shift 2 ;;
     --node-version)     NODE_VERSION="${2:?}"; shift 2 ;;
     --pnpm-version)     PNPM_VERSION="${2:?}"; shift 2 ;;
+    --dsh-allow-scripts) DSH_ALLOW_SCRIPTS="${2:?}"; shift 2 ;;
     --arch)             ARCH="${2:?}"; shift 2 ;;
     --out-dir)          OUT_DIR="${2:?}"; shift 2 ;;
     --work-dir)         WORK_DIR="${2:?}"; shift 2 ;;
@@ -745,14 +752,45 @@ build_dsh() {
 
   bind_mounts "$DSH_ROOT"
 
-  # 1) DSH 主体：全局装到 /usr/local（npm prefix 已在 runtime 层设好）
-  sub "npm i -g ${DSH_PACKAGE}@${DSH_VERSION}"
+  # 1) DSH 主体：全局装到 /usr/local
+  #
+  # ★ `--prefix /usr/local` **必须显式写**（实测踩过，别再删）：
+  #   runtime 层构建时确实跑过 `npm config set prefix /usr/local --global`，但那份配置
+  #   写在 `<node prefix>/etc/npmrc`（= /opt/node/etc/npmrc），**它没有进层**
+  #   （dump 发布产物核对过：runtime 层里没有 /opt/node/etc/npmrc，也没有任何 npmrc）。
+  #   后果：一次 `--skip-base --skip-runtime` 的增量构建（= 只重出 dsh 层的标准姿势）
+  #   会把 DSH 装到 `/opt/node/lib/node_modules`，然后在紧接着的断言上报
+  #   「/usr/local/bin/dsh 不存在」——报错点离真正原因很远，且**只有增量路径会踩**。
+  #   显式传 prefix 后，dsh 层不再依赖"上一次构建留在树里的残渣"。
+  #
+  # ★ `--allow-scripts`：DSH 的依赖里有带 install/postinstall 脚本的包（node-pty 的
+  #   prebuild 与 spawn-helper 执行位、koffi、protobufjs…）。npm 11.7+ **默认拦截**
+  #   这些脚本，且只 warn 不报错 —— 结果是"装完了但原生件没准备好"，属于本项目最忌讳的
+  #   「静默发出残缺产物」。所以显式放行这一串（就是 npm 自己打印的那份清单），
+  #   并在安装后核对 npm 是否还有"未覆盖"的包：有就**红**，绝不放过。
+  #
+  #   注：脚本名会被 npm 与「解析后的身份」比对；列表随 DSH 依赖变化，新增包时这里要跟上
+  #   （下面的检查会在漏掉时明确报出来）。
+  local npm_log="$WORK_DIR/dsh-npm-install.log"
+  : > "$npm_log"
+  sub "npm i -g --prefix /usr/local ${DSH_PACKAGE}@${DSH_VERSION}（allow-scripts=${DSH_ALLOW_SCRIPTS}）"
   in_root "$DSH_ROOT" /bin/bash -c "
     set -e
     export PATH=/opt/node/bin:/usr/local/bin:/usr/bin:/bin
     export HOME=/root
-    npm i -g --no-audit --no-fund '${DSH_PACKAGE}@${DSH_VERSION}'
-  " || die "安装 DSH 失败（版本号不对？DNS？）"
+    npm i -g --prefix /usr/local --no-audit --no-fund \
+      --allow-scripts='${DSH_ALLOW_SCRIPTS}' \
+      '${DSH_PACKAGE}@${DSH_VERSION}'
+  " 2>&1 | tee "$npm_log" >&2 || die "安装 DSH 失败（版本号不对？DNS？npm 不支持 --allow-scripts？）"
+
+  # npm 只 warn 不报错的那些"install-scripts 未覆盖"必须在这里变成硬失败：
+  # 放行清单是**按包名**写的，DSH 依赖一变就可能漏 —— 漏了就等于层里少原生件。
+  if grep -q 'install scripts not yet covered' "$npm_log"; then
+    warn "npm 报告有依赖的 install 脚本**未被放行**（原生件可能缺失）："
+    grep -A 12 'install scripts not yet covered' "$npm_log" | sed 's/^/        /' >&2
+    die "请把上面这些包名补进 build-layers.sh 的 DSH_ALLOW_SCRIPTS（或 --dsh-allow-scripts）后重跑"
+  fi
+  sub "install 脚本放行清单已覆盖全部依赖（npm 无 install-scripts 警告）"
 
   in_root "$DSH_ROOT" /bin/bash -c '
     set -e
@@ -826,7 +864,9 @@ build_dsh() {
     die "profile 软链断言未通过（见上）。profile 失效会导致 DSH 插件解析失败。"
   fi
   local n
-  n="$(find "$link" -maxdepth 1 -mindepth 1 2>/dev/null | wc -l)"
+  # -L：这个路径本身是指向 DSH 自带依赖树的**软链**；不带 -L 时 find 只看软链本身、
+  # 不进去数（实测报"只有 0 个包"的假警报，真正有 260 个）。
+  n="$(find -L "$link" -maxdepth 1 -mindepth 1 2>/dev/null | wc -l)"
   [ "$n" -ge 50 ] || warn "软链目标下只有 $n 个包，预期 ≥ 50（疑点，请人工确认）"
   sub "@deepseek-ai → $(readlink "$link")（相对路径 ✓，目标下有 $n 个包）"
   # profile 的落点必须与 architecture.md §5.3 一致（运行时不联网装插件）
@@ -858,10 +898,19 @@ make_layer_stage() { # make_layer_stage <上一层的完整树|空> <当前完�
   fi
 
   # 删除检测：上一层有、这一层没有的文件 —— overlay 里"删不掉"，必须报警
+  #
+  # ⚠️ 必须**先按 EXCLUDES 过滤**（与打包同一套规则）：这些路径本来就不进任何层，
+  #    拿未过滤的 find 列表比，会把"压根没打进层的东西"算成删除 —— 实测每次构建都会
+  #    误报一次（`build_dsh` 自己会清 `$DSH_ROOT/tmp/*`，而 `/tmp/*` 本来就在 EXCLUDES 里），
+  #    于是真删除被淹在假警报里。判据与 rsync 的 pattern 一致：`/x/*` 与 `/x` 都算"x 及其下"。
   if [ -n "$prev" ]; then
     local plist="$WORK_DIR/.prev.list" clist="$WORK_DIR/.cur.list" dlist="$WORK_DIR/.del.list"
-    ( cd "$prev" && find . \( -type f -o -type l \) | LC_ALL=C sort ) > "$plist"
-    ( cd "$cur"  && find . \( -type f -o -type l \) | LC_ALL=C sort ) > "$clist"
+    local exre
+    exre="$(printf '%s\n' "${EXCLUDES[@]}" \
+            | sed -e 's|/\*$||' -e 's|^/||' -e 's|\.|\\.|g' -e 's|^|^\\./|' -e 's|$|(/.*)?$|' \
+            | paste -sd'|' -)"
+    ( cd "$prev" && find . \( -type f -o -type l \) | LC_ALL=C sort | grep -Ev "$exre" ) > "$plist" || true
+    ( cd "$cur"  && find . \( -type f -o -type l \) | LC_ALL=C sort | grep -Ev "$exre" ) > "$clist" || true
     LC_ALL=C comm -23 "$plist" "$clist" > "$dlist" || true
     local delcount; delcount="$(wc -l < "$dlist" | tr -d ' ')"
     if [ "$delcount" -gt 0 ]; then
@@ -993,6 +1042,15 @@ pack_transport() {
 verify_erofs_profile() { # verify_erofs_profile <dsh.erofs> <staging 里对应的 profile 目录>
   local img="$1" stage_profile="$2"
   local link_path="$LAYER_DSH_PROFILE_DIR/node_modules/@deepseek-ai"
+
+  # 本次没有重建 dsh 层（`--skip-dsh`，例如"只重出 runtime 层"）时，dsh staging 里
+  # **没有 profile** —— 这时不能拿"镜像里必须有 profile"当断言，否则这条路会在打包后
+  # 无声无息地中止（实测：mkfs/fsck 都过了，然后整条构建在分发压缩之前退出，
+  # 连一句 [错误] 都没有，只看得到"保留工作目录"）。有 profile 才验。
+  if [ ! -e "$stage_profile" ]; then
+    warn "dsh staging 里没有 $LAYER_DSH_PROFILE_DIR（本次未重建 dsh 层）→ 跳过 profile 软链的打包后验证"
+    return 0
+  fi
 
   if need dump.erofs && dump.erofs --path="$link_path" "$img" >"$WORK_DIR/dump-erofs.log" 2>&1; then
     local want_len; want_len="$(readlink "$stage_profile/node_modules/@deepseek-ai" | wc -c)"
@@ -1160,6 +1218,7 @@ BUILD_INFO="$OUT_DIR/BUILD-INFO.txt"
   echo "DSH            : ${DSH_PACKAGE}@${DSH_VERSION}（dist-tag=${DSH_DIST_TAG}）"
   echo "Node           : ${NODE_VERSION}"
   echo "pnpm           : ${PNPM_RESOLVED:-$PNPM_VERSION}（dsh plugin 的硬依赖，落在 runtime 层 /opt/node/bin）"
+  echo "DSH 安装       : --prefix /usr/local 显式；install 脚本放行 = ${DSH_ALLOW_SCRIPTS}"
   echo "镜像格式       : EROFS（layer-spec.sh LAYER_FS=erofs）；块大小 $EROFS_BLOCK_SIZE"
   echo "镜像内压缩     : $EROFS_COMPRESS（none = 不传 -z）"
   echo "分发压缩       : 主 $TRANSPORT_PRIMARY（级别 $TRANSPORT_LEVEL）${GZIP_CMD:+，回退 $TRANSPORT_FALLBACK}"

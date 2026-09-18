@@ -28,8 +28,8 @@ class LayerDecompressorTest {
 
     // 产物目录同样由 TestPaths 解析（默认 <仓库根>/dist），不写死开发机绝对路径。
     private val distDir = io.github.sunsetrne.sunsetlinux.TestPaths.distDir
-    private val zstFile = File(distDir, "dsh-0.1.5-rc.2.erofs.zst")
-    private val gzFile = File(distDir, "dsh-0.1.5-rc.2.erofs.gz")
+    private val zstFile = File(distDir, "dsh-0.1.6-alpha.2.erofs.zst")
+    private val gzFile = File(distDir, "dsh-0.1.6-alpha.2.erofs.gz")
 
     /**
      * `dist/` 里的产物**正被发布侧持续重建**（实测 14:27 被同名重写、inode 变化）。
@@ -55,7 +55,8 @@ class LayerDecompressorTest {
     private val zst: File by lazy { stage(zstFile, ZST_SHA256, ZST_SIZE) }
     private val gz: File by lazy { stage(gzFile, GZ_SHA256, GZ_SIZE) }
 
-    /** 解压产物每个 201 MB，用完立刻删，避免多份同时在盘上。 */
+    /** 解压产物每个 443 MB（0.1.6 起 dsh 层因为上游多带了一个 186 MB 的
+     * office WASM 包而变大），用完立刻删，避免多份同时在盘上。 */
     private fun <T> withTempOutput(name: String, block: (File) -> T): T {
         val dir = File(System.getProperty("java.io.tmpdir") ?: ".", "sunsetlinux-layer-decompress-test")
         dir.mkdirs()
@@ -224,7 +225,7 @@ class LayerDecompressorTest {
 
     // ─────────────────────────────────────────────── helpers
 
-    /** 分块比对两个大文件，避免把 2×201 MB 读进堆。 */
+    /** 分块比对两个大文件，避免把 2×443 MB 读进堆。 */
     private fun filesEqual(a: File, b: File): Boolean {
         if (a.length() != b.length()) return false
         java.io.BufferedInputStream(java.io.FileInputStream(a), 1 shl 20).use { ia ->
@@ -256,14 +257,14 @@ class LayerDecompressorTest {
     )
 
     private companion object {
-        const val ZST_SHA256 = "04ddce5f5edee710fc7466d46db40c70b06b11cbdc3d4bad0e2b9d8b9e25e820"
-        const val ZST_SIZE = 32753059L
-        const val GZ_SHA256 = "30333242466252e5b0099bf1e14a34003b1d58fb93c8541b20fd18e4c247c1d9"
-        const val GZ_SIZE = 50146411L
-        const val RAW_SHA256 = "d9674df77923341e39759750c36f57bb53e481296129dd4e1cb80864faa60c29"
+        const val ZST_SHA256 = "00e004e549898c9f14bc34f01ece2c9ece1183e0a3c28acf869e1a07a1296dac"
+        const val ZST_SIZE = 79078686L
+        const val GZ_SHA256 = "6d6452bd00791770192947d3260edae1b1731016b26444a0e7dd26b92f9a919b"
+        const val GZ_SIZE = 114833160L
+        const val RAW_SHA256 = "1f1e5dd51333b1e1047ee64532bef1fd2931a38a44c59d3f0f124cd6b6dccc64"
         // 实测值（zstd -dc | wc -c 与 gzip -dc | wc -c 都是这个数）。
         // 注：需求描述里给的 211288064 = 201.5 MiB 是估算值，比真实大小多 28672 字节，
         // 这条差异已单独回报；这里以**产物本身**为准。
-        const val RAW_SIZE = 211259392L
+        const val RAW_SIZE = 443654144L
     }
 }

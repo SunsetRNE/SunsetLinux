@@ -544,3 +544,4 @@ docs/specs/BUILD-NOTES.md）：
 | `ubuntu` | Ubuntu 版 | base + runtime | +68 MB |
 | `ubuntu-proot` | 免 root 版 | base + runtime + proot | +69 MB |
 | `ubuntu-proot-dsh` | 完整离线版 | base + runtime + proot + dsh | +102 MB |
+| 0.3.16 | 32 | **内置/目标 DSH 版本推到 `0.1.6-alpha.2`**（离线包由频道清单驱动，`dsh` 层随频道更新）；**免 root 模式的启动器也要带 `--expose-internals`**（DSH 0.1.6 的 HMR 硬要求，改动在 `runtime/proot/entry.sh` → 随 `assets/proot-runtime/` 进 APK）；App 侧无其它行为变化 |

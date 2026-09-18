@@ -333,10 +333,16 @@ LOG_LINES=0
 case "${LOG_LINES:-}" in ''|*[!0-9]*) LOG_LINES=0 ;; esac
 
 write_state starting
-log "supervisor：$NODE_BIN $DSH_BIN web --no-open --host $HOST --port $PORT（日志起始行 $(( LOG_LINES + 1 ))）"
+log "supervisor：$NODE_BIN --expose-internals $DSH_BIN web --no-open --host $HOST --port $PORT（日志起始行 $(( LOG_LINES + 1 ))）"
 log "HOME=$HOME DSH_HOME=$DSH_HOME TZ=$TZ；带令牌 URL 会写入 $URLFILE（0600）"
 
-"$NODE_BIN" "$DSH_BIN" web --no-open --host "$HOST" --port "$PORT" >>"$LOGFILE" 2>&1 &
+# ★ `--expose-internals`：DSH 0.1.6 起 `dsh-base` 补丁里多了 `hmr`（@deepseek-ai/dsh-hmr），
+#   而 HMR 服务要求 node 以该 flag 启动（`if (!ctx.loader.internal) throw "--expose-internals is required"`）。
+#   `dsh` 是 `#!/usr/bin/env node` 的入口，shebang 带不了 flag，NODE_OPTIONS 也会被 node 拒绝
+#   （"not allowed in NODE_OPTIONS"）⇒ 只能在这里显式用 node 启动。不带就是**启动即失败**：
+#       dsh: plugin tree failed to load … --expose-internals is required for HMR service
+#   0.1.5 及更早没有这个条目，带上也**无副作用**（与 runtime/root/supervise.sh 同一处改动）。
+"$NODE_BIN" --expose-internals "$DSH_BIN" web --no-open --host "$HOST" --port "$PORT" >>"$LOGFILE" 2>&1 &
 DSH_PID=$!
 log "dsh 已后台启动，pid=$DSH_PID"
 

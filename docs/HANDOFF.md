@@ -1538,3 +1538,123 @@ App 版本 **0.3.15（versionCode 31）**；模块不变（1.0.40）。
 - 跑 App / 内核单测必须 `LANG=C.UTF-8 LC_ALL=C.UTF-8`（中文测试方法名 + Gradle 守护进程 ASCII locale 会炸）。
 - 动 UI inset 前先看 `UiInsetsContractTest` / `ShellLayoutContractTest` / `DshFullscreenContractTest`
   （源码级契约，CI 会拦；不是形式主义，每条都对应一次用户看得见的问题）。
+
+---
+
+# 本轮：DSH 目标版本 → **0.1.6-alpha.2**（2026-09-18 11:xx 起，同一对话框）
+
+**用户原话**：「移植性推进：内置目标版本 `0.1.6-alpha.2`，频道同步更新。继续推进相关项目进度。」
+
+## 1. 一句话落点
+
+上游 `alpha` 通道的 `@deepseek-ai/dsh@0.1.6-alpha.2` 已**在本机真 rootfs 里跑通**
+（`dsh --version` = 0.1.6-alpha.2、插件自检 4/4 ok、`dsh web` 无插件错误、鉴权链路 401→303）。
+三处"不改就失败"的坑已修进脚本（详见 `docs/STATUS.md` **§3.10.53** 与 `docs/dsh-profile.md` **§7**）：
+
+1. `build_dsh` 的 `npm i -g` **必须显式 `--prefix /usr/local`**（runtime 层里根本没有 npmrc，
+   只有"只重出 dsh 层"的增量路径会踩，报错点还离原因很远）；
+2. `--allow-scripts=<5 个包>` + 装完核对"npm 是否还有未放行的 install 脚本"，
+   否则 npm 11.7+ 会**静默跳过** node-pty 等原生件的安装脚本；
+3. ★ `dsh web` 必须用 **`node --expose-internals`** 启动（0.1.6 起 `dsh-base` 补丁里多了
+   `hmr` 条目，HMR 服务硬要求这个 flag）。两个启动点都改了：
+   `runtime/root/supervise.sh`（真 root）与 `runtime/proot/entry.sh`（免 root）。
+
+顺带修了两个把自己人气死的假警报：profile 软链包数（`find` 缺 `-L`，260 → 报 0）、
+层间删除检测把 `EXCLUDES` 里本来就不进层的路径算成删除（每次构建必误报一次）。
+
+## 2. 产物与频道（本轮交付）
+
+| 产物 | 内容 | 说明 |
+|---|---|---|
+| `runtime-1.0.1.erofs.{zst,gz}` | **只改了 `/opt/sunsetlinux/supervise.sh`** | 版本必须 +1：内容变了而版本不变，会造成"有人更新了、有人没有" |
+| `dsh-0.1.6-alpha.2.erofs.{zst,gz}` | DSH 0.1.6-alpha.2 + profile 工作区 | 现有 profile 配方**不用改**（实测） |
+| `channel.json` / `.sig` | base 不变、runtime 1.0.1、dsh 0.1.6-alpha.2 | 层文件仍在同一个 `layers-20260916` Release（单一 base-url，用户只下变了的层） |
+
+用户侧这次的更新量：**runtime ≈ 47 MB + dsh ≈ 79 MB**（base 不变）。
+
+## 3. 必须让你拍板的两件事（我没有替你决定）
+
+1. **dsh 层从 201.5 MB 涨到 443.7 MB**（下载 `.zst` 31.2 → **79.1 MB**）。
+   原因单一：上游 0.1.6 新增 `@deepseek-ai/libreoffice-kit-wasm`，**一个包 186 MB**
+   （侧边栏 Office 预览的 WASM）。**本轮按"不裁"发**——裁了它，dsh 层就不再等于 npm 上那个版本，
+   `layer-spec.sh` 的"层版本 == 包版本"不变式要另立条款。要裁就说一声，我加一个显式开关
+   （并让层版本带后缀、文档写清"Office 预览不可用"）。
+2. **要不要顺带发一版 App**（内置目标版本要进 APK 才叫"内置"）：频道路径已经让**已装的用户**
+   能更新到 0.1.6-alpha.2；但"完整离线版"APK 里内嵌的那份要等下一次 App 发布
+   （`pipeline.yml` 的②节点会**从频道**拉层重打离线包，所以只要频道对了，下一次发布自动就是新版本）。
+
+## 4. 还没做/待验证（别当成已完成）
+
+- 真机端到端：把两个新层 `linuxctl update` 到手机上、用 App 的 WebView 打开新界面
+  （移动端插件是**客户端**插件，服务端起得来 ≠ 浏览器里没 JS 报错；
+  0.1.6 改过客户端 Session/slot API，这是**唯一**还没验的一环）。
+- `testdata/channel/` 的真实清单快照要等频道发出去之后用线上那份替换（含 `.sig`）。
+- `LayerDecompressorTest` 里钉的 dsh 层文件名/sha256/size 要换成新的产物（不换就整类跳过）。
+
+## 5. 补充（同轮发现的两件"交付链"事实，别漏）
+
+1. **改了 `/opt/sunsetlinux/*.sh` 不等于用户就拿到了**：`runtime/root/start.sh` 的
+   `install_runtime_entry()` 每次启动都会把 **KernelSU 模块 `bin/` 里的 entry.sh + supervise.sh
+   拷进 rootfs**（优先级：模块目录 → 脚本同目录 → `$LINUX_HOME/bin`），
+   而这份拷贝落在**可写上层**、会盖住只读层里的同名文件。
+   ⇒ `--expose-internals` 这个修复**必须同时出模块 1.0.41**（本轮已做：`module/module.prop`
+   → `v1.0.41`/`10041`，本地已打出 bare 包并核对 `bin/supervise.sh` 带 flag）。
+2. **免 root 模式的启动器走的是另一条分发路径**：`runtime/proot/entry.sh` 随
+   `assets/proot-runtime/` **进 APK**（不在模块里、也不在 proot bundle 里）。
+   ⇒ proot 用户要跑 0.1.6 必须有**一次 App 发布**（本轮已 bump 到 0.3.16/32）。
+   proot bundle（`proot-bundle-arm64.tar.gz`）里只有 proot 二进制与许可证，**不含这些脚本**，
+   而且本机的 `/usr/bin/proot` 是 5.1.0（已发布的是 5.4.0）——**不要用本机重打这个包**，
+   会把 proot 降级。
+
+## 6. 用户本轮明确的选择
+
+- **不裁剪 `@deepseek-ai/libreoffice-kit-wasm`**（用户 2026-09-18 原话：「不裁剪」）：
+  dsh 层保持 443.7 MB / 下载 79.1 MB，与 npm 上的 `0.1.6-alpha.2` 逐包一致。
+  ⇒ 那个"要不要裁"的开关**不做**；后续若要省体积，先补字体（否则 Office 预览本来就不可用，
+  见 §3.10.53 与本文件上一节的实测）。
+
+---
+
+## ★ 换对话框前 · 当前落点（2026-09-18 13:3x）
+
+**一句话**：`0.1.6-alpha.2` 的三件产物（runtime 1.0.1 / dsh 0.1.6-alpha.2 / 模块 1.0.41）都已产出并逐项验证，
+层已经上了 Release，**频道清单正在上线**；App 尚未发布（0.3.16 已 bump，等推 main 触发流水线）。
+
+### 已经落地（可复查）
+
+| 事项 | 证据 |
+|---|---|
+| dsh 层 0.1.6-alpha.2 | `/var/tmp/layers-out-v2/dsh-0.1.6-alpha.2.erofs`（443,654,144 B，sha256 `1f1e5dd5…`）；`.zst` 79,078,686（窗口 8 MiB ✓）／`.gz` 114,833,160；三者解压 sha256 一致 |
+| 层内真跑 | 走**设备同一条** `supervise.sh`：`run/dsh.url` 有令牌 → 裸 `/` **401** → token **303** → cookie **200**（32160 B），页面里出现 `dsh-web-mobile` |
+| runtime 1.0.1 | `/var/tmp/layers-out-clean/runtime-1.0.1.erofs`（245,313,536 B，sha256 `d0977ce6…`）；只改了 `supervise.sh`（`--expose-internals`） |
+| 频道清单（本地已签） | `/var/tmp/publish-channel/channel.json` + `.sig`；`verify --strict` 与 `publish-check` 全绿；`gen-manifest` 已联网核对 `alpha → 0.1.6-alpha.2` |
+| 层托管 | `layers` 分支已推（`5e31099`），CI run「层托管」**success**；Release `layers-20260916` 里 `dsh-0.1.6-alpha.2.erofs.{zst,gz}` 与 `runtime-1.0.1.erofs.{zst,gz}` 都可下载（206），大小与本地逐字节一致 |
+| 模块 1.0.41 | 本地打出 bare 包并核对 `bin/supervise.sh` 带 `--expose-internals`；`module/module.prop` → `v1.0.41`/`10041` |
+| 仓库闸门 | `cmp-consistency` 16/16、`shell-compat-check` ✓、`ci-changeset-selftest` 39/0、`offline-bundle selftest` 28/0、`runtime/root/selftest.sh` **116/0**（2 skip） |
+
+### 正在飞（换对话框后第一件事就是看它）
+
+1. `channel` 分支已推（`d733966`）→ `channel.yml` 正在签名 + 发 gh-pages `/channel/`。
+   **验收**：`curl -s https://sunsetrne.github.io/SunsetLinux/channel/channel.json | grep -o '"version":"[^"]*"'`
+   应出现 `0.1.6-alpha.2` 与 `1.0.1`；再用 `tools/channel/verify.mjs --pub … --url` 复核签名。
+2. **main 还没推**：推 main 会跑流水线（APK 0.3.16 + 模块 1.0.41 + 离线包），
+   而离线包是**从频道拉层**的 ⇒ **必须等第 1 步线上生效后再推**（否则新 APK 里会嵌旧 dsh）。
+3. `testdata/channel/{channel.json,channel.json.sig}` 还没换成线上那份（等第 1 步完成后照抄）。
+
+### 本轮踩到并已修进脚本的 5 条（细节见 STATUS §3.10.53 / dsh-profile §7）
+
+1. `build_dsh` 的 npm 必须显式 `--prefix /usr/local`（runtime 层里没有 npmrc）；
+2. npm 11.7+ 静默拦截 install 脚本 ⇒ `--allow-scripts=<5 包>` + 装完核对，有漏就红；
+3. `dsh web` 必须 `node --expose-internals`（0.1.6 的 HMR 硬要求）——真 root 与 proot 两个启动点都改了；
+4. 两处假警报（`find` 缺 `-L` 的包数、删除检测没按 EXCLUDES 过滤）；
+5. `verify_erofs_profile` 在 `--skip-dsh`（只重出 runtime 层）时会**无声中止整条构建**——已加"没有 profile 就跳过"。
+
+### 本轮新发现的结构性问题（待你拍板，我没动）
+
+- **GitHub 单文件 100 MB 硬限撞上了**：0.1.6 的 dsh `.gz` = 109.5 MB，直接推 `layers` 分支被拒
+  （`GH001: Large files detected`）。绕法已实现并跑通：把 `.gz` 分片（`.part-aa/ab`）过 git，
+  **在 CI 里拼回整份再当 Release 资产上传**（`layers-release.yml` 新增一步；
+  实测线上资产 114,833,160 B 与本地一致）。**这是权宜之计**——正解二选一：
+  (a) 把 `libreoffice-kit-wasm` 拆成独立层（每层 `.gz` 都回到 100 MB 以下）；
+  (b) 让 CLI 侧能解 `.zst`（runtime 层有 node，仓库已自带 Node 版 zstd 过滤器），
+      这样 `.gz` 只留给"node 还不存在"的 base/runtime。
