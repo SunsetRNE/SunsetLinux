@@ -245,6 +245,23 @@ if [ -f "$RUN/ready" ] && [ -f "$RUN/supervisor.pid" ]; then
   fi
 fi
 
+# --- 内核 v2（sunsetd）：**先起内核，再发起环境启动** -------------------------
+# 为什么顺序反过来了：内核是"谁在建树/环境在不在跑"的唯一权威（docs/core-v2-design.md）。
+# 它先起来，模块这条 `linuxctl start` 就会被它**认领**成 owner=foreign-observer，
+# App/CLI 读到的相位才是真的。内核起不来（缺 dex / app_process 不可用 / SELinux 域不允许）
+# 完全不影响 v1 行为 —— 这里只记一行日志，绝不阻塞 boot、也不改变下面的启动路径。
+# 脱离 terminal 常驻：setsid + 输出重定向（与 dsh 的 supervisor 同一套路）
+if [ -f "$MODDIR/bin/sunsetd.dex" ] && [ -x /system/bin/app_process ] && [ -x /system/bin/setsid ]; then
+  (
+    LINUX_HOME="$LINUX_HOME" /system/bin/setsid /system/bin/app_process \
+      -Djava.class.path="$MODDIR/bin/sunsetd.dex" /system/bin --nice-name=sunsetd \
+      io.github.sunsetrne.sunsetd.MainKt >> "$SERVICE_LOG" 2>&1 </dev/null &
+  ) &
+  log "内核：已在后台发起 sunsetd（日志见 $SERVICE_LOG）"
+else
+  log "内核：跳过（缺 bin/sunsetd.dex 或 app_process/setsid）—— 按 v1 行为继续"
+fi
+
 log "启动环境：LINUX_HOME=$LINUX_HOME $CTL start"
 # ★ 优先**直接执行**（内核按 shebang 用 /system/bin/sh 即 mksh 跑）；
 #   退路也必须是 /system/bin/sh，不能是裸 `sh`（模块 PATH 里可能是 busybox ash，

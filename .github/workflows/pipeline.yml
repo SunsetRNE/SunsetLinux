@@ -227,8 +227,18 @@ jobs:
           #   dsh 层，模块再内嵌一份就是同样的 48 MB 塞两遍。
           #   **默认版本（full，自带 DSH）**由 ② bundles 节点用频道里的 dsh 层打，
           #   产物名走默认名 sunsetlinux-module-<版本>.zip（见 offline-bundle.yml）。
+          # 内核 v2 的 dex：先构建再打包（缺了会**出声**，但正式包应当带上）
+          if [ -f app/gradlew ]; then
+            ( cd app && ./gradlew --no-daemon :sunsetd:jar ) || echo "::warning::sunsetd jar 构建失败，本包将不含内核 v2"
+          fi
+          node tools/build-sunsetd-dex.mjs || echo "::warning::内核 dex 未构建（本包不含内核 v2）"
           bash module/mkmodule.sh --variant bare
           ls -l dist/sunsetlinux-module-*.zip
+          # 有 dex 就必须在包里（防"该进包的没进"）
+          if [ -f build/sunsetd/classes.dex ]; then
+            unzip -l dist/sunsetlinux-module-*.zip | grep -q 'bin/sunsetd.dex' \
+              || { echo "::error::构建出了内核 dex 却没进模块包"; exit 1; }
+          fi
 
       - name: 上传模块 zip（编译节点要用）
         uses: actions/upload-artifact@v4

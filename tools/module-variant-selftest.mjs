@@ -35,6 +35,11 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const REPO = join(fileURLToPath(new URL('.', import.meta.url)), '..');
+
+// 内核 v2 的 dex：本套件默认指向一个**不存在**的路径，让"本包不含内核"这条路径**确定**出现 ——
+// 否则开发者本机一旦构建过 build/sunsetd/classes.dex，同一个断言就会随环境漂移（实测踩到）。
+// 要验"给了 dex 就一定进包"时，显式传 SUNSETLINUX_SUNSETD_DEX（见下面那一段）。
+process.env.SUNSETLINUX_SUNSETD_DEX = join(REPO, 'build', 'sunsetd', 'classes.dex.不存在');
 const FIXTURE = join(REPO, 'testdata/fixtures/erofs-head.bin');
 const LAYER_V1 = '9.9.9';    // 模块自带的（内置）版本
 const LAYER_V2 = '9.9.10';   // 频道里的更新版本
@@ -91,6 +96,23 @@ else bad(`bare 变体打包失败：${r.stderr || r.stdout}`);
 const bareList = zipList(bareZip);
 if (!/\bdsh\//.test(bareList)) ok('bare 包里没有 dsh/（不夹带 DSH）');
 else bad('bare 包里出现了 dsh/ —— "标 bare 却夹带"必须被拦住');
+
+// 内核 v2 的 dex：给了就**必须**进包；没给要**出声**（不静默）。
+// 只多打一个包（本套件每打一个包都要跑一次 mkmodule，"给 dex"这条用独立包验；
+// "没给 dex"那条直接复用上面那次 bare 构建的日志 —— 省一次打包）。
+const dexSrc = join(root, 'sunsetd.dex');
+writeFileSync(dexSrc, Buffer.alloc(200_000, 7));   // 内容无所谓，只验打包管道
+const dexZip = join(root, `sunsetlinux-module-${MODULE_VER}-dex.zip`);
+const rDex = sh(['module/mkmodule.sh', '--variant', 'bare', '--version', MODULE_VER, '--out', dexZip],
+                { env: { SUNSETLINUX_SUNSETD_DEX: dexSrc } });
+if (rDex.status === 0 && zipList(dexZip).includes('bin/sunsetd.dex')) {
+  ok('给了内核 dex 就一定会进包（bin/sunsetd.dex）');
+} else {
+  bad(`内核 dex 没进包：${rDex.stderr || rDex.stdout}`);
+}
+const bareBuildLog = (r.stdout || '') + (r.stderr || '');
+if (/不含内核 v2/.test(bareBuildLog)) ok('没给 dex 时打包会明说「本包不含内核」（不静默）');
+else bad(`没给 dex 时没有出声：${bareBuildLog.slice(-200)}`);
 
 const bareProp = zipGet(bareZip, 'module.prop') || '';
 if (/^variant=bare$/m.test(bareProp)) ok('bare 包的 module.prop 写了 variant=bare');

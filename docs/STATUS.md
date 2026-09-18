@@ -503,6 +503,38 @@ su -c '/data/sunsetlinux/bin/linuxctl doctor'
 | 已装状态读不到时 | —— | **不给刷入按钮**，先让用户修 root 授权（与"读不到 ≠ 没装"一致） |
 | 重启 | —— | 只报告"重启后生效"（KernelSU 落 `modules_update/`），**App 不替用户重启**，脚本里有单测断言不许出现 `reboot` |
 
+### 3.10.45 内核 v2 · P1 前半：`sunsetd`（Kotlin/app_process）成为唯一状态机 + 控制面 + 打包管道
+
+按 `docs/core-v2-design.md` 的 P1 开工。**本轮不发布**（内核还没在真机上跑过；改动没升版本 ⇒
+CI 只会跑门禁并给出"改了产物相关文件却没升版本"的警告，不会静默发半个东西 —— 这正是我们要的）。
+
+#### 一、这轮落了什么（都可复核）
+
+| 产物 | 证据 |
+|---|---|
+| `app/sunsetd/`（新的 `:sunsetd` 纯 JVM 子项目） | `KernelModel.kt`（Phase/Owner/Backend/SessionState + 迁移表）、`Json.kt`（零依赖小 JSON）、`World.kt`（v1 标记只读快照 + 真机/桩两套）、`Kernel.kt`（**唯一状态机** + 作业）、`ControlServer.kt`（`run/control.sock`）、`Main.kt` |
+| 内核单测 | **34 条全过**（`KernelModelTest` 14 / `KernelTest` 14 / `ControlServerTest` 6）。控制面测试跑的是**真 unix socket** |
+| 打包 | `tools/build-sunsetd-dex.mjs` → `build/sunsetd/classes.dex`（**2,482,240 B**，含 kotlin-stdlib；`--min-api 26`）；缺 d8/stdlib/gradle 一律**报错**，不静默 |
+| 模块 | `mkmodule.sh` 内嵌 `bin/sunsetd.dex`（有则进包、无则**出声**"本包不含内核 v2"）；`service.sh` **先起内核再发起 `linuxctl start`**（带 dex/app_process/setsid 三重存在性检查；起不来只记一行日志，行为回退 v1，不阻塞 boot） |
+| CI | `ci.yml` 的 App 门禁加 `:sunsetd:test`；`pipeline.yml` 打包模块前构建 dex 并断言"有 dex 就必须在包里" |
+
+#### 二、这轮改掉的**语义**问题（都是写单测时才暴露的）
+
+| 现象 | 根因 | 定案 |
+|---|---|---|
+| 建树期间相位不可见 | v1 里"正在启动"没有一等状态 | 内核相位 `preparing/mounting/starting/stopping` 全是一等；App 的启动卡按它置灰（不再靠 `run/start.lock` 这种补丁） |
+| 连点两下建两棵树 | 没有互斥、没有幂等 | 内核内建：同一动作重复提交返回同一 `jobId`（**只起一条命令**），不同动作 → `busy` + 在跑的作业 id |
+| "环境已 running 但命令还在收尾"被判成非法 | 不变量写得过死（`busy ⟺ jobId`） | 改成单向：忙相位必须有归属；反向只允许"收尾"（这正是真机那个 20 分钟窗口的形状） |
+| 一次失败被下一次 tick 擦掉 | 世界驱动迁移无条件执行 | FAILED 变**粘的**：一次失败的启动不许自己回 idle；同一次 tick 里也不许被世界覆盖 |
+| 模块开机自启的会话被当成"没在跑" | 判据只认内核自己的作业 | 新增 `Owner.FOREIGN`：内核**认领**观察到的会话（`running` + owner=foreign-observer，世代 ≥1） |
+
+#### 三、还没做的（P1 剩余，按优先级）
+
+1. **真机首次实跑**：`app_process` 起内核的 SELinux 域、socket 能否建、状态文件是否按预期刷 —— 这是 P1 **唯一未验证**的风险点（失败可回退 v1）；
+2. `linuxctl status` 变瘦客户端（v1 JSON 逐键一致，`contract-check.mjs` 两路都跑）；
+3. 删掉"在不在跑"的重复判据（`start.sh:running_ns_pid`、`linuxctl:ns_pid_alive/env_ready`、App 推导）；
+4. 版本号与交付（模块/APK 直送 `/sdcard/Download`）。
+
 ### 3.10.44 泄漏到宿主 ns 的挂载：`make-rprivate` **从来没生效过** + 残留清理 + 打包清单漏文件（模块 1.0.35 / App 0.3.14）
 
 接 §3.10.43 的第四条（用户："已经有挂载了呀"）。这一轮把它拆到底。

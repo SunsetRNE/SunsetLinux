@@ -220,6 +220,17 @@ for f in "${BIN_REQUIRED[@]}"; do
     fi
 done
 [ "$missing" -eq 0 ] || die "有必需脚本缺失，拒绝打包（否则模块装上去是残缺的）"
+# ---- 内核 v2 的 dex（可选，但**缺了就要出声**）---------------------------------
+# 内核跑在宿主 app_process 上（决策 D1）；产物由 tools/build-sunsetd-dex.mjs 生成。
+# 这里刻意不做"静默跳过"：0.2.6 的事故就是"该进包的没进、CI 只数数量所以全绿"。
+SUNSETD_DEX="${SUNSETLINUX_SUNSETD_DEX:-$REPO_DIR/build/sunsetd/classes.dex}"
+if [ -f "$SUNSETD_DEX" ]; then
+    install -m 0644 "$SUNSETD_DEX" "$STAGE/bin/sunsetd.dex"
+    log "内核：已内嵌 sunsetd.dex（$(wc -c < "$STAGE/bin/sunsetd.dex" | tr -d ' ') B，来自 $SUNSETD_DEX）"
+else
+    log "内核：⚠️ 没有 $SUNSETD_DEX —— 本包不含内核 v2（先跑 node tools/build-sunsetd-dex.mjs）"
+fi
+
 log "bin/ 由目录派生：$bin_count 个 runtime/root 脚本 + layer-spec.sh + $((${#BIN_COMMON[@]})) 个 common"
 
 # ---- profiles/：设备侧构建的"素材"（包清单 / web profile 模板 / 安装脚本）----

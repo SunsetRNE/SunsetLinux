@@ -1135,3 +1135,49 @@ spawn 闸门收紧（新增两组**真实误报**样本：诊断消息里提到�
    必要时把 util-linux 的 `mount`/`unshare` **提前**取到（例如从 erofs 里抽出来，避开"必须先挂 base 层"的循环）；
 2. `stop` 的清理做成"先清宿主残留、再报结果"（现在已经是这个顺序，但只在"有残留"时进入）；
 3. 把 `BIN_COMMON` 这类清单**全部改成目录派生**（本轮只加了闸门，没有消灭清单本身）。
+
+## 第 46 轮（2026-09-18 04:xx）：内核 v2 · P1 前半落地（`sunsetd` 唯一状态机）
+
+设计见 `docs/core-v2-design.md`，逐条证据见 `docs/STATUS.md` §3.10.45。这里只留"下一轮接手要用的"。
+
+### 1. 现在的形状
+
+```
+App/CLI/WebUI ──(读 run/state.json / 将来走 run/control.sock)──> sunsetd（Kotlin，跑在 app_process）
+                                                                   ├── 唯一状态机（Phase/Owner/世代）
+                                                                   ├── 作业（互斥 + 幂等，提交即返回）
+                                                                   └── 观察 v1 标记（ready/supervisor.pid/start.lock/env-mode）
+```
+
+- 内核**不重写**挂载/命名空间：它驱动现有 `linuxctl start|stop|dsh *` 并观察结果（P2/P3 才把挂载表变成数据）。
+- `service.sh` **先起内核，再发起 `linuxctl start`** ⇒ 模块那条启动会被内核认领成 `owner=foreign-observer`。
+- 内核起不来（缺 dex / 无 app_process / SELinux 域不允许）⇒ 只记一行日志，**行为与今天完全一致**。
+
+### 2. 下一轮第一件事：真机首次实跑（P1 的唯一未验证风险点）
+
+```bash
+# 1) 本机构建 dex（缺 d8/stdlib 会明确报错，不静默）
+node tools/build-sunsetd-dex.mjs && node tools/build-sunsetd-dex.mjs --check
+# 2) 打模块（会内嵌 bin/sunsetd.dex；日志里应看到"已内嵌 sunsetd.dex"）
+bash module/mkmodule.sh --version <下个版本> --variant full --dsh-layer dist/dist-backup/dsh-0.1.5-rc.2.erofs.gz \
+  --dsh-sums dist/dist-backup/SHA256SUMS.dsh-layer.txt --out /tmp/sl/module.zip
+# 3) 装模块 → 重启 → 看内核有没有起来
+adb-shell ls -l /data/sunsetlinux/run/control.sock /data/sunsetlinux/run/state.json
+adb-shell cat /data/sunsetlinux/run/state.json      # phase/generation/owner 都该有
+adb-shell tail -20 /data/sunsetlinux/run/sunsetd.log
+adb-shell tail -20 /data/sunsetlinux/run/service.log # 找"内核：已在后台发起 sunsetd"
+```
+
+**判据**：`state.json` 里 `phase=running`、`owner=foreign-observer`、`generation>=1`（认领了模块那条启动）；
+`control.sock` 存在。若内核没起来：先看 `service.log` 那行是"缺 dex"还是"没起来"，
+后者大概率是 SELinux 域（那就先在 App 进程内起内核，或退 v1 —— 回退路径本来就在）。
+
+### 3. 已知的坑（这轮踩到的，写下来省下一轮的时间）
+
+| 坑 | 现象 | 处理 |
+|---|---|---|
+| Kotlin/JVM 模块离线构建 | `:sunsetd` 首次 `--offline` 会因缺 `error_prone_annotations` 失败 | 允许联网解析一次（之后进缓存）；插件用 buildscript classpath + `apply`（缓存里没有 `org.jetbrains.kotlin.jvm` 的 marker），`dependencies` 用字符串写法（`testImplementation` 访问器只在 `plugins {}` 里生成） |
+| 中文测试函数名 | JVM 方法名不许含 `/`（`空/垃圾输入…` 直接编译失败） | 名字里别用 `/`、`.` |
+| 测试互相污染 | 内核会读回上一个测试写的 `state.json` | 每个测试用**独立临时目录**（`freshHome()`） |
+| 打包闸门随环境漂移 | 本机构建过 dex ⇒ "不含内核"那条断言永远不成立 | 套件顶部把 `SUNSETLINUX_SUNSETD_DEX` 指向**不存在**的路径，要验"进包"时显式传 |
+

@@ -41,23 +41,27 @@ enum class Phase(val wire: String) {
     fun canGoTo(next: Phase): Boolean = when (this) {
         IDLE -> next == PREPARING || next == FAILED
 
-        // 准备阶段可以失败、可以被取消（回到 IDLE），也可以进入挂载
-        PREPARING -> next == MOUNTING || next == IDLE || next == FAILED
+        // 准备阶段可以失败、可以被取消（回到 IDLE），也可以进入挂载。
+        // ★ 也可以**直接到 running**：世界可能比内核快（脚本已经把树建完+起来了，
+        //   而内核这一拍才刚从 preparing 过来）—— 真机建树 30~50 秒，这种"领先"很常见。
+        PREPARING -> next == MOUNTING || next == STARTING || next == RUNNING || next == DEGRADED ||
+            next == STOPPING || next == IDLE || next == FAILED
 
-        // 挂载中：成功 → 起进程；失败 → FAILED；被取消 → STOPPING（要把已经挂上的拆掉）
-        MOUNTING -> next == STARTING || next == DEGRADED || next == STOPPING || next == FAILED
+        // 挂载中：成功 → 起进程（或直接 running）；失败 → FAILED；被取消 → STOPPING（要把已挂上的拆掉）
+        MOUNTING -> next == STARTING || next == RUNNING || next == DEGRADED || next == STOPPING || next == FAILED
 
         STARTING -> next == RUNNING || next == DEGRADED || next == STOPPING || next == FAILED
 
-        RUNNING -> next == STOPPING || next == DEGRADED || next == FAILED
+        // 运行中也能提交新作业（停止、子作业）：回到 preparing 是"又要做一件事"
+        RUNNING -> next == PREPARING || next == STOPPING || next == DEGRADED || next == FAILED
 
-        DEGRADED -> next == RUNNING || next == STOPPING || next == FAILED
+        DEGRADED -> next == PREPARING || next == RUNNING || next == STOPPING || next == FAILED
 
         // 停止必须能收敛：正常回到 IDLE；拆不干净则是 FAILED（不许"假装停了"）
         STOPPING -> next == IDLE || next == FAILED
 
         // 失败后只能重新开始或原地被认领（stop 在 FAILED 上是幂等清理）
-        FAILED -> next == PREPARING || next == STOPPING || next == IDLE
+        FAILED -> next == PREPARING || next == STOPPING || next == IDLE || next == RUNNING || next == DEGRADED
     }
 
     companion object {
@@ -77,6 +81,28 @@ enum class Backend(val wire: String) {
 
     companion object {
         fun from(raw: String?): Backend? = entries.firstOrNull { it.wire == raw?.trim() }
+    }
+}
+
+/**
+ * 「这一相位是谁在推进」——内核自己的作业，还是**观察到别人在推进**。
+ *
+ * 为什么必须有这一档：`service.sh` 开机就会 `linuxctl start`（模块自己的那条路），
+ * 内核此时并没有作业在跑。若强行要求"忙相位必须有 jobId"，内核就只能把这种**真实存在**
+ * 的建树过程报成别的相位 —— 那正是 v1 的老毛病（"正在启动"没人认）。
+ */
+enum class Owner(val wire: String) {
+    NONE("none"),
+
+    /** 内核自己的作业在推进（有 jobId）。 */
+    KERNEL_JOB("kernel-job"),
+
+    /** **观察到**别人在推进（例如模块 `service.sh` 的 `linuxctl start`）：内核认领它、但不冒充是自己的作业。 */
+    FOREIGN("foreign-observer"),
+    ;
+
+    companion object {
+        fun from(raw: String?): Owner = entries.firstOrNull { it.wire == raw?.trim() } ?: NONE
     }
 }
 
@@ -101,6 +127,8 @@ data class SessionState(
     val pid: Long? = null,
     /** 当前作业 id（见 I5）。 */
     val jobId: String? = null,
+    /** 谁在推进当前相位（见 [Owner]）。 */
+    val owner: Owner = Owner.NONE,
     val lastError: String? = null,
 ) {
     /**
@@ -112,12 +140,22 @@ data class SessionState(
         next: Phase,
         now: Long,
         jobId: String? = this.jobId,
+        owner: Owner = if (jobId == null) Owner.NONE else Owner.KERNEL_JOB,
         lastError: String? = if (next == Phase.FAILED) this.lastError else null,
         envMode: String? = this.envMode,
         port: Int? = this.port,
         pid: Long? = this.pid,
     ): SessionState {
-        require(phase.canGoTo(next)) { "非法相位迁移：${phase.wire} → ${next.wire}" }
+        // 世界驱动的迁移（owner=FOREIGN）不受作业迁移表约束：内核只是**如实转述**观察到的相位。
+        // 但目标必须真的是"能从世界观察到的"那几个 —— 不许借观察之名伪造 job 才有的相位。
+        val observed = owner == Owner.FOREIGN
+        if (observed) {
+            require(next in OBSERVABLE) {
+                "观察到的相位只能是 $OBSERVABLE（不能把 ${next.wire} 说成是观察到的）"
+            }
+        } else {
+            require(phase.canGoTo(next)) { "非法相位迁移：${phase.wire} → ${next.wire}" }
+        }
         // I1：只有"非运行态 → MOUNTING"才算开新会话
         val nextGeneration = if (next == Phase.MOUNTING) generation + 1 else generation
         return copy(
@@ -125,6 +163,7 @@ data class SessionState(
             phase = next,
             since = now,
             jobId = jobId,
+            owner = owner,
             lastError = lastError,
             envMode = envMode,
             port = port,
@@ -133,9 +172,15 @@ data class SessionState(
     }
 
     init {
-        // I5 在构造时就成立：busy ⟺ 有 jobId
-        require(phase.isBusy == (jobId != null)) {
-            "不变量 I5 被破坏：phase=${phase.wire} 与 jobId=${jobId ?: "null"} 不匹配"
+        // I5：**忙相位必须有归属**（内核作业，或"观察到别人在推进"）——
+        // 不许出现"没人在做，但状态是 mounting"这种凭空忙碌。
+        require(!phase.isBusy || jobId != null || owner == Owner.FOREIGN) {
+            "不变量 I5 被破坏：phase=${phase.wire} 却没有归属（jobId=null、owner=$owner）"
+        }
+        // 反方向只允许"收尾"：环境已经 running（或已 failed）而那条命令还在退出过程中。
+        // 真机就是这么回事 —— v1 里这个窗口长到 20 分钟（命令永不返回）却仍被报成"没在跑"。
+        require(jobId == null || phase.isBusy || phase.isUp || phase == Phase.FAILED) {
+            "不变量 I5 被破坏：有 jobId=${jobId}，而相位 ${phase.wire} 既不是忙相位、也不是运行/失败态"
         }
     }
 
@@ -148,6 +193,9 @@ data class SessionState(
     )
 
     companion object {
+        /** 世界能观察到的相位（[Owner.FOREIGN] 只允许迁到这几个）。 */
+        val OBSERVABLE = setOf(Phase.IDLE, Phase.MOUNTING, Phase.RUNNING, Phase.DEGRADED)
+
         /** 从落盘 JSON 读回（字段缺失一律退化，绝不抛 —— 与 v1 解析口径一致）。 */
         fun fromJson(raw: String?): SessionState {
             if (raw.isNullOrBlank()) return SessionState()
@@ -164,6 +212,7 @@ data class SessionState(
                 port = m["port"]?.toIntOrNull(),
                 pid = m["pid"]?.toLongOrNull(),
                 jobId = jobId,
+                owner = Owner.from(m["owner"]),
                 lastError = m["lastError"]?.takeIf { it != "null" },
             )
         }
@@ -182,6 +231,7 @@ data class SessionState(
         "port" to port,
         "pid" to pid,
         "jobId" to jobId,
+        "owner" to owner.wire,
         "lastError" to lastError,
     )
 }

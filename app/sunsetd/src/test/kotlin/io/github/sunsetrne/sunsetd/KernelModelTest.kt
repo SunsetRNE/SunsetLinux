@@ -105,12 +105,14 @@ class KernelModelTest {
         assertThrows(IllegalArgumentException::class.java) {
             SessionState(phase = Phase.MOUNTING, since = t0, jobId = null)
         }
+        // 非法：idle 却带着作业（既不是忙相位，也不是运行/失败态）
         assertThrows(IllegalArgumentException::class.java) {
-            SessionState(phase = Phase.RUNNING, since = t0, jobId = "j1")
+            SessionState(phase = Phase.IDLE, since = t0, jobId = "j1")
         }
-        // 合法组合不抛
+        // 合法组合：忙相位带作业；环境已 up 而命令还在收尾（真机就这么回事）
         SessionState(phase = Phase.STARTING, since = t0, jobId = "j1")
         SessionState(phase = Phase.RUNNING, since = t0, jobId = null)
+        SessionState(phase = Phase.RUNNING, since = t0, jobId = "j1")
     }
 
     // ────────────────────────────── 落盘 / 读回

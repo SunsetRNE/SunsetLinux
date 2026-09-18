@@ -195,11 +195,11 @@ capabilities`），两种模式是它的两个实现。今天的 root 路径之�
 | 项 | 内容 | 状态 |
 |---|---|---|
 | P1-a | 状态模型 + 契约 JSON + 单测 + 构建管道 | ✅ 已落地：`app/sunsetd/`（`:sunsetd` 子项目）· `KernelModel.kt`（[Phase]/[Backend]/[SessionState]，含迁移表与 I1/I5 不变量）· `Json.kt`（零依赖小 JSON，**能力边界写在文件头**）· `KernelModelTest` **11 条全过**；`kotlin → jar → d8 → classes.dex` 实测通过 |
-| P1-b | `sunsetd` 主循环：控制 socket（行分隔 JSON）+ `state.json` 原子写 + 心跳/看护 | 待做 |
-| P1-c | 相位驱动：内核 spawn 现有 `start.sh`/`stop.sh`，读标记 + 进程退出码推相位，写世代 | 待做 |
-| P1-d | `linuxctl status` 变瘦客户端：**socket 优先，文件降级**（App 无感） | 待做 |
-| P1-e | 模块打包：dex 进模块 + `service.sh` 用 `app_process` 起内核 + **真机验 SELinux 域** | 待做（唯一未验证的风险点；失败可回退 v1） |
-| P1-f | 契约回归：内核生成的 `status` 必须过 `tools/contract-check.mjs`；内核单测进 CI | 待做 |
+| P1-b | `sunsetd` 主循环：控制 socket（行分隔 JSON）+ `state.json` 原子写 + 心跳/看护 | ✅ 已落地：`Kernel.kt`（唯一状态机 + 作业互斥/幂等 + 世界驱动的相位推演）、`ControlServer.kt`（`run/control.sock`，`java.nio` UNIX 协议族，**设备 ART 已实测有该类**）、`World.kt`（v1 标记的只读快照 + 真机/桩两套实现）。内核单测 **34 条全过**（含：连点幂等只起一条命令、异动作被拒、建树期报 `mounting`、命令还在收尾而环境已 `running`、失败态不被世界擦掉、**认领模块开机自启的会话**） |
+| P1-c | 相位驱动：内核 spawn 现有 `start.sh`/`stop.sh`，读标记 + 进程退出码推相位，写世代 | ✅ 同上（内核不重写挂载逻辑，只驱动+观察；子作业 `dsh start/stop` **不动环境相位**） |
+| P1-d | `linuxctl status` 变瘦客户端（App 无感：v1 JSON 逐键一致） | 待做（下一步） |
+| P1-e | 模块打包：dex 进模块 + `service.sh` 用 `app_process` 起内核 + **真机验 SELinux 域** | 部分完成：`tools/build-sunsetd-dex.mjs` 产出 `classes.dex`（2.48 MB，含 stdlib）、`mkmodule.sh` 内嵌并**出声**记录、`service.sh` **先起内核再发起启动**（带三重存在性检查，起不来就退 v1）。**真机 SELinux 域与首次实跑仍未验证**（P1 的唯一未验证风险点，失败可回退） |
+| P1-f | 契约回归：内核生成的 `status` 过 `contract-check.mjs`；内核单测进 CI | 部分完成：`:sunsetd:test` 已接进 `ci.yml` 的 App 门禁；模块包"有 dex 就必须在包里"已接进 `pipeline.yml` 且本地套件加了闸门（38/0）。契约两路对比等 P1-d |
 
 **P1 完成判据**（都要求真机证据）：
 

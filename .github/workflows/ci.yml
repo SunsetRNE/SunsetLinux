@@ -382,12 +382,14 @@ jobs:
           #    "Task ... not found"，而报错信息只会说任务不存在，看着像 flavor 配错了）
           TASK="test$(python3 -c "print(''.join(p[:1].upper()+p[1:] for p in '$FIRST'.split('-'))+'DebugUnitTest')")"
           echo "· 单测任务：:app:$TASK（变体 $FIRST，矩阵来自 $VJ）"
+          # 内核 v2（sunsetd）单测：纯 JVM，不依赖 Android SDK 产物 —— 与 App 单测同一台
+          # runner 上跑，几秒钟。它是"唯一状态机"的回归（docs/core-v2-design.md §8）。
           if [ "${{ inputs.build_apks }}" = "false" ]; then
             echo "· 流水线模式：APK 由编译矩阵并行产出，这里只跑单测"
-            ./gradlew --no-daemon ":app:$TASK"
+            ./gradlew --no-daemon ":app:$TASK" :sunsetd:test
           else
             echo "· 独立门禁模式：全部组合一起编 + 单测"
-            ./gradlew --no-daemon :app:assembleDebug ":app:$TASK"
+            ./gradlew --no-daemon :app:assembleDebug ":app:$TASK" :sunsetd:test
           fi
 
       - name: 单测结果摘要
