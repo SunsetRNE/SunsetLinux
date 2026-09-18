@@ -284,6 +284,20 @@ done
 [ "$missing" -eq 0 ] || die "profiles/ 不全（设备侧构建会失败/退化），拒绝打包"
 log "profiles/ 铺入 $(find "$STAGE/profiles" -type f | wc -l) 个文件（base.packages / runtime.packages / web-profile / install-web-profile.sh）"
 
+# ---- share/：随模块携带的「视角地图」（开机投递到 $LINUX_HOME/share 与环境根）----
+# 为什么要有：Root 部署下同一个路径在不同命名空间指向不同目录，人和 AI 都会迷路
+# （2026-09-19 用户反馈"找不到工作根、判错视角"）。地图是**给我们自己和用户看的文档**，
+# 缺了不会让环境起不来，但会让下一个接手的人在同一个坑里再摔一次 —— 所以必需。
+if [ -d "$SELF_DIR/share" ]; then
+    mkdir -p "$STAGE/share"
+    cp -rf "$SELF_DIR/share"/. "$STAGE/share/"
+    chmod -R a+rX "$STAGE/share" 2>/dev/null || true
+    [ -f "$STAGE/share/地图-视角.md" ] || die "share/ 里缺 地图-视角.md（post-fs-data 会找不到可投递的地图）"
+    log "share/ 铺入 $(find "$STAGE/share" -type f | wc -l) 个文件（视角地图）"
+else
+    die "缺少 module/share/ —— 视角地图必须随模块走（docs/viewpoints.md 讲了为什么）"
+fi
+
 # ---- WebUI（KernelSU 模块 WebUI：模块根必须有 webroot/index.html）-----------
 # KernelSU 管理器会在模块详情页打开 webroot/index.html（Magisk 需 MMRL 等第三方宿主）。
 # **必须有**：没有它 WebUI 入口就不存在，而"不开 App 也能启停/看状态/更新"是用户明确要的能力。

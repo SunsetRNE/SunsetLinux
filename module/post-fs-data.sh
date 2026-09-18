@@ -95,6 +95,21 @@ else
   log "警告：$BIN_SRC 不存在，跳过脚本同步"
 fi
 
+# --- 2b) 视角地图 → 交换目录 与 环境根（人和 AI 都不该再猜路径）-----------------
+#   · $LINUX_HOME/share/地图-视角.md → 环境里就是 /share/地图-视角.md
+#   · $LINUX_HOME/README-地图.md     → MT 进 /data/sunsetlinux 一眼就看到
+#   幂等：内容不同才覆盖（用户改过就不动？—— 不，这是**我们的文档**，必须保持最新版，
+#   所以每次都覆盖；用户要写自己的东西请另建文件）。
+if [ -f "$MODDIR/share/地图-视角.md" ]; then
+  mkdir -p "$LINUX_HOME/share" 2>/dev/null
+  chmod 0777 "$LINUX_HOME/share" 2>/dev/null
+  cp -f "$MODDIR/share/地图-视角.md" "$LINUX_HOME/share/地图-视角.md" 2>/dev/null \
+    && cp -f "$MODDIR/share/地图-视角.md" "$LINUX_HOME/README-地图.md" 2>/dev/null \
+    && log "视角地图已就位：$LINUX_HOME/share/地图-视角.md 与 $LINUX_HOME/README-地图.md"
+else
+  log "提示：模块里没有 share/地图-视角.md（老模块），跳过地图投递"
+fi
+
 # --- 2a) module/lib → $LINUX_HOME/lib（**不是 bin/**）-------------------------
 # doctor.sh 会去 $SELF_DIR/../lib/detect-mount.sh 找挂载实现探测；不铺它
 # doctor §1c 就只会打 "[skip] 找不到 lib/detect-mount.sh"（不崩，但功能没了）。

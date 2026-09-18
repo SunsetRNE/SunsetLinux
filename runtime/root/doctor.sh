@@ -633,6 +633,59 @@ case "$LM" in
         ;;
 esac
 
+head_ "1f. 视图与挂载隔离（我在哪个命名空间 / 有没有回流）"
+# 为什么有这一节（2026-09-19 真机）：同一台机器上同时存在**三个挂载命名空间**，
+# 同一个路径在不同视角下指向不同目录（详见 module/share/地图-视角.md）。
+# 两件必须能自检的事：
+#   ① 我这份 /data 是不是**影子**（proot 容器没 bind /data 时会解析到自己的 rootfs）；
+#   ② 环境的挂载有没有**回流到全局命名空间**（`/` 是 shared、toybox unshare 不认
+#      --propagation 时会发生 —— 两个环境同时起就会互踩挂载）。
+{
+    _my_ns="$(readlink /proc/self/ns/mnt 2>/dev/null || printf '?')"
+    _p1_ns="$(readlink /proc/1/ns/mnt 2>/dev/null || printf '?')"
+    info "我的 mount ns：$_my_ns（pid 1：$_p1_ns）$([ "$_my_ns" = "$_p1_ns" ] && printf '（同在全局 ns）' || printf '（**不是**全局 ns —— 别人的挂载你看不见，反之亦然）')"
+
+    # ① 影子视图
+    if [ -d "$LH" ] && [ ! -f "$UPPER_IMG" ] && [ ! -d "$LH/dirs-upper" ] && [ ! -x "$LH/bin/linuxctl.sh" ]; then
+        warn "$LH 存在但里面没有 upper.img / dirs-upper / bin —— 这多半是**影子视图**（容器把 /data 解析到了自己的 rootfs）"
+        add_finding warn "view-shadow" "$LH 看起来不是真的那份（缺 upper.img/dirs-upper/bin）：绝对路径会读错，请用 linuxctl whereami 确认视角"
+    else
+        ok "$LH 看起来是真的那一份（upper.img/dirs-upper/bin 至少一个在）"
+    fi
+
+    # ② 回流：环境的挂载出现在全局 ns（pid 1）的 mountinfo 里 = 泄漏
+    if env_running; then
+        _leak=0
+        if [ -r /proc/1/mountinfo ]; then
+            _leak="$(grep -c 'sunsetlinux/rootfs' /proc/1/mountinfo 2>/dev/null || printf '0')"
+        else
+            _leak="?"
+        fi
+        case "$_leak" in
+            0) ok "环境在跑，但它的挂载**没有**出现在全局 ns（隔离有效）" ;;
+            "?") info "读不到 /proc/1/mountinfo，跳过回流检查（换 root shell 再跑一次可判定）" ;;
+            *) warn "环境的挂载出现在**全局命名空间**（/proc/1/mountinfo 命中 ${_leak} 处）—— 私有 ns 没隔住，两个环境同起会互踩挂载"
+               add_finding warn "mount-leak" "环境挂载回流到全局 ns（命中 ${_leak} 处）：/ 是 shared 且 toybox unshare 不认 --propagation 时会这样；先别同时跑两个环境" ;;
+        esac
+    else
+        info "环境未运行，跳过回流检查"
+    fi
+
+    # ③ 交换目录
+    if [ -d "$LH/share" ]; then
+        if env_running && [ -d "$ROOTFS_DIR/share" ] && mountpoint -q "$ROOTFS_DIR/share" 2>/dev/null; then
+            ok "交换目录已挂载：$LH/share <-> 环境 /share"
+        elif env_running; then
+            warn "交换目录没挂上（$LH/share 在，但 $ROOTFS_DIR/share 不是挂载点）—— 环境里看不到 /share"
+            add_finding warn "share-not-mounted" "环境内的 /share 没挂上：看 run/linux.log 里那行『交换目录』；不影响环境本身可用"
+        else
+            info "交换目录 $LH/share 已创建（环境未运行，看不到 /share）"
+        fi
+    else
+        info "还没有交换目录 $LH/share（下次启动环境会自动建）"
+    fi
+}
+
 head_ "2. 三层只读镜像（erofs / squashfs）"
 # ★ 三态：/proc/filesystems 可读→按内容判定；不可读→ **skip**（信息不可得≠不支持）。
 #   被真实场景逼出来的：某次 /proc/filesystems 变成 Permission denied，旧写法把

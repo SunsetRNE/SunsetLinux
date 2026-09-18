@@ -2114,6 +2114,7 @@ linuxctl（sunsetlinux root 模式）
                               见 docs/architecture.md §3.4）
   stop                       停止环境（幂等，连同里面的一切进程）
   status                     输出状态 JSON（architecture.md §3.1）
+  whereami [--json]          **我在哪个视角**（三个挂载命名空间 + 路径地图；只读）
   attach [-- cmd...]         进入环境执行命令；无参数则开交互 shell
   exec -- cmd...             非交互执行（供 App 调用）
   logs [-n N]                日志尾部（默认 200 行）
@@ -2206,6 +2207,104 @@ _fp_pid_alive() { # _fp_pid_alive <pid 文件>
     p="$(tr -dc '0-9' < "$f" 2>/dev/null)"
     [ -n "$p" ] || return 1
     kill -0 "$p" 2>/dev/null
+}
+
+# ---------------------------------------------------------------------------
+# whereami —— **我在哪个视角？**（2026-09-19）
+#
+# 为什么要有这个东西：同一台机器上同时存在**三个挂载命名空间**，同一个路径字符串
+# 在不同视角下指向**不同的目录**。真机实测（OnePlus PJD110）：
+#   · MT 管理器 / 全局 ns（4026532884）      → /data/sunsetlinux = 真的那棵（含 upper.img）
+#   · 设备 shell（ksu su，4026536055）        → 同一棵树，但看不到 env 的私有挂载
+#   · SunsetLinux env（unshare -m，4026535677）→ 看不见 /data，只有 overlay 合成视图
+#   · DSHA 的 proot 容器（AI 会话常在这里）    → /data 是 **rootfs 里的影子目录**
+#     （实测：/data/sunsetlinux 的 inode 2909534 vs 真的 1652135 —— 同一分区、两份目录）
+# 后果：拿绝对路径去猜"工作区在哪"必然翻车（本项目的 AI 会话就差点踩）。
+#
+# 所以：**先问 whereami，再动手**。它只读、不改任何东西（连 mkdir 都不做）。
+# ---------------------------------------------------------------------------
+cmd_whereami() {
+    local json=0
+    case "${1:-}" in
+        --json) json=1 ;;
+        ""|-h|--help|help)
+            printf '用法：linuxctl whereami [--json]\n' >&2
+            printf '  回答"我现在在哪个视角、这个路径在宿主上是什么、和别的视角怎么交换文件"。\n' >&2
+            printf '  只读：不创建任何目录/文件。\n' >&2
+            return 0 ;;
+        *) printf 'whereami：未知参数 %s\n' "$1" >&2; return 2 ;;
+    esac
+
+    # --- 视角判定（用"只有这个视角才有的东西"当证据，不猜）----------------
+    local view="unknown" why="" ns=""
+    ns="$(readlink /proc/self/ns/mnt 2>/dev/null || printf '?')"
+
+    if [ ! -d "$LH" ] && [ -d /opt/sunsetlinux ]; then
+        view="env"
+        why="看不到 $LH（chroot 里没有 /data），且 /opt/sunsetlinux 在 —— 这是**环境内部**"
+    elif [ -f "$LH/upper.img" ] || [ -d "$LH/dirs-upper" ] || [ -x "$LH/bin/linuxctl.sh" ]; then
+        view="host"
+        why="能看到 $LH 的真实内容（upper.img / dirs-upper / bin 至少一个在）—— 这是**宿主**视角"
+    elif [ -d "$LH" ]; then
+        view="shadow"
+        why="$LH 在，但里面没有 upper.img/dirs-upper/bin —— **这多半不是真的那一份**（影子视图：某个容器把 /data 解析到了自己的 rootfs 里）。绝对路径会读错！"
+    fi
+
+    # --- 路径地图（按视角给"你现在看到的 → 宿主上是"）----------------------
+    local p_root p_write p_sd p_share p_run
+    case "$view" in
+        env)
+            p_root="/  →  $LH/rootfs（overlay 合成：base+runtime+dsh 三层只读 + 可写层）"
+            p_write="你写的任何文件  →  $LH/upper/upper/…（可写层；宿主侧看就是这个路径）"
+            p_sd="/mnt/sdcard  →  Android 共享存储（/storage/emulated/0 是它的软链，同一份）"
+            p_share="/share  →  $LH/share（交换目录：两侧同一批 inode）"
+            p_run="/run  →  $LH/run（状态/日志；宿主侧同一批文件）" ;;
+        host)
+            p_root="$LH/rootfs（overlay 合成视图；环境内部看到的就是它）"
+            p_write="$LH/upper/upper/…（可写层；环境内写的文件都落在这里）"
+            p_sd="/storage/emulated/0（共享存储；环境内是 /mnt/sdcard）"
+            p_share="$LH/share（交换目录；环境内是 /share）"
+            p_run="$LH/run（状态/日志；环境内是 /run）" ;;
+        shadow)
+            p_root="（判不了）"
+            p_write="（判不了——先确认真实路径，别写）"
+            p_sd="（判不了）"
+            p_share="（判不了）"
+            p_run="（判不了）" ;;
+        *)
+            p_root="（环境根不存在，可能还没部署）"
+            p_write="（同上）" ; p_sd="（同上）" ; p_share="（同上）" ; p_run="（同上）" ;;
+    esac
+
+    # --- 环境是否在跑（只读地看一眼，拿不到就说拿不到）--------------------
+    local phase="?" pid="?"
+    if [ -f "$RUN_DIR/state.json" ]; then
+        phase="$(sed -n 's/.*"phase":"\([^"]*\)".*/\1/p' "$RUN_DIR/state.json" 2>/dev/null | head -n1)"
+        pid="$(sed -n 's/.*"pid":\([0-9]*\).*/\1/p' "$RUN_DIR/state.json" 2>/dev/null | head -n1)"
+        [ -n "$phase" ] || phase="?"
+        [ -n "$pid" ] || pid="?"
+    fi
+
+    if [ "$json" = "1" ]; then
+        emit "{\"schema\":1,\"view\":$(_jstr "$view"),\"evidence\":$(_jstr "$why"),\"mnt_ns\":$(_jstr "$ns"),\"linux_home\":$(_jstr "$LH"),\"phase\":$(_jstr "$phase"),\"pid\":$(_jstr "$pid"),\"paths\":{\"root\":$(_jstr "$p_root"),\"write\":$(_jstr "$p_write"),\"sdcard\":$(_jstr "$p_sd"),\"share\":$(_jstr "$p_share"),\"run\":$(_jstr "$p_run")},\"hint\":$(_jstr "三个命名空间（全局/设备shell/env）看到的挂载各不相同；交换文件请走 /share 或 /mnt/sdcard，别猜绝对路径")}"
+        return 0
+    fi
+
+    printf '我在哪：%s\n' "$view"
+    printf '  证据：%s\n' "$why"
+    printf '  挂载命名空间：%s\n' "$ns"
+    printf '  环境根：%s（phase=%s pid=%s）\n' "$LH" "$phase" "$pid"
+    printf '\n路径地图\n'
+    printf '  %s\n  %s\n  %s\n  %s\n  %s\n' "$p_root" "$p_write" "$p_sd" "$p_share" "$p_run"
+    printf '\n怎么和别的视角交换文件\n'
+    printf '  · 容器内 → 宿主：写进 /share（宿主侧就是 %s/share），或在 /mnt/sdcard 下写\n' "$LH"
+    printf '  · 宿主 → 容器：往 %s/share 丢文件（容器内立刻出现在 /share）\n' "$LH"
+    printf '  · 别用绝对路径猜宿主布局：容器里看不到 /data；宿主上看不到 overlay 的合成视图\n'
+    if [ "$view" = "shadow" ]; then
+        printf '\n⚠️  影子视图警告：你现在看到的 %s **很可能不是真的那一份**。\n' "$LH"
+        printf '    请从 MT（全局命名空间）或设备 shell 复核，再决定要不要写。\n'
+    fi
+    return 0
 }
 
 cmd_footprint() {
@@ -2390,7 +2489,7 @@ main() {
     # 踩过的坑：这里原来无条件 mkdir，于是 `footprint`（只读残留报告）在环境根不存在时
     # **先把它建出来再报告"存在"**，得出完全错误的结论。只读工具不该有副作用。
     case "$sub" in
-        footprint|status|logs|doctor|version|help|-h|--help) : ;;
+        footprint|status|logs|doctor|whereami|version|help|-h|--help) : ;;
         # dsh info 也是只读的；dsh builtin/install 自己会 mkdir 需要的那几个目录
         dsh) : ;;
         *) mkdir -p "$RUN_DIR" "$LAYERS_DIR" "$ETC_DIR" 2>/dev/null || true ;;
@@ -2418,6 +2517,7 @@ main() {
         dsh)       cmd_dsh "$@" ;;
         rollback)  cmd_rollback "$@" ;;
         doctor)    cmd_doctor "$@" ;;
+        whereami)  cmd_whereami "$@" ;;
         footprint) cmd_footprint "$@" ;;
         purge)     cmd_purge "$@" ;;
         update-check)    cmd_update_proxy check "$@" ;;

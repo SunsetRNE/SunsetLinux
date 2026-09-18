@@ -65,6 +65,31 @@ if [ -f "$ENV_FILE" ]; then
     set +a
 fi
 
+# ---------------------------------------------------------------------------
+# 环境内的 DSH 权限模式：**默认全权**（2026-09-19，用户点名要的"环境里默认 root"）
+#
+# 背景（都有实测证据）：
+#   · 本环境是"真 chroot + 真 root"：进程 uid=0、SELinux 域 u:r:ksu:s0（宿主 root 域）；
+#   · DSH 的沙箱在这台机器上**没有可用后端**：没有 bwrap，Landlock 也没暴露
+#     （/sys/kernel/security/lsm 不存在），所以 `workspace-write` 只能 fail-closed
+#     —— 命令被直接拒掉，用户看到的是"每条 bash 都要单独提权"；
+#   · DSH 的审批策略是**一条变量**决定的（dsh-base 组合原文）：
+#       policy: (DSH_PERMISSION_MODE ?? 'workspace-write') === 'danger-full-access' ? 'never' : 'ask'
+#     ⇒ 不设它 = 沙箱 workspace-write + 审批 ask；设成 danger-full-access = 无沙箱 + 不询问。
+#   · 壳（DSHA）给容器里的会话设的正是 danger-full-access（实测：启动命令行里
+#     `export DSH_PERMISSION_MODE='danger-full-access'`）—— 环境里保持一致，行为才可预期。
+#
+# 要改回去：在 $DSH_HOME/env（0600）里写 `DSH_PERMISSION_MODE=workspace-write`（或 read-only），
+# 本行只在**没人设过**时才填默认值（env 文件在上面已经 source 过，所以用户的值优先）。
+# ---------------------------------------------------------------------------
+if [ -z "${DSH_PERMISSION_MODE:-}" ]; then
+    DSH_PERMISSION_MODE=danger-full-access
+    log "权限模式：未显式设置 → 默认 danger-full-access（无沙箱、不询问）。要改：在 $ENV_FILE 里写 DSH_PERMISSION_MODE=workspace-write"
+else
+    log "权限模式：沿用已设置的 DSH_PERMISSION_MODE=$DSH_PERMISSION_MODE"
+fi
+export DSH_PERMISSION_MODE
+
 LOG="$RUN_DIR/linux.log"
 URL_FILE="$RUN_DIR/dsh.url"
 PID_FILE="$RUN_DIR/dsh.pid"

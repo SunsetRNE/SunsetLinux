@@ -2038,3 +2038,52 @@ loop52 指向 `dsh-0.1.6-alpha.2.erofs`，挂载层版本 `0.1.6-alpha.2`。
 1. **用户装 App 0.3.19**，然后：更新页点「刷新」—— 这次应当**报出 runtime 1.0.1 与 dsh 的更新**（而不是「已是最新」），
    并且「频道检查」卡里能看到 `验签实现：内置 Ed25519（纯 Kotlin…）` 或 provider 那一行。**这是本轮唯一的真机验证缺口。**
 2. 模块侧无待办；`runtime` 层若重出记得**版本 +1**，顺手修 dsh 层里那 5 个重复入口脚本副本。
+
+---
+
+# ★★ 第 55 轮（2026-09-19 02:xx）：三件事的根因（找不到工作区 / 壳读取慢 / 环境里要逐条提权）
+
+**用户原话**：「我找不到 Root 部署下『工作根』……没有穿透 `/storage/emulated/0/Download` 镜像映射到容器内部……壳对 Root 环境的读取延迟比较重，会有闪烁（候补记：在
+`/data/sunsetlinux/upper/upper/root/` 找到了工作区，但总感觉不太对劲）」「主要是虚拟环境内部的提权，它默认是无 Root……只不过实机是有 Root 的」。
+交付：**App 0.3.20 / 36 + 模块 1.0.44**（完整证据与表格见 STATUS §3.10.58、设计见 `docs/viewpoints.md`）。
+
+## 1. 「视角不一致」是真的 —— 三个命名空间 + 一份影子 `/data`
+
+| 视角 | mount ns | `/data/sunsetlinux` |
+|---|---|---|
+| 全局（pid 1） | `4026532884` | 真那棵（`upper.img` 8 GB 等 18 项） |
+| 设备 shell（ksu su） | `4026536055` | 同一棵树，**看不到环境私有挂载** |
+| 环境（`unshare -m`） | `4026535677` | **没有这个路径** |
+| DSHA 的 proot 容器（AI 会话常在这） | 随容器 | ⚠️ **影子目录**（inode 2909534 vs 真的 1652135，同一分区） |
+
+- 影子目录的成因实锤：壳启动 proot 的命令行 bind 了 `/dev /proc /sys /system /apex` 与 `/storage/emulated/0`，
+  **没有 `/data`** ⇒ `/data/...` 落进 rootfs 里的 `data/`。
+- 用户"候补记"**是对的**：`upperdir=$LH/upper/upper`（双 `upper` = 镜像挂载点 + upperdir 目录名），
+  chroot `/root` = 宿主 `$LH/upper/upper/root`。
+- Download **早就通了**：环境里 `/mnt/sdcard`，`/storage/emulated/0` 是它的软链 —— 按宿主路径找所以没找到。
+- 顺带发现：那条 proot 命令行里**带着 API key**（已提醒壳侧改成环境文件注入；我们自己的脚本一直避免这件事）。
+
+## 2. 「环境里默认非 root」= 一条环境变量，不是权限
+
+`dsh-base` 组合原文：`policy: (DSH_PERMISSION_MODE ?? 'workspace-write') === 'danger-full-access' ? 'never' : 'ask'`。
+审批没被删（包都在），而且**壳给容器里的会话设的就是 danger-full-access**（实测命令行）——
+所以用户"看不到审批提示"。环境本身 uid 0 + `u:r:ksu:s0`，`/proc/1/root` 通着 ⇒ **chroot 不是安全边界**。
+`workspace-write` 在这台机器上没有后端（无 bwrap、无 Landlock）⇒ 只会 fail-closed 拒命令，逐条提权零收益。
+
+## 3. 改了什么
+
+- `linuxctl whereami [--json]`（只读）：判定"我在哪个视角" + 打印路径地图。
+- `module/share/地图-视角.md`：**随模块发布**，开机投递到 `/share/地图-视角.md` 与 `$LH/README-地图.md`。
+- `start.sh` 新增 `mount_share()`：`$LH/share` ↔ `/share`（同一批 inode、0777、失败只 warn）。
+- `supervise.sh`：`DSH_PERMISSION_MODE` 默认 `danger-full-access`（在 `$DSH_HOME/env` 之后兜底，用户值优先）。
+- `doctor.sh` §1f：影子视图 + 挂载回流（`grep -c sunsetlinux/rootfs /proc/1/mountinfo`）+ 交换目录。
+- 壳：`statusOrNull()` 把 `exists()+status()` 两次 su 并成**一次**；轮询 8s/12s；**读失败保留上次读到的值**（≤3 轮，
+  真实 `state=error` 仍立刻显示）。
+- 回归：App **301/0**（+4）、`runtime/root/selftest.sh` **140/0**（+13）、模块打包含 `share/` 且缺地图直接拒绝。
+
+## 4. 待办
+
+1. **挂载回流**：先按 `doctor` §1f 确认，再决定怎么真正隔住（要自己实现 propagation）。
+2. **宿主 root 通道的显式开关**（用户点名）：价值在"有名字、有提示、有审计"，不在权限（本来就 uid 0 + ksu 域）。
+   设计：配置放宿主侧（环境内改不到）、默认关、每次调用写审计、App 里可见。
+3. **API key 别走命令行**（壳侧）。

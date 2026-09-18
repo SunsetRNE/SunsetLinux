@@ -519,6 +519,82 @@ su -c '/data/sunsetlinux/bin/linuxctl doctor'
 | 已装状态读不到时 | —— | **不给刷入按钮**，先让用户修 root 授权（与"读不到 ≠ 没装"一致） |
 | 重启 | —— | 只报告"重启后生效"（KernelSU 落 `modules_update/`），**App 不替用户重启**，脚本里有单测断言不许出现 `reboot` |
 
+### 3.10.58 「找不到工作区 / 壳读取慢 / 环境里要逐条提权」三件事的根因与修法（2026-09-19，App 0.3.20 + 模块 1.0.44）
+
+用户原话：「我找不到 Root 部署下『工作根』……也没有穿透 `/storage/emulated/0/Download` 镜像映射到容器内部……壳对 Root 环境的读取延迟比较重……会有闪烁（候补记：在
+`/data/sunsetlinux/upper/upper/root/` 找到了工作区，但总感觉不太对劲）」「主要是虚拟环境内部的提权，它默认是无 Root……只不过实机是有 Root 的」。
+
+#### ① 「视角不一致」是**真的**：三个挂载命名空间 + 一份影子 `/data`
+
+| 视角 | mount ns（实测） | `/data/sunsetlinux` 是 |
+|---|---|---|
+| 全局（pid 1） | `mnt:[4026532884]` | 真的那棵（18 项，含 `upper.img` 8 GB、`dirs-upper`、`bin`） |
+| 设备 shell（ksu su） | `mnt:[4026536055]` | 同一棵树，**看不到环境私有挂载**（`upper/` 是空挂载点） |
+| SunsetLinux 环境（`unshare -m`） | `mnt:[4026535677]` | **没有这个路径**（chroot 里看不到 `/data`） |
+| DSHA 的 proot Ubuntu（AI 会话常在这） | 随容器 | ⚠️ **影子目录** |
+
+- **影子目录的硬证据**：同一个 f2fs 分区（device `65103`）上，真目录 inode **1652135**、影子目录 inode **2909534** —— 同名不同物。
+- **原因实锤**：DSHA 壳启动 proot 的命令行（从 `/proc/<pid>/cmdline` 读到）bind 了
+  `/dev /proc /sys /system /apex` 与 `/storage/emulated/0 → /sdcard`，**没有 `/data`** ⇒ proot 把 `/data/...`
+  解析到 `--rootfs=…/ubuntu` 里的 `data/`。顺带发现那条命令行里**带着 API key**（`export DEEPSEEK_API_KEY='sk-…'`）——
+  已提醒用户改成走环境文件注入（本项目自己的脚本早就在避免这件事：supervise.sh 里写着"不把任何密钥放命令行"）。
+- **用户"候补记"是对的**：overlay 的真实入参就在启动日志里 ——
+  `upperdir=/data/sunsetlinux/upper/upper`（双 `upper` = `upper.img` 的挂载点 + 它里面的 upperdir 目录名），
+  所以 chroot 的 `/root` = 宿主 `/data/sunsetlinux/upper/upper/root`。
+- **Download 其实早就映射进去了**：环境里是 `/mnt/sdcard`（rbind `/mnt/pass_through/0/emulated`），
+  且 `/storage/emulated/0` 是指向它的**软链**——用户按宿主习惯的绝对路径去找，所以没找到。
+- **挂载回流**（新发现，倾向成立）：`start.sh` 只 `unshare -m -u`，而 toybox 的 `unshare` 不认 `--propagation`
+  （启动日志里那句"未能设为 rslave（toybox 不支持该选项）"），`/` 又是 shared ⇒ 环境的挂载**可能回流到全局 ns**，
+  这正好解释"MT 能看见 `upper/upper`、设备 shell 看不见"。判据已做成自检（§1f）。
+
+#### ② 环境里"默认非 root"的真相：不是权限，是**一条环境变量**
+
+DSH 的沙箱与审批由一条变量决定（`dsh-base` 组合原文）：
+
+```yaml
+- id: approval
+  name: '@deepseek-ai/dsh-user-approval'
+  config:
+    policy: !!js "(process.env.DSH_PERMISSION_MODE ?? 'workspace-write') === 'danger-full-access' ? 'never' : 'ask'"
+```
+
+- 不设 = `workspace-write` + `ask`（逐条提权）；设 `danger-full-access` = 无沙箱 + 不询问。
+- **审批功能没有被删**（包都在：`dsh-user-approval`、`dsh-sandbox-{local,policy}`、`dsh-bash-sandbox`…）；
+  用户"看不到审批提示"是因为**壳（DSHA）给容器里的会话设的就是 `danger-full-access`**（实测启动命令行）。
+- 这台机器上 `workspace-write` 的意义是零：无 `bwrap`、Landlock 未暴露（`/sys/kernel/security/lsm` 不存在）。
+- **安全模型（要说清）**：环境进程 uid 0、SELinux 域 **`u:r:ksu:s0`**（宿主 root 域），
+  `/proc/1/root` 通着 ⇒ **chroot 不是安全边界**，"提权"从来不是缺的东西，缺的是可见性、约定与审计。
+
+#### ③ 修法（App 0.3.20 + 模块 1.0.44）
+
+| 文件 | 改动 |
+|---|---|
+| `runtime/root/linuxctl.sh` | 新增 `whereami [--json]`：按"只有这个视角才有的东西"判定视角（env/host/shadow），打印 mount ns + 路径地图；**只读**（连 mkdir 都不做） |
+| `runtime/root/start.sh` | 新增 `mount_share()`：`$LINUX_HOME/share` ↔ `/share`（0777、rbind、失败只 warn） |
+| `runtime/root/supervise.sh` | 在加载 `$DSH_HOME/env` **之后**兜底 `DSH_PERMISSION_MODE=danger-full-access`（用户值优先，顺序有自测） |
+| `runtime/root/doctor.sh` | 新增 §1f：影子视图检测 + 挂载回流检测 + 交换目录检查 |
+| `module/share/地图-视角.md`（新） | 随模块发布的**视角地图**（人/AI 读；含三个视角、路径映射、塞文件三条路、权限模型、已知坑） |
+| `module/post-fs-data.sh` | 开机投递地图到 `$LINUX_HOME/share/`（= 环境 `/share`）与 `$LINUX_HOME/README-地图.md` |
+| `module/mkmodule.sh` | `share/` 进包 + **必需项断言**（缺地图直接拒绝打包） |
+| `app/.../LinuxCtl.kt` | `statusOrNull()`：一次 su 同时回答"有没有部署"与"什么状态" |
+| `app/.../Status.kt` | 纯函数 `isReadFailure()` / `keepLastGoodStatus()`（判据是"读到了 vs 没读到"） |
+| `app/.../LauncherViewModel.kt` | 用一次 su 的 `statusOrNull()`；读失败保留上次读到的值（≤3 轮）；轮询 4s/5s → 8s/12s |
+| `docs/viewpoints.md`（新） | 仓库侧的设计文档（为什么、怎么验、待办） |
+
+#### ④ 自测与证据
+
+- App 单测 **297 → 301 / 0**（`StatusFreshnessTest` 4 条：读到新值就用新值 / 读失败保留但封顶 / 没有上次好值就不保留 / **新读到的真实 ERROR 必须立刻显示**）。
+- `runtime/root/selftest.sh` **127 → 140 / 0**：whereami 的 shadow 与 host 两种形态、未知参数报错、**只读性**（不许建目录）；
+  交换目录与地图投递的静态契约、`mount_share` 不许用 `die`；权限默认值**只在未设置时生效**且**位置在 env 加载之后**；doctor §1f 的判据存在。
+- 模块打包实测：`share/ 铺入 1 个文件（视角地图）`，zip 里 `share/地图-视角.md` 可读出。
+
+#### ⑤ 待办（本轮没做）
+
+1. **挂载回流的修复**：要自己实现 propagation（`mount --make-rprivate /` 之类），先按 §1f 的判据确认范围，再动手。
+2. **宿主 root 通道**：用户点名要"显式开关"。已有的结论是它**不新增权限**（本来就 uid 0 + ksu 域），价值在"有名字、有提示、有审计"；
+   设计要点：配置放宿主侧（环境内改不到）、默认关、每次调用写审计、App 里可见。
+3. **API key 上命令行**（壳侧）：建议改成环境文件注入。
+
 ### 3.10.57 真机核验 v0.3.18 落地 + 找到「用户自己更新不了」的根因：**原生 Android 根本没有 Ed25519 的 KeyFactory**（2026-09-19）
 
 #### ① 内置切换**生效了**（v0.3.18 的三处修复确实到了设备）

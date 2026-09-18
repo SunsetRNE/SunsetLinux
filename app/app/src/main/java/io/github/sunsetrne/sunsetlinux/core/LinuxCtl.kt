@@ -120,6 +120,46 @@ class LinuxCtl(private val context: Context, val mode: EnvMode) {
 
     // ---------------------------------------------------------------- 命令
 
+    /**
+     * **一次 su 搞定"有没有部署" + "读状态"**（2026-09-19 性能修复）。
+     *
+     * 为什么要合并：轮询每 4 秒跑一轮，原来是 `exists()` + `status()` **两次 su**
+     * （外加 su 可用性探测与日志轮询，5 秒内 4~5 次 su 往返）—— 真机上肉眼可见地慢。
+     * 现在把"找 ctl → 跑 status"压进**同一条 su 脚本**：找不到就退 41（= 没部署），
+     * 找到就 exec status，stdout 只有 JSON。
+     *
+     * 返回 null = 本机没有 linuxctl（没部署），不是"出错"。
+     */
+    suspend fun statusOrNull(): DshStatus? = withContext(Dispatchers.IO) {
+        when (mode) {
+            EnvMode.ROOT -> {
+                val probe = candidates.joinToString(" ") {
+                    "if [ -x ${shQuote(it)} ]; then printf '%s\\n' ${shQuote(it)} >&2; exec ${shQuote(it)} status; fi;"
+                }
+                val r = SuShell.exec("$probe exit 41", TIMEOUT_STATUS)
+                when {
+                    r.exitCode == 41 -> null
+                    r.error != null -> DshStatus.unavailable(r.error, r.stdout)
+                    r.exitCode != 0 && r.stdout.isBlank() -> DshStatus.unavailable(r.message, r.stdout)
+                    else -> {
+                        // stderr 第一行是探到的实际路径（用于诊断与后续命令）
+                        r.stderr.lineSequence().firstOrNull { it.trim().startsWith("/") }
+                            ?.trim()?.let { activeCtlPath = it }
+                        DshStatus.parse(r.stdout)
+                    }
+                }
+            }
+
+            EnvMode.PROOT -> {
+                val p = candidates.firstOrNull { File(it).isFile }
+                if (p == null) null else {
+                    activeCtlPath = p
+                    status()
+                }
+            }
+        }
+    }
+
     /** 读状态。永远不抛异常：失败时返回 state=UNKNOWN + 可读 last_error。 */
     suspend fun status(): DshStatus {
         val r = execBlocking(listOf("status"), TIMEOUT_STATUS)

@@ -1628,6 +1628,122 @@ else
 fi
 
 
+# ---------------------------------------------------------------------------
+# 单元：视角地图 / 交换目录 / 权限默认值（2026-09-19 用户反馈三件事）
+#   ① AI 与人都"找不到工作根、判错视角" ⇒ whereami + 地图投递；
+#   ② 宿主塞不进东西 ⇒ /share 交换目录；
+#   ③ 环境里每条命令都要提权 ⇒ DSH_PERMISSION_MODE 默认 danger-full-access。
+#   这三条都是"改了却没人验"的高危形状（静态可钉，且不影响真机行为）。
+# ---------------------------------------------------------------------------
+head_ "单元：whereami（我在哪个视角）"
+
+WH="$TMP/whereami-home"
+mkdir -p "$WH/etc" "$WH/run" 2>/dev/null
+
+# ① 影子视图：$LH 存在但没有 upper.img/dirs-upper/bin ⇒ 必须判 shadow 并给出警告
+if out="$(LINUX_HOME="$WH" "$SH_BIN" "$SELF_DIR/linuxctl.sh" whereami --json 2>/dev/null)"; then
+    case "$out" in
+        *'"view":"shadow"'*) ok "影子视图被认出来（$LH 有名无实）" ;;
+        *'"view":"'*)       bad "视角判错（既不 shadow 也不报错）：$out" ;;
+        *)                  bad "whereami --json 没给出 view：$out" ;;
+    esac
+    case "$out" in
+        *'"paths"'*) ok "JSON 里带路径地图" ;;
+        *)           bad "JSON 里没有 paths：$out" ;;
+    esac
+else
+    bad "whereami --json 执行失败"
+fi
+
+# ② 真宿主视图：放一个 bin/linuxctl.sh 进去 ⇒ 必须判 host
+mkdir -p "$WH/bin" && printf '#!/bin/sh\n' > "$WH/bin/linuxctl.sh" && chmod 0755 "$WH/bin/linuxctl.sh"
+if out="$(LINUX_HOME="$WH" "$SH_BIN" "$SELF_DIR/linuxctl.sh" whereami --json 2>/dev/null)"; then
+    case "$out" in
+        *'"view":"host"'*) ok "宿主视图被认出来（bin/linuxctl.sh 在）" ;;
+        *)                 bad "宿主视图判错：$out" ;;
+    esac
+else
+    bad "whereami（host 形态）执行失败"
+fi
+
+# ③ 未知参数必须报错（不许静默当成默认行为）
+if LINUX_HOME="$WH" "$SH_BIN" "$SELF_DIR/linuxctl.sh" whereami --bogus >/dev/null 2>&1; then
+    bad "whereami 对未知参数返回了 0"
+else
+    ok "whereami 对未知参数明确报错"
+fi
+
+# ④ 只读：whereami 不许建任何目录（footprint 那次的教训）
+RO="$TMP/whereami-ro"
+if LINUX_HOME="$RO" "$SH_BIN" "$SELF_DIR/linuxctl.sh" whereami >/dev/null 2>&1; then :; fi
+if [ -e "$RO" ]; then
+    bad "whereami 有副作用：把不存在的环境根建出来了"
+else
+    ok "whereami 是只读的（没建目录）"
+fi
+
+head_ "单元：交换目录与权限默认值（静态契约）"
+
+if grep -q 'mount_share' "$SELF_DIR/start.sh" && grep -q 'SHARE_DIR=' "$SELF_DIR/start.sh"; then
+    ok "start.sh 里有交换目录（mount_share）"
+else
+    bad "start.sh 里找不到 mount_share —— /share 不会挂上"
+fi
+# 失败必须**不致命**（环境照常起）：函数体里不许出现 die
+if awk '/^mount_share\(\)/,/^}/' "$SELF_DIR/start.sh" | grep -q 'die '; then
+    bad "mount_share 里用了 die：交换目录挂不上会把整个环境拖死"
+else
+    ok "mount_share 失败不致命（只用 warn_soft）"
+fi
+# 地图投递：模块里必须有那份 md，且 post-fs-data 会拷到 share/ 与环境根
+if [ -f "$REPO_DIR/module/share/地图-视角.md" ]; then
+    ok "地图文件在（module/share/地图-视角.md）"
+else
+    bad "module/share/地图-视角.md 不存在 —— 环境里看不到地图"
+fi
+if grep -q '地图-视角.md' "$REPO_DIR/module/post-fs-data.sh" 2>/dev/null; then
+    ok "post-fs-data.sh 会投递地图"
+else
+    bad "post-fs-data.sh 没有投递地图"
+fi
+# 权限默认值：supervise.sh 必须给 DSH_PERMISSION_MODE 兜底成 danger-full-access，
+# 且**只在没人设过时**才填（用户写在 $DSH_HOME/env 里要能覆盖）
+if grep -q 'DSH_PERMISSION_MODE' "$SUP" 2>/dev/null; then
+    if grep -q '\[ -z "${DSH_PERMISSION_MODE:-}" \]' "$SUP"; then
+        ok "权限默认值只在未设置时生效（用户可覆盖）"
+    else
+        bad "supervise.sh 无条件覆盖 DSH_PERMISSION_MODE —— 用户在 env 里的设置会被吃掉"
+    fi
+    if grep -q 'DSH_PERMISSION_MODE=danger-full-access' "$SUP"; then
+        ok "环境内默认为 danger-full-access（无沙箱、不询问）"
+    else
+        bad "没找到 danger-full-access 默认值"
+    fi
+    # 关键顺序：默认值必须在 source $DSH_HOME/env **之后**，否则用户设置会被反覆盖
+    ln_env="$(grep -n '\. "$ENV_FILE"' "$SUP" | head -n1 | cut -d: -f1)"
+    ln_def="$(grep -n 'DSH_PERMISSION_MODE=danger-full-access' "$SUP" | head -n1 | cut -d: -f1)"
+    if [ -n "$ln_env" ] && [ -n "$ln_def" ] && [ "$ln_def" -gt "$ln_env" ]; then
+        ok "默认值在加载 env 文件之后（用户值优先）"
+    else
+        bad "默认值的位置在 env 加载之前（env=$ln_env def=$ln_def）—— 用户设置会被覆盖"
+    fi
+else
+    bad "supervise.sh 里没有 DSH_PERMISSION_MODE —— 环境里仍会逐条提权"
+fi
+
+head_ "单元：doctor 的视角/隔离自检"
+
+if grep -q '1f. 视图与挂载隔离' "$SELF_DIR/doctor.sh"; then
+    ok "doctor 有 §1f（视角与挂载隔离）"
+else
+    bad "doctor.sh 缺少 §1f"
+fi
+if grep -q '/proc/1/mountinfo' "$SELF_DIR/doctor.sh"; then
+    ok "回流检查用 /proc/1/mountinfo 当判据（可判定，不靠猜）"
+else
+    bad "回流检查没有可判定证据"
+fi
+
 printf '\n=========================================\n'
 printf '  通过 %d，失败 %d\n' "$pass" "$fail"
 printf '=========================================\n'

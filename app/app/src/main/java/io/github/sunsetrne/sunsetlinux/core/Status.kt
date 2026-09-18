@@ -8,13 +8,13 @@ import org.json.JSONObject
  * [wire] 必须与 `linuxctl status` 里 `mode` 的取值一致（`root` / `proot`）。
  */
 enum class EnvMode(val wire: String, val label: String, val modeLabel: String) {
-    ROOT("root", "root", "ROOT"),
-    PROOT("proot", "proot", "PROOT");
+ROOT("root", "root", "ROOT"),
+PROOT("proot", "proot", "PROOT");
 
-    companion object {
+companion object {
         fun from(raw: String?): EnvMode? =
             entries.firstOrNull { it.wire.equals(raw?.trim(), ignoreCase = true) }
-    }
+}
 }
 
 /**
@@ -25,17 +25,17 @@ enum class EnvMode(val wire: String, val label: String, val modeLabel: String) {
  * 这三种情况必须能被 App 区分并给出友好提示，绝不能让首页崩掉或空白。
  */
 enum class EnvState(val wire: String, val label: String) {
-    STOPPED("stopped", "已停止"),
-    STARTING("starting", "正在启动"),
-    RUNNING("running", "运行中"),
-    STOPPING("stopping", "正在停止"),
-    ERROR("error", "出错"),
-    UNKNOWN("unknown", "状态未知");
+STOPPED("stopped", "已停止"),
+STARTING("starting", "正在启动"),
+RUNNING("running", "运行中"),
+STOPPING("stopping", "正在停止"),
+ERROR("error", "出错"),
+UNKNOWN("unknown", "状态未知");
 
-    companion object {
+companion object {
         fun from(raw: String?): EnvState =
             entries.firstOrNull { it.wire.equals(raw?.trim(), ignoreCase = true) } ?: UNKNOWN
-    }
+}
 }
 
 /**
@@ -51,21 +51,21 @@ enum class EnvState(val wire: String, val label: String) {
  * 必须把 null 与 [FULL] 区分开，否则旧模块上会给出"本次是一键启动"这种编造的说法。
  */
 enum class EnvRunMode(val wire: String, val label: String) {
-    FULL("full", "一键启动（环境 + DSH）"),
-    ENV_ONLY("env-only", "仅环境（未启 DSH）");
+FULL("full", "一键启动（环境 + DSH）"),
+ENV_ONLY("env-only", "仅环境（未启 DSH）");
 
-    companion object {
+companion object {
         fun from(raw: String?): EnvRunMode? =
             entries.firstOrNull { it.wire.equals(raw?.trim(), ignoreCase = true) }
-    }
+}
 }
 
 /** `status.layers.<id>`，字段全部容错（不可得为 null，而不是省略）。 */
 data class LayerInfo(
-    val id: String,
-    val version: String?,
-    val size: Long?,
-    val mounted: Boolean?,
+val id: String,
+val version: String?,
+val size: Long?,
+val mounted: Boolean?,
 )
 
 /**
@@ -75,57 +75,57 @@ data class LayerInfo(
  * 并把原始输出留在 [raw] 里供诊断页展示。
  */
 data class DshStatus(
-    val schema: Int?,
-    val mode: String?,
-    val state: EnvState,
-    val pid: Long?,
-    val uptimeSec: Long?,
-    /** 带 launchToken 的登录 URL（§3.3）。每次重启都会变，**不得缓存**。 */
-    val dshUrl: String?,
-    /** 不带令牌的裸地址，用于展示与健康检查。 */
-    val dshBaseUrl: String?,
-    val dshPort: Int?,
-    val dshVersion: String?,
-    val dshHealthy: Boolean?,
-    val layers: List<LayerInfo>,
-    val upperUsed: Long?,
-    val upperTotal: Long?,
-    val lastError: String?,
-    /**
+val schema: Int?,
+val mode: String?,
+val state: EnvState,
+val pid: Long?,
+val uptimeSec: Long?,
+/** 带 launchToken 的登录 URL（§3.3）。每次重启都会变，**不得缓存**。 */
+val dshUrl: String?,
+/** 不带令牌的裸地址，用于展示与健康检查。 */
+val dshBaseUrl: String?,
+val dshPort: Int?,
+val dshVersion: String?,
+val dshHealthy: Boolean?,
+val layers: List<LayerInfo>,
+val upperUsed: Long?,
+val upperTotal: Long?,
+val lastError: String?,
+/**
      * 附加键 `dsh.running`（模块新增）：DSH 进程**是否真的在跑**。
      *
      * 为什么需要它：拆开启动之后"环境 running"不再蕴含"DSH running"（`env-only` 起法下
      * 环境跑着而 DSH 没起）。缺这个键时是 null —— 此时 [dshRunning] 会退化为
      * "有带令牌 url 就算在跑"，绝不能因为缺键就崩或显示成"DSH 在跑"。
      */
-    val dshRunningReported: Boolean? = null,
-    /** 附加键 `env_mode`；null = 环境没在跑 / 旧模块没报 → **判不了**，不编造。 */
-    val envMode: EnvRunMode? = null,
-    /**
+val dshRunningReported: Boolean? = null,
+/** 附加键 `env_mode`；null = 环境没在跑 / 旧模块没报 → **判不了**，不编造。 */
+val envMode: EnvRunMode? = null,
+/**
      * 非 root 模式**实际**用的运行时（`proroot` / `proot`），从 status JSON 的新键
      * `rootless:{kind,version}` 读；没启动过时是 null（不编造）。
      *
      * 为什么单列：`mode` 对外仍是 `proot`（§3.1 冻结的契约不动），
      * 但"到底跑的是 proroot 还是降级的 proot"对排障与性能预期都是关键信息。
      */
-    /** 本次 start 用的层模式（`loop` / `dir`）；没启动过是 null。 */
-    val layerMode: String? = null,
-    val rootlessKind: String? = null,
-    val rootlessVersion: String? = null,
-    val raw: String,
+/** 本次 start 用的层模式（`loop` / `dir`）；没启动过是 null。 */
+val layerMode: String? = null,
+val rootlessKind: String? = null,
+val rootlessVersion: String? = null,
+val raw: String,
 ) {
-    val isRunning: Boolean get() = state == EnvState.RUNNING
-    val isBusy: Boolean get() = state == EnvState.STARTING || state == EnvState.STOPPING
+val isRunning: Boolean get() = state == EnvState.RUNNING
+val isBusy: Boolean get() = state == EnvState.STARTING || state == EnvState.STOPPING
 
-    /**
+/**
      * 环境是否真的在跑（**与 DSH 无关**）。
      *
      * 单开这个名字而不是到处写 `state == RUNNING`：拆开启动之后"环境在跑"是终端可用的
      * 唯一前提，而"DSH 在跑"是另一件事 —— 两个判断混用会导致 env-only 模式下终端被误判为不可用。
      */
-    val envRunning: Boolean get() = state == EnvState.RUNNING
+val envRunning: Boolean get() = state == EnvState.RUNNING
 
-    /**
+/**
      * DSH 是否在跑。
      *
      * 优先用模块报的 `dsh.running`（它是权威事实）；**缺键时退化**为"有带令牌 url 就算在跑"
@@ -133,33 +133,33 @@ data class DshStatus(
      * 退化的方向是明确的：没有 url 就判"没在跑"（不猜"可能在跑"），因为"点了「启动 DSH」"
      * 在模块侧是幂等的，而反过来"以为在跑 → 按钮点不动"会让用户彻底卡住。
      */
-    val dshRunning: Boolean get() = dshRunningReported ?: !dshUrl.isNullOrBlank()
+val dshRunning: Boolean get() = dshRunningReported ?: !dshUrl.isNullOrBlank()
 
-    /** 本次是按「仅启动环境」起的（环境在跑且模块报了 env-only）。 */
-    val isEnvOnly: Boolean get() = envRunning && envMode == EnvRunMode.ENV_ONLY
+/** 本次是按「仅启动环境」起的（环境在跑且模块报了 env-only）。 */
+val isEnvOnly: Boolean get() = envRunning && envMode == EnvRunMode.ENV_ONLY
 
-    /** 本次是按「一键启动」起的（环境与 DSH 一起）。 */
-    val isFullMode: Boolean get() = envRunning && envMode == EnvRunMode.FULL
+/** 本次是按「一键启动」起的（环境与 DSH 一起）。 */
+val isFullMode: Boolean get() = envRunning && envMode == EnvRunMode.FULL
 
-    /**
+/**
      * 「打开 DSH」是否可用。
      *
      * 必须同时满足：环境在跑 + 拿到了带令牌的 URL（§3.3：裸地址会返回 401，
      * 所以只认带 token 的 url）。
      */
-    val canOpenWeb: Boolean get() = state == EnvState.RUNNING && !dshUrl.isNullOrBlank()
+val canOpenWeb: Boolean get() = state == EnvState.RUNNING && !dshUrl.isNullOrBlank()
 
-    /** 展示用的稳定地址（永不显示令牌）。 */
-    val displayUrl: String? get() = dshBaseUrl ?: dshUrl?.let(::stripToken)
+/** 展示用的稳定地址（永不显示令牌）。 */
+val displayUrl: String? get() = dshBaseUrl ?: dshUrl?.let(::stripToken)
 
-    val modeEnum: EnvMode? get() = EnvMode.from(mode)
+val modeEnum: EnvMode? get() = EnvMode.from(mode)
 
-    fun layer(id: String): LayerInfo? = layers.firstOrNull { it.id == id }
+fun layer(id: String): LayerInfo? = layers.firstOrNull { it.id == id }
 
-    /** 运行时长的中文可读形式，例如「1 小时 02 分」。 */
-    val uptimeText: String? get() = uptimeSec?.let(::formatDuration)
+/** 运行时长的中文可读形式，例如「1 小时 02 分」。 */
+val uptimeText: String? get() = uptimeSec?.let(::formatDuration)
 
-    companion object {
+companion object {
         /** 命令本身没跑起来（su 缺失 / linuxctl 缺失 / 超时）时的占位状态。 */
         fun unavailable(reason: String, raw: String = ""): DshStatus = DshStatus(
             schema = null,
@@ -288,40 +288,71 @@ data class DshStatus(
                 else -> null
             }
         }
-    }
+}
 }
 
 /** 去掉 `?token=...`，用于展示。 */
 fun stripToken(url: String): String {
-    val q = url.indexOf('?')
-    val base = if (q >= 0) url.substring(0, q) else url
-    return base.removeSuffix("/")
+val q = url.indexOf('?')
+val base = if (q >= 0) url.substring(0, q) else url
+return base.removeSuffix("/")
 }
 
 /** 3721 → 「1 小时 02 分」。 */
 fun formatDuration(sec: Long): String {
-    if (sec < 0) return "—"
-    val d = sec / 86400
-    val h = (sec % 86400) / 3600
-    val m = (sec % 3600) / 60
-    val s = sec % 60
-    return when {
+if (sec < 0) return "—"
+val d = sec / 86400
+val h = (sec % 86400) / 3600
+val m = (sec % 3600) / 60
+val s = sec % 60
+return when {
         d > 0 -> "$d 天 $h 小时"
         h > 0 -> "$h 小时 ${"%02d".format(m)} 分"
         m > 0 -> "$m 分 ${"%02d".format(s)} 秒"
         else -> "$s 秒"
-    }
+}
 }
 
 /** 1536 → 「1.5 KB」。用 1024 进制，但不显示小数位到令人困惑的精度。 */
 fun formatBytes(bytes: Long?): String {
-    if (bytes == null || bytes < 0) return "—"
-    val units = listOf("B", "KB", "MB", "GB", "TB")
-    var v = bytes.toDouble()
-    var i = 0
-    while (v >= 1024 && i < units.lastIndex) {
+if (bytes == null || bytes < 0) return "—"
+val units = listOf("B", "KB", "MB", "GB", "TB")
+var v = bytes.toDouble()
+var i = 0
+while (v >= 1024 && i < units.lastIndex) {
         v /= 1024
         i++
-    }
-    return if (i == 0) "$bytes ${units[0]}" else "%.1f %s".format(v, units[i])
 }
+return if (i == 0) "$bytes ${units[0]}" else "%.1f %s".format(v, units[i])
+}
+
+/**
+     * 「这一次**没读到**」与「读到了、环境真的是 ERROR」是两件事。
+     *
+     * [unavailable] 产出的状态 state=UNKNOWN（且带 lastError）；而 linuxctl 真报错时
+     * state=error 是**事实**，必须照实显示。UI 的"保留上一次好状态"只对前者生效
+     * （2026-09-19：轮询里任何一次 su 抖动都会把界面从"运行中"翻成"读取失败"，
+     * 肉眼就是闪）。
+     */
+fun DshStatus.isReadFailure(): Boolean = state == EnvState.UNKNOWN
+
+/**
+     * 这一次刷新要不要**沿用上一次的好状态**（纯函数，便于单测）。
+     *
+     * 判据是**"读到了 vs 没读到"**，不是"好 vs 坏"：上一次成功读到的值（哪怕是
+     * state=error）是**已知事实**，读不到时保留它比换成"读取失败"信息更多、也不闪。
+     *
+     * 规则：
+     *   · 这次读到了（不是读失败）→ **不保留**（一律用新值，真实故障必须立刻显示）；
+     *   · 上次也是读失败 / 没有上次 → 不保留（没有已知事实可留）；
+     *   · 已连续保留满 [maxStaleTicks] 轮 → 不保留（不许永远显示过期值）。
+     */
+fun keepLastGoodStatus(
+        prev: DshStatus?,
+        fresh: DshStatus,
+        staleTicks: Int,
+        maxStaleTicks: Int,
+): Boolean = fresh.isReadFailure() &&
+        prev != null &&
+        !prev.isReadFailure() &&
+        staleTicks < maxStaleTicks

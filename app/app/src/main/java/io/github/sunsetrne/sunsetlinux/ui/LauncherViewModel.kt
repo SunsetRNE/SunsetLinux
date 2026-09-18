@@ -19,6 +19,8 @@ import io.github.sunsetrne.sunsetlinux.core.StartControls
 import io.github.sunsetrne.sunsetlinux.core.StartMode
 import io.github.sunsetrne.sunsetlinux.core.TransportSupport
 import io.github.sunsetrne.sunsetlinux.core.UpdateChecker
+import io.github.sunsetrne.sunsetlinux.core.isReadFailure
+import io.github.sunsetrne.sunsetlinux.core.keepLastGoodStatus
 import io.github.sunsetrne.sunsetlinux.core.channelsAllFailed
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -80,6 +82,13 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
          * `REJECTED：签名校验失败`，磁贴却写着"已是最新"。
          */
         val updateFailed: Boolean = false,
+        /**
+         * 连续多少轮"没读到状态、于是沿用了上一次的好值"。
+         *
+         * 为什么要有：读失败立刻清空状态会让界面闪（真机实测）；但一直不清又会显示过期值。
+         * 折中：沿用最多 [MAX_STALE_TICKS] 轮，超了就如实显示失败。
+         */
+        val staleTicks: Int = 0,
         val doctorRunning: Boolean = false,
         val doctorOutput: String? = null,
         val showDoctor: Boolean = false,
@@ -219,16 +228,26 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
             val choice = DshRuntime.resolveMode(app, prefs)
             val ctl = LinuxCtl(app, choice.mode)
             // ★ 轮询里的 su 探测也必须按 edition 短路：`DshRuntime.suAvailable()` 会起一个
-            //   `su` 进程（60 秒缓存），在免 root 版上每轮白跑一次、还可能弹出授权框 ——
+            //   `su` 进程（缓存），在免 root 版上每轮白跑一次、还可能弹出授权框 ——
             //   "免 root 版不探测 su"是 docs/module-variants.md §一 的明确要求。
             //   免 root 版固定 false（它本来就没有 su，也不需要）。
             val su = if (Edition.needsSu) DshRuntime.suAvailable() else false
-            val exists = ctl.exists()
 
-            val status = if (exists) ctl.status() else DshStatus.unavailable(NOT_PROVISIONED_HINT)
-            val mode = status.modeEnum ?: choice.mode
+            // ★ 2026-09-19：**一次 su** 同时回答"有没有部署"与"什么状态"。
+            //   原来 exists() + status() 是两次 su，加上日志轮询与 su 探测，5 秒内 4~5 次
+            //   su 往返 —— 真机上就是"壳读得慢、还闪"的一半原因。
+            val probed = ctl.statusOrNull()
+            val exists = probed != null
+            val fresh = probed ?: DshStatus.unavailable(NOT_PROVISIONED_HINT)
 
             _ui.update { prev ->
+                // ★ 读失败**不许丢掉上一次的好状态**（另一半"闪"的原因：任何一次异常都会把
+                //   status 覆盖成 unavailable，界面立刻从"运行中"翻成"读取状态失败"，下一轮
+                //   又变回来）。连续 MAX_STALE_TICKS 轮都没读成才认账，避免永远显示过期值。
+                val keepLast = keepLastGoodStatus(prev.status, fresh, prev.staleTicks, MAX_STALE_TICKS)
+                val status = if (keepLast) prev.status!! else fresh
+                val staleTicks = if (keepLast) prev.staleTicks + 1 else 0
+                val mode = status.modeEnum ?: choice.mode
                 val stage = Diagnoser.stage(status, exists, su, mode)
                 // ★ 兜底解锁：命令还在跑（甚至卡住），但**设备状态已经到位** ⇒ 立刻解锁启动区。
                 //   理由与设备实证见 core/ActionTarget.kt 的注释（一条永不返回的
@@ -237,6 +256,7 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
                 val reachedTarget = prev.busy && prev.actionTarget.reached(status)
                 prev.copy(
                     loading = false,
+                    staleTicks = staleTicks,
                     mode = mode,
                     modeNote = choice.note,
                     suAvailable = su,
@@ -257,7 +277,7 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
                     lastSyncedAt = System.currentTimeMillis(),
                 )
             }
-            maybeCheckUpdates(status)
+            maybeCheckUpdates(_ui.value.status ?: fresh)
         } catch (t: Throwable) {
             _ui.update {
                 it.copy(
@@ -530,8 +550,13 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     companion object {
-        private const val POLL_MS = 4_000L
-        private const val LOG_POLL_MS = 5_000L
+        // ★ 2026-09-19：4s/5s → 8s/12s。每一轮都是**一次 su 往返**（真机上很贵），
+        //   而状态变化只发生在用户操作或环境自己重启时——操作后都会立刻 refresh()，
+        //   所以拉长间隔只省开销，不牺牲"操作后马上看到结果"。
+        private const val POLL_MS = 8_000L
+        private const val LOG_POLL_MS = 12_000L
+        /** 读失败时最多沿用几轮上一次的好状态（见 UiState.staleTicks）。 */
+        private const val MAX_STALE_TICKS = 3
         private const val ACTION_TIMEOUT_MS = 200_000L
         private const val UPDATE_CHECK_INTERVAL_MS = 10 * 60 * 1000L
 

@@ -51,6 +51,8 @@ CONFIG_JSON="$ETC_DIR/config.json"   # resolve_layer_mode 要读它（此前只�
 LAYERS_DIR="$LH/layers"
 LAYERS_MNT="$LH/layers-mnt"
 UPPER_DIR="$LH/upper"
+# 交换目录（宿主 <-> 环境，两侧同一批 inode）。见 docs/viewpoints.md §交换目录。
+SHARE_DIR="$LH/share"
 UPPER_IMG="$LH/upper.img"
 
 # ── 层模式（loop / dir）────────────────────────────────────────────────────
@@ -1206,7 +1208,40 @@ build_mount_tree() {
     # --- §4 步 9：sdcard（优先绕开 FUSE 的 pass_through）-------------------
     mount_sdcard
 
+    # --- §4 步 10：交换目录（宿主 $LINUX_HOME/share <-> 环境 /share）--------
+    # 为什么要有（2026-09-19 用户反馈）：Root 部署下"找不到工作根、没法从宿主塞东西"——
+    #   可写层在 upper.img 里（挂载点只有 env 自己的 ns 可见），Download 虽然挂了但
+    #   与"工作区"是两回事。给一个**两侧都固定、都能读写、MT 里直接能进**的目录，
+    #   人和 AI 都不必再猜路径。失败**不致命**（环境照常起，只少一个便利目录）。
+    mount_share
+
     log "挂载树建立完成（共 $(wc -l < "$MOUNTS_FILE") 项）"
+}
+
+# ---------------------------------------------------------------------------
+# mount_share —— 交换目录：宿主 $LINUX_HOME/share <-> 环境 /share
+#   契约（写进 docs/viewpoints.md）：
+#     · 两侧**同一批 inode**：容器里写 /share/a，宿主 $LINUX_HOME/share/a 立刻可见；
+#     · 权限 0777：宿主侧 MT（root）与环境内（uid 0）都能读写；
+#     · 失败只 warn（不 die）：没有它环境照样能跑，只是少了这条便利通道。
+# ---------------------------------------------------------------------------
+mount_share() {
+    local dst="$ROOTFS_DIR/share"
+    if ! mkdir -p "$SHARE_DIR" 2>/dev/null; then
+        warn_soft "无法创建交换目录 $SHARE_DIR（跳过 /share 挂载）"
+        return 0
+    fi
+    chmod 0777 "$SHARE_DIR" 2>/dev/null || true
+    if ! mkdir -p "$dst" 2>/dev/null; then
+        warn_soft "无法创建挂载点 $dst（跳过 /share 挂载）"
+        return 0
+    fi
+    if do_rbind_op "$SHARE_DIR" "$dst"; then
+        record_mount "share"
+        log "交换目录已挂载：$SHARE_DIR -> /share（两侧同一批 inode，0777）"
+    else
+        warn_soft "交换目录挂载失败：$SHARE_DIR -> /share（环境照常可用）"
+    fi
 }
 
 # ---------------------------------------------------------------------------
