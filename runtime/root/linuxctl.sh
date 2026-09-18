@@ -2115,6 +2115,7 @@ linuxctl（sunsetlinux root 模式）
   stop                       停止环境（幂等，连同里面的一切进程）
   status                     输出状态 JSON（architecture.md §3.1）
   whereami [--json]          **我在哪个视角**（三个挂载命名空间 + 路径地图；只读）
+  host-channel status|on|off 宿主通道开关（**默认关**；见 docs/host-channel.md）
   attach [-- cmd...]         进入环境执行命令；无参数则开交互 shell
   exec -- cmd...             非交互执行（供 App 调用）
   logs [-n N]                日志尾部（默认 200 行）
@@ -2223,6 +2224,52 @@ _fp_pid_alive() { # _fp_pid_alive <pid 文件>
 #
 # 所以：**先问 whereami，再动手**。它只读、不改任何东西（连 mkdir 都不做）。
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# host-channel —— 宿主通道的**宿主侧**开关（默认关；设计见 docs/host-channel.md）
+#
+# 为什么开关放宿主侧：环境内的 agent 不该能自己把这条路打开。它只能读
+# $LINUX_HOME/run/host-channel.log（审计）与在 run/ 里看到自己的失败记录；
+# 而 etc/host-channel.json 在 chroot 里**根本看不到**（chroot 的 /etc 是环境自己的）。
+# ---------------------------------------------------------------------------
+HOST_CHANNEL_CFG_NAME="host-channel.json"
+host_channel_cfg() { printf '%s/%s' "$ETC_DIR" "$HOST_CHANNEL_CFG_NAME"; }
+
+cmd_host_channel() {
+    local sub="${1:-status}" cfg audit
+    cfg="$(host_channel_cfg)"
+    audit="$RUN_DIR/host-channel.log"
+
+    case "$sub" in
+        status)
+            if [ -f "$cfg" ]; then
+                printf '配置文件：%s\n' "$cfg"
+                cat "$cfg"
+            else
+                printf '配置文件：%s（还没有）\n' "$cfg"
+            fi
+            printf '\n最近审计（%s）：\n' "$audit"
+            if [ -f "$audit" ]; then tail -n 15 "$audit"; else printf '  （还没有记录）\n'; fi
+            return 0 ;;
+        on|off)
+            mkdir -p "$ETC_DIR" "$RUN_DIR" 2>/dev/null || true
+            if [ "$sub" = "on" ]; then
+                printf '%s\n' '{ "enabled": true, "allow": ["/data/sunsetlinux/share", "/storage/emulated/0"] }' > "$cfg"
+                log "宿主通道：已启用（审计写到 run/host-channel.log）"
+            else
+                printf '%s\n' '{ "enabled": false, "allow": ["/data/sunsetlinux/share", "/storage/emulated/0"] }' > "$cfg"
+                log "宿主通道：已关闭"
+            fi
+            printf '%s\n' "$(cat "$cfg")"
+            return 0 ;;
+        ""|-h|--help|help)
+            printf '用法：linuxctl host-channel status|on|off\n' >&2
+            printf '  宿主通道默认关：环境里的 agent 只能在你显式打开后经它操作宿主。\n' >&2
+            printf '  on/off 写 %s（环境内部看不到这个文件，所以环境里的进程无法自行开启）。\n' "$cfg" >&2
+            return 0 ;;
+        *) printf 'host-channel：未知参数 %s\n' "$sub" >&2; return 2 ;;
+    esac
+}
+
 cmd_whereami() {
     local json=0
     case "${1:-}" in
@@ -2490,6 +2537,7 @@ main() {
     # **先把它建出来再报告"存在"**，得出完全错误的结论。只读工具不该有副作用。
     case "$sub" in
         footprint|status|logs|doctor|whereami|version|help|-h|--help) : ;;
+        host-channel) : ;;   # status 只读；on/off 自己写 etc/
         # dsh info 也是只读的；dsh builtin/install 自己会 mkdir 需要的那几个目录
         dsh) : ;;
         *) mkdir -p "$RUN_DIR" "$LAYERS_DIR" "$ETC_DIR" 2>/dev/null || true ;;
@@ -2518,6 +2566,7 @@ main() {
         rollback)  cmd_rollback "$@" ;;
         doctor)    cmd_doctor "$@" ;;
         whereami)  cmd_whereami "$@" ;;
+        host-channel) cmd_host_channel "$@" ;;
         footprint) cmd_footprint "$@" ;;
         purge)     cmd_purge "$@" ;;
         update-check)    cmd_update_proxy check "$@" ;;

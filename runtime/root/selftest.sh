@@ -1731,6 +1731,74 @@ else
     bad "supervise.sh 里没有 DSH_PERMISSION_MODE —— 环境里仍会逐条提权"
 fi
 
+head_ "单元：宿主通道（默认关 + 白名单 + 审计）"
+
+HC="$SELF_DIR/host-channel.sh"
+if [ -f "$HC" ]; then
+    # 用一份临时 LINUX_HOME 跑（脚本里 LH 是硬编码的宿主路径，这里按同样形状搭一个替身）
+    HCH="$TMP/hc-home"; mkdir -p "$HCH/etc" "$HCH/run"
+    sed "s#^LH=/data/sunsetlinux#LH=$HCH#" "$HC" > "$TMP/hc.sh"; chmod +x "$TMP/hc.sh"
+
+    # ① 没有配置 ⇒ 必须判"未启用"，并且 run 要**拒绝执行**（退 3）
+    if out="$("$SH_BIN" "$TMP/hc.sh" run 'echo should-not-run' 2>&1)"; then
+        bad "未启用时 run 竟然成功了：$out"
+    else
+        rc=$?
+        case "$rc" in
+            3) case "$out" in *"未启用"*) ok "默认关：未启用时拒绝执行（rc=3）" ;; *) bad "拒绝文案不对：$out" ;; esac ;;
+            *) bad "未启用时的退出码应为 3，实际 $rc" ;;
+        esac
+    fi
+    # 关键：拒绝时必须留下审计
+    if [ -s "$HCH/run/host-channel.log" ]; then
+        ok "被拒绝的调用也写审计（可追溯）"
+    else
+        bad "被拒绝的调用没有审计记录"
+    fi
+
+    # ② 配置 enabled=true 但命令里的绝对路径在白名单外 ⇒ 退 4，且不执行
+    printf '%s\n' '{ "enabled": true, "allow": ["/data/sunsetlinux/share"] }' > "$HCH/etc/host-channel.json"
+    if out="$("$SH_BIN" "$TMP/hc.sh" run 'cat /data/secret' 2>&1)"; then
+        bad "白名单外的路径竟然放行了：$out"
+    else
+        case "$?" in
+            4) ok "白名单外路径被拒（rc=4）" ;;
+            *) bad "白名单拒绝的退出码应为 4" ;;
+        esac
+    fi
+
+    # ③ 白名单内的路径**不该**在这一步被拒（后面才会因为宿主根不可达而失败，rc=6）
+    if out="$("$SH_BIN" "$TMP/hc.sh" run 'cat /data/sunsetlinux/share/x' 2>&1)"; then
+        : # 真机上可能真的成功（宿主可达）——两种都算对
+    fi
+    case "$out" in
+        *"不在白名单内"*) bad "白名单内的路径被误拒：$out" ;;
+        *) ok "白名单内的路径没被误拒" ;;
+    esac
+
+    # ④ 未知子命令必须报错（不许静默）
+    if "$SH_BIN" "$TMP/hc.sh" bogus >/dev/null 2>&1; then
+        bad "未知子命令返回了 0"
+    else
+        ok "未知子命令明确报错"
+    fi
+
+    # ⑤ 宿主侧控制命令存在，且 on/off 会写宿主侧配置
+    if grep -q 'cmd_host_channel' "$SELF_DIR/linuxctl.sh"; then
+        ok "linuxctl 有 host-channel 开关"
+    else
+        bad "linuxctl 缺 host-channel 子命令"
+    fi
+    # 环境里的脚本必须能被投递进 rootfs（否则环境内根本调不到）
+    if grep -q 'host-channel.sh' "$SELF_DIR/start.sh"; then
+        ok "start.sh 会把 host-channel.sh 同步进环境（/opt/sunsetlinux/）"
+    else
+        bad "start.sh 没有同步 host-channel.sh —— 环境里调不到这个通道"
+    fi
+else
+    bad "runtime/root/host-channel.sh 不存在"
+fi
+
 head_ "单元：doctor 的视角/隔离自检"
 
 if grep -q '1f. 视图与挂载隔离' "$SELF_DIR/doctor.sh"; then

@@ -1411,6 +1411,12 @@ install_runtime_entry() {
     mkdir -p "$dst" || { log "WARN: 无法创建 $dst"; return 0; }
     cp -f "$src/entry.sh" "$dst/entry.sh" 2>/dev/null || true
     cp -f "$src/supervise.sh" "$dst/supervise.sh" 2>/dev/null || true
+    # 宿主通道包装脚本（默认关；见 docs/host-channel.md）。
+    # 它必须**在环境内部可调用**，所以跟着启动器一起同步进 /opt/sunsetlinux。
+    if [ -f "$src/host-channel.sh" ]; then
+        cp -f "$src/host-channel.sh" "$dst/host-channel.sh" 2>/dev/null || true
+        chmod 0755 "$dst/host-channel.sh" 2>/dev/null || true
+    fi
     chmod 0755 "$dst/entry.sh" "$dst/supervise.sh" 2>/dev/null || true
     log "已同步启动器脚本：$src -> $dst"
 }

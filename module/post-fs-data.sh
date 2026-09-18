@@ -95,6 +95,16 @@ else
   log "警告：$BIN_SRC 不存在，跳过脚本同步"
 fi
 
+# --- 2a2) 宿主通道的默认配置（**只在缺失时**写；默认关）-----------------------
+#   放在宿主侧 $LINUX_HOME/etc/ 而不是环境里：chroot 的 /etc 是环境自己的，
+#   所以环境内的进程**看不到也改不到**这个开关（设计见 docs/host-channel.md）。
+HC_CFG="$LINUX_HOME/etc/host-channel.json"
+if [ ! -f "$HC_CFG" ]; then
+  mkdir -p "$LINUX_HOME/etc" 2>/dev/null
+  printf '%s\n' '{ "enabled": false, "allow": ["/data/sunsetlinux/share", "/storage/emulated/0"] }' > "$HC_CFG" 2>/dev/null \
+    && log "宿主通道：已写入默认配置（enabled=false）→ $HC_CFG"
+fi
+
 # --- 2b) 视角地图 → 交换目录 与 环境根（人和 AI 都不该再猜路径）-----------------
 #   · $LINUX_HOME/share/地图-视角.md → 环境里就是 /share/地图-视角.md
 #   · $LINUX_HOME/README-地图.md     → MT 进 /data/sunsetlinux 一眼就看到
