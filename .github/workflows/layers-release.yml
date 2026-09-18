@@ -1,0 +1,211 @@
+# ============================================================================
+# 层托管线路：**staging 分支 → GitHub Release 资产**（"Release 当纯存储"）
+#
+# ## 为什么要有它
+#   层文件一次全量 244 MiB（只出 .zst 时 101 MiB），而 gh-pages 的硬约束是
+#   「已发布站点 ≤ 1 GB、单文件 ≤ 100 MB」→ 约 4 次全量就撑满（见 docs/release-ci.md §5.3）。
+#   Release 资产没有这个站点上限，也支持 Range/断点续传 —— 于是分工：
+#     **层 → Release 资产**；**清单 / APK / 模块 → 仍走 gh-pages 的 /stable/ 与 /beta/**
+#   （清单里的 `url` 本来就是绝对地址，可以跨域名，App 与 CLI 都跟 302 重定向。）
+#
+#   ★ 本工作流**不碰 gh-pages**（只创建/更新 Release 并上传层文件）。gh-pages 那侧：
+#     日常发布路径里 /channel/ 与 /stable|beta/ 是 publish.yml 的**一次**推送
+#     （一次推送 = 一条 Pages 构建）；仍会独立推 gh-pages 的是**手动/独立入口**
+#     channel.yml（清单变化时签名并发布）与 layers.yml（可选发 /channel/），
+#     各自一次运行对应一条 Pages 构建 —— 这是它们自己的事。
+#
+# ## 为什么中间要一个分支
+#   构建层需要 arm64 + 真 chroot，通常是**你自己的机器**；那台机器上不一定想放 GitHub token。
+#   所以分工：本机 `build-layers` → 把分发产物推到 staging 分支 → **本工作流收集并上传到 Release**。
+#   好处：构建机上不需要任何 token/私钥。代价：产物在 git 对象库里过了一遍（见下面的"注意"）。
+#
+# ## 用法
+#   1) 本机构建（arm64 + 真 chroot；本工作容器没有 CAP_SYS_ADMIN，跑不了）：
+#        bash rootfs/build-layers.sh --out-dir dist --runtime-dir runtime/root --dsh-dist-tag next
+#      想省一半体积就去掉 gzip 回退：加 `--no-gzip-fallback`（清单里不会出现悬空的 url_gz）。
+#   2) 准备 staging 分支：**必须在一个干净目录里另起一个仓库**，只放"分发产物 + 本工作流"。
+#      ⚠️ 别用 `git checkout --orphan layers` + `git add -A`：orphan 之后工作区里**仍然是整棵源码树**，
+#         会被一起提交；而且仓库根的 .gitignore 明确挡了 `*.erofs` / `*.erofs.zst` / `*.erofs.gz`，
+#         产物会被静默漏掉（`git add -A` 不报错，但推上去什么都没有）。干净目录里没有这些问题。
+#        mkdir -p /tmp/sunsetlinux-layers && cd /tmp/sunsetlinux-layers
+#        cp /path/to/dist/*.erofs.zst .            # 需要纯 CLI 的 gzip 回退时再加 *.erofs.gz
+#        mkdir -p .github/workflows
+#        cp <repo>/.github/workflows/layers-release.yml .github/workflows/
+#        printf 'layers-%s\n' "$(date -u +%Y%m%d)" > TAG     # 可选；不写就自动用时间戳
+#        git init -b layers && git add -A && git commit -m "layers: $(date -u +%Y-%m-%d)"
+#        git remote add origin git@github.com:<owner>/<repo>.git
+#        git push --force origin layers
+#   3) 本工作流创建/更新 Release 并上传资产，然后把 **给 publish-channel 用的 base-url**
+#      和每个文件的 sha256 打进 job summary。
+#   4) 本机（有层文件的那台机器）：
+#        tools/channel/sunsetlinux-channel publish-channel \
+#          --base-url https://github.com/<owner>/<repo>/releases/download/<tag> \
+#          --name "SunsetLinux 官方" --dsh-dist-tag next
+#      把 `channel/channel.json` 推到 `channel` 分支 → `channel.yml` 签名 + 独立验签 + 发到 gh-pages `/channel/`。
+#
+# ## 注意（别把分支当成"仓库外的存储"）
+#   · 产物一旦 push 进分支就进了 git 对象库，`git clone` 会跟着变大 —— Release 只解决了
+#     "Pages 站点 1 GB 上限"，**没有**解决"仓库变大"。所以 staging 分支应当**每次重置**
+#     （orphan 单提交 + `--force`），不要让它累积历史。
+#   · **裸 `.erofs` 不要进来**：runtime 裸镜像 240 MB，超过 git 单文件 100 MB 硬限，
+#     而且下载端从来不用它（分发物一律 .zst/.gz）。本工作流会把这当成错误拒绝。
+#   · `gh release create` 会**建一个 tag**。本项目有两类 tag，分工别混：
+#       `v<App 版本>`（例 `v0.2.4`）= **产品发布**（由 release.yml 创建，资产是 APK/模块/index.json）
+#       `layers-<日期>`            = **层文件的纯存储**（本工作流），只是存储标识，**不是产品版本**。
+#     本工作流因此强制 tag 以 `layers-` 开头（避免把层当版本发出去，也避免撞上产品 tag）。
+#   · 保留策略：Release 资产没有站点上限，但被清单引用过的层不能随便删（删了旧版本就回退不了）。
+#     本工作流只负责"上传"；要不要清理旧 release 由人决定。
+# ============================================================================
+name: 层托管（staging → Release 资产）
+
+on:
+  push:
+    branches: [layers]
+  workflow_dispatch:
+
+permissions:
+  contents: write          # 建 tag / 建 Release / 上传资产
+
+concurrency:
+  group: layers-release
+  cancel-in-progress: false
+
+jobs:
+  upload:
+    name: 收集层产物并上传到 Release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 检查产物（只允许 .zst/.gz；裸 .erofs 直接失败）
+        id: scan
+        run: |
+          set -euo pipefail
+
+          for f in *.erofs; do
+            [ -e "$f" ] || continue
+            echo "::error::staging 分支里出现了裸 $f。裸镜像超过 git 单文件 100 MB 硬限（runtime 240 MB），"
+            echo "::error::而且下载端从不使用它 —— 只放 .erofs.zst / .erofs.gz。"
+            exit 1
+          done
+
+          # 上传的东西分两类（都是"分发产物"，只是角色不同）：
+          #   · 层：`*.erofs.zst` / `*.erofs.gz`（频道清单引用它们）
+          #   · proot 运行时：`proot-bundle-*.tar.gz`（**非 root 模式的必需件**；
+          #     内置离线包的 minimal / ubuntu-proot 组合也要用它）
+          # 裸 `.erofs` 依旧禁止（超 git 单文件 100 MB 硬限，且下载端从不用它）。
+          layers="$(ls -1 *.erofs.zst *.erofs.gz 2>/dev/null || true)"
+          if [ -z "$layers" ]; then
+            echo "::error::staging 分支根目录里没有 *.erofs.zst / *.erofs.gz。"
+            echo "::error::先在 arm64 机器上跑 rootfs/build-layers.sh，把分发产物放到分支根目录再推。"
+            exit 1
+          fi
+          extra="$(ls -1 proot-bundle-*.tar.gz proot-bundle-*.tar.gz.sha256 2>/dev/null || true)"
+          files="$(printf '%s\n%s\n' "$layers" "$extra" | sed '/^$/d')"
+          echo "待上传："
+          printf '  %s\n' $files
+
+          # ★ 分片（`<层>.erofs.gz.part-aa` / `-ab` …）：**git 单文件 100 MB 硬限**的绕法。
+          #   0.1.6-alpha.2 的 dsh 层因为上游多带一个 186 MB 的 LibreOffice WASM，
+          #   回退产物 `.gz` 涨到 109.5 MB —— 直接推 `layers` 分支会被 GitHub 拒
+          #   （实测：`GH001: Large files detected`）。分片过 git、在这里**拼回整份**再上传，
+          #   清单里的 `url_gz` 仍然是**一个完整文件**，下载端与既有工具链都不用改。
+          parts="$(ls -1 *.erofs.gz.part-* 2>/dev/null || true)"
+          if [ -n "$parts" ]; then
+            echo "发现分片（将在上传后拼回）："
+            printf '  %s\n' $parts
+          fi
+          {
+            echo 'files<<LAYERS_EOF'
+            printf '%s\n' $files
+            echo 'LAYERS_EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: 决定 tag（TAG 文件优先，否则用 UTC 时间戳）
+        id: tag
+        run: |
+          set -euo pipefail
+          tag=""
+          if [ -f TAG ]; then tag="$(tr -d '[:space:]' < TAG)"; fi
+          if [ -z "$tag" ]; then tag="layers-$(date -u +%Y%m%d-%H%M%S)"; fi
+          case "$tag" in
+            layers-*) ;;
+            *)
+              echo "::error::TAG 里的 tag 必须以 layers- 开头（本项目刻意不用 tag 做版本号，避免与发布模型混淆）：$tag"
+              exit 1 ;;
+          esac
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "本次 tag：$tag"
+
+      - name: 创建/更新 Release 并上传资产
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.tag.outputs.tag }}
+          FILES: ${{ steps.scan.outputs.files }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG 已存在：按 --clobber 覆盖同名资产（重跑/换版本都安全）"
+          else
+            gh release create "$TAG" \
+              --title "层产物 $TAG" \
+              --notes "层镜像的**纯存储**发布，不是产品版本。清单 / APK / 模块仍在 gh-pages 的 /stable/ 与 /beta/；此 tag 只作存储标识。" \
+              --target "$GITHUB_SHA"
+          fi
+          # shellcheck disable=SC2086
+          gh release upload "$TAG" $FILES --clobber
+
+      # ★ 把分片拼回整份再上传（见 scan 步骤里的说明）。
+      #   顺序必须稳定：`sort` 后按 part-aa/ab/… 拼接 ⇒ 逐字节等于分片前的那份文件。
+      - name: 重组分片并上传（`.erofs.gz.part-*` → `.erofs.gz`）
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          parts=( *.erofs.gz.part-* )
+          if [ "${#parts[@]}" -eq 0 ]; then
+            echo "没有分片，跳过"
+            exit 0
+          fi
+          targets=()
+          for f in "${parts[@]}"; do targets+=("${f%%.part-*}"); done
+          mapfile -t uniq < <(printf '%s\n' "${targets[@]}" | sort -u)
+          for full in "${uniq[@]}"; do
+            echo "==> 拼接 $full"
+            # shellcheck disable=SC2046
+            cat $(ls -1 "$full".part-* | sort) > "$full"
+            got="$(stat -c %s "$full")"
+            [ "$got" -gt 0 ] || { echo "::error::拼出来的 $full 是空文件"; exit 1; }
+            echo "    $full = $got 字节；sha256=$(sha256sum "$full" | cut -d' ' -f1)"
+            gh release upload "$TAG" "$full" --clobber
+          done
+
+      - name: 打印 base-url 与校验值（给 publish-channel 用）
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          base="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}"
+          {
+            echo "### 层已上传到 Release"
+            echo ""
+            echo "- tag：\`$TAG\`（纯存储标识，不是产品版本）"
+            echo ""
+            echo "- 给 \`publish-channel --base-url\` 用的地址："
+            echo ""
+            echo '  ```'
+            echo "  $base"
+            echo '  ```'
+            echo ""
+            echo "| 文件 | 字节 | sha256 | 下载地址 |"
+            echo "|---|---|---|---|"
+            for f in *.erofs.zst *.erofs.gz; do
+              [ -e "$f" ] || continue
+              printf '| `%s` | %s | `%s` | %s |\n' \
+                "$f" "$(stat -c %s "$f")" "$(sha256sum "$f" | cut -d' ' -f1)" "$base/$f"
+            done
+            echo ""
+            echo "> 清单里的 \`url\` 用上面这个 base-url 生成；下载端会跟 302 重定向（App：HttpURLConnection 默认跟；CLI：curl -fL / wget）。"
+          } >> "$GITHUB_STEP_SUMMARY"
