@@ -1388,3 +1388,48 @@ tail -20 /data/sunsetlinux/run/sunsetd.log    # 找"控制面已就绪"+"回环�
 **APK 内嵌的那份也修好了**（`assets/module/sunsetlinux-module.zip` 1,062,101 B，里面有 dex）。
 手机上的交付包已换成 **CI 原样字节**（sha256 `db8e085f…`，与频道清单一致）——
 所以用户验的就是"别人从频道装到的那一份"。模块自测 41 → 43/0。
+
+## 第 50 轮（2026-09-18 09:xx）：P1 真机闭环 ⇒ 进 P2（宿主侧客户端 `Ctl`，模块 1.0.40）
+
+### 0. P1 收口（真机证据）
+
+装上 1.0.39 重启后：`run/control-transport = android-local`、`run/control-selftest = ok:android-local`、
+`control.sock` 存在且 `srw-------`、`state.json` 是 `generation=1 / phase=running / owner=foreign-observer`、
+`sunsetd` 常驻（pid 3611）、心跳新鲜。完整表见 `docs/STATUS.md` §3.10.50。
+**P1 主线收口**：唯一状态机在真机成立，且"内核不在 ⇒ 退回 v1"没被破坏。
+
+★ **顺带逮到一条对 P2 影响更大的事实**：真机上 **`java.nio` 的 unix 客户端也不可用**
+（自检先试 nio 客户端失败、落到 android 才 ok）。⇒ **P2 的客户端（App 与 CLI）必须用
+`android.net.LocalSocket`**，不能想当然用 java.nio。§3.10.48 的教训（SDK 桩 ≠ 设备运行时）
+在客户端半边重演了一遍 —— 这也是把自检改成"所有通道都试并记录原因"的直接理由。
+
+### 1. P2 的第一块：为什么是"宿主侧客户端"而不是先改 App
+
+P2 = "App 改成提交作业 + 订阅"，但 **socket 是 `0600 root`**（D3，正是为了不让任何 App 连上来
+指挥 root 内核）⇒ **App 进程连不上**。所以顺序必须是：
+
+1. **（本轮）** root 侧的客户端 `Ctl` + 客户端选路 + 开机自检；
+2. 再让 App 用 `su -c … Ctl submit start` / `Ctl wait <id>` 换掉现在的"阻塞跑 linuxctl"。
+
+### 2. 本轮改动
+
+| 文件 | 说明 |
+|---|---|
+| `app/sunsetd/.../Ctl.kt`（新） | 子命令 `status/ping/version/submit/job/wait/raw`；退出码 0/2/3/4/5；`wait` 只打印最后一行 |
+| `app/sunsetd/.../Transport.kt` | `Clients.open`（客户端选路）+ `ControlClient`；自检改成"所有通道都试、结果全写进结论" |
+| `module/service.sh` | 开机异步跑一次 `Ctl status` → `run/ctl-status.json` + service.log 一行 rc |
+| `app/sunsetd/src/test/.../CtlTest.kt`（新） | 8 条：真 socket 往返、超时、参数错先判、连不上、内核回错、unknown action |
+
+### 3. 验证（本机全绿）
+
+内核单测 **42 → 50/0**；shell 兼容通过；运行时回归 116/0；模块自测 43/0；离线包 28/0。
+交付：模块 **1.0.40**（`/sdcard/Download/sunsetlinux-module-1.0.40-bare.zip`，装完重启后
+`cat /data/sunsetlinux/run/ctl-status.json` 应当是一行 `{"ok":true,..."state":...}`）。
+
+### 4. 下一轮（P2 主线）
+
+1. 收 1.0.40 的开机自检结果（`run/ctl-status.json` + service.log 里那行 rc）；
+2. **App 切到 socket submit**：`LinuxCtl.start()/stop()` 在"内核在线"时走 `su -c … Ctl submit …`
+   + `Ctl wait <id>`，否则退回 v1 命令（D4 的降级路径必须留着）；
+3. 事件流（`subscribe`）—— App 不再轮询；
+4. 免 root 版（D2 前台服务）让 proot 也有常驻内核，App 的 socket 路径才能对它也生效。

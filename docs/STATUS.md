@@ -510,6 +510,50 @@ su -c '/data/sunsetlinux/bin/linuxctl doctor'
 | 已装状态读不到时 | —— | **不给刷入按钮**，先让用户修 root 授权（与"读不到 ≠ 没装"一致） |
 | 重启 | —— | 只报告"重启后生效"（KernelSU 落 `modules_update/`），**App 不替用户重启**，脚本里有单测断言不许出现 `reboot` |
 
+### 3.10.51 内核 v2 · P2 起步：宿主侧客户端（`Ctl`）+ 客户端选路 + 开机自检（模块 1.0.40）
+
+**为什么 P2 的第一块是这个**：P2 的目标是"App 改成提交作业 + 订阅"，但控制面 socket 是
+`0600 root`（决策 D3 —— 正是它挡住了"任何 App 都能指挥 root 内核"）⇒ **App 进程连不上它**
+（App 是 `untrusted_app`，连 `open()` 那个文件都不行）。所以必须先有一个**跑在 root 侧**的客户端，
+由 App 用 `su -c` 起（App 今天执行 `linuxctl` 走的就是这条通道）。
+
+| 改动 | 说明 |
+|---|---|
+| `Ctl.kt`（新） | 宿主侧客户端入口：`app_process … Ctl [--connect-wait N] <status\|ping\|version\|submit <action>\|job <id>\|wait <id> [秒]\|raw <json>>`。退出码 `0/2/3/4/5`＝成功/参数错/连不上内核/内核回错/wait 超时。刻意**不做 JSON 参数解析**（省掉 shell 引号地狱）；`wait` 的 stdout 只出最后一行（脚本能直接解析） |
+| `Transport.kt` | 新增 `Clients.open`（**客户端选路**：按 §3.10.50 的实测先试 `android-local`）与 `ControlClient`（一次请求-响应，连接可复用）；自检改成**所有通道都试一遍**并把结果全写进结论 —— 正是这一点才逮到"真机上 nio 客户端也不可用" |
+| `service.sh` | 每次开机跑一次 `Ctl status`（异步 + `--connect-wait 15`），结果落 `run/ctl-status.json` + service.log 一行 rc ⇒ **客户端这条路每台机器开机就被证明一次**，不必等 App 上线才发现 |
+
+**验证**：内核单测 42 → **50/0**（新增 8 条：`status`/`submit`/`wait` 的真 socket 往返、`wait` 超时=5、
+**参数错在连内核之前就判掉**（否则"参数写错"会被报成"连不上"）、连不上=3、内核回错=4、unknown action=4）；
+shell 兼容检查通过（`service.sh` 仍是 mksh 可解析）、运行时回归 116/0、模块自测 43/0、离线包 28/0。
+
+### 3.10.50 内核 v2 · P1 真机闭环（模块 1.0.39）：**控制面通了**，P1 主线收口
+
+装上 1.0.39（bare）+ 重启后（2026-09-18 17:14），六条清单实测：
+
+| 清单项 | 实测 |
+|---|---|
+| `run/control-transport` | ✅ `android-local` |
+| `run/control-selftest` | ✅ `ok:android-local` |
+| `control.sock` | ✅ 存在，`srw-------`（0600，只有 root 能连） |
+| `sunsetd.log` | ✅ `跳过 nio-unix：本机 java.nio 没有 ServerSocketChannel.open(ProtocolFamily)` → `控制面通道：android-local（Android LocalSocket，文件路径命名空间）` → `控制面已就绪：…/control.sock（通道 android-local）` → `控制面回环自检：ok:android-local` |
+| `state.json` | ✅ `generation=1, phase=running, up=true, envMode=full, pid=4356, owner=foreign-observer`（内核认领了模块那条启动） |
+| `linuxctl status`（module 侧输出） | ✅ v1 键齐 + `kernel:{online:true, phase:mounting→running, generation:1, owner:foreign-observer}` |
+| ⑥ 心跳过期回退 | 未在真机跑（要设备侧写操作，我这边的设备策略不允许）；shell 侧回归（116/0）里有覆盖 |
+| 进程 | ✅ `sunsetd` 常驻（pid 3611），心跳 300 ms 内新鲜 |
+
+**两条结论**：
+
+1. **P1 主线收口**：唯一状态机（相位/世代/归属）在真机上成立 —— `state.json` 由内核写、
+   模块那条启动被认领成 `foreign-observer`、建树期间相位是 `mounting`、环境起来后转 `running`。
+   `start.sh`/`linuxctl` 的判据都以内核为准（§3.10.47），且"内核不在 ⇒ 退回 v1"的降级路径没被破坏。
+2. ★ **真机上 java.nio 的 unix socket 客户端也不可用**：自检先试 `nio-unix` 客户端
+   （`SocketChannel.open(UnixDomainSocketAddress)`：方法在、运行时不可用），失败后才落到
+   `android-local`，结论是 `ok:android-local`。⇒ **P2 的客户端（App 与 CLI）必须用
+   `android.net.LocalSocket`，不能用 java.nio** —— 与"服务端只能用 LocalSocket"同一个根因
+   （Android 只给了 unix 域的半套 NIO，见 §3.10.48），但影响面更大：客户端本来是被判为"能用"的。
+   下一版自检会把**每次尝试的失败原因**也落盘，把这条原因钉死（见 §3.10.51）。
+
 ### 3.10.49 发布路径的静默残缺：**CI 发出去的模块包从来没有内核**（模块 1.0.39 修）
 
 **怎么发现的**：核对 1.0.38 的发布产物时看到 Release 上 `sunsetlinux-module-1.0.38-bare.zip`

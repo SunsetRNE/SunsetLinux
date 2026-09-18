@@ -158,7 +158,7 @@ class TransportTest {
     }
 
     @Test
-    fun `回环自检：真 socket 上 ping 得到 pong，结论是 ok-nio-unix`() {
+    fun `回环自检：真 socket 上 ping 得到 pong（本机首选 android 替身通道）`() {
         val home = "/tmp/sunsetd-selftest-${System.nanoTime()}"
         val env = RuntimeEnv(home)
         val kernel = Kernel(env, object : StateSink {
@@ -178,7 +178,9 @@ class TransportTest {
             server.start()
             assertEquals("nio-unix", server.transportName)
             val result = ControlSelfTest.run(env.socketFile)
-            assertEquals("ok:nio-unix", result)
+            // 测试环境里 android 替身在 test 源集里 ⇒ 按生产顺序（android 优先）应当选它；
+            // 真机上这条正是唯一可用的通道（§3.10.50）。
+            assertEquals("ok:android-local", result)
         } finally {
             server.stop()
             File(home).deleteRecursively()

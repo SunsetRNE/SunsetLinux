@@ -262,6 +262,22 @@ if [ -f "$MODDIR/bin/sunsetd.dex" ] && [ -x /system/bin/app_process ] && [ -x /s
       io.github.sunsetrne.sunsetd.Main >> "$SERVICE_LOG" 2>&1 </dev/null &
   ) &
   log "内核：已在后台发起 sunsetd（日志见 $SERVICE_LOG）"
+
+  # --- 客户端通道自检（P2 的地基）---------------------------------------------
+  # 为什么开机就试：控制面 socket 是 0600 root（决策 D3），**App 进程自己连不上** ——
+  # P2 里 App 会用 `su -c` 起同一个 dex 里的客户端（Ctl）来提交作业。所以"同一个 dex 起的
+  # 客户端能不能连上内核"必须每台机器开机就被证明一次，而不是等 App 上线才发现。
+  # 异步 + 只等 15 秒（内核 bind 通常不到 1 秒）：绝不阻塞 boot。
+  # 结果：$RUN/ctl-status.json（一行 JSON）+ service.log 里一行 rc。
+  (
+    sleep 2
+    CLASSPATH="$MODDIR/bin/sunsetd.dex" LINUX_HOME="$LINUX_HOME" /system/bin/app_process \
+      -Djava.class.path="$MODDIR/bin/sunsetd.dex" /system/bin \
+      io.github.sunsetrne.sunsetd.Ctl --connect-wait 15 status \
+      > "$RUN/ctl-status.json" 2>> "$SERVICE_LOG"
+    rc=$?
+    echo "[service.sh] 内核客户端自检（Ctl status）：rc=$rc，输出见 $RUN/ctl-status.json" >> "$SERVICE_LOG"
+  ) &
 else
   log "内核：跳过（缺 bin/sunsetd.dex 或 app_process/setsid）—— 按 v1 行为继续"
 fi

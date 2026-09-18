@@ -59,6 +59,7 @@
 | **B6** | `start.sh` 的幂等判断也改成"内核在线时以内核为准" | 那是"在不在跑"的第 N 份实现（本轮删掉一份） |
 | **B7** | 内核入口类是 **`io.github.sunsetrne.sunsetd.Main`**（Kotlin `object` + `@JvmStatic main`），**不是** `MainKt` | 写错一个字母，真机表现只是"内核没起来"⇒ 模块自测加了静态闸门 |
 | **B8** | dex 构建（`tools/build-sunsetd-dex.mjs`）**缺 d8/stdlib/gradle 一律报错**，不静默跳过；模块打包时"有 dex 必进包、没有要出声" | 0.2.6 的静默跳过事故 |
+| **B11** | 客户端也走 **`android-local`**；宿主侧客户端 `Ctl` 由 App 用 `su -c app_process … Ctl …` 起；socket 保持 `0600 root` | 真机实测 java.nio 的 unix **客户端**同样不可用（§3.10.50）；而 0600 本身就意味着"App 进程必须借 root 通道说话" —— 这不是绕路，是 D3 的直接推论 |
 | **B9** | 内核**先起、再发起 `linuxctl start`**（`service.sh` 里的顺序） | 模块那条启动才会被内核认领成 `foreign-observer` |
 
 ---

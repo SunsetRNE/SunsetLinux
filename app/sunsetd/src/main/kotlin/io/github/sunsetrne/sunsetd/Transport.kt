@@ -215,9 +215,63 @@ private class NioDuplex(private val ch: SocketChannel) : Duplex {
     }
 }
 
-/** 客户端半边（自检 + 以后的 CLI/App）：真机优先用 nio 客户端（App 以后也走它）。 */
+/** 客户端半边（自检 + CLI + App）：真机只能用 android-local，见 [Clients.open]。 */
 object OpenClient {
     fun nioClient(path: String): Duplex = NioDuplex(SocketChannel.open(UnixDomainSocketAddress.of(path)))
+}
+
+/**
+ * 客户端通道选择。
+ *
+ * **为什么默认先试 android-local**：真机上 `java.nio` 的 unix 客户端**不可用**
+ * （2026-09-18 真机自检结论 `ok:android-local`：`SocketChannel.open(UnixDomainSocketAddress)`
+ * 方法在、运行时不通，见 `docs/STATUS.md` §3.10.50）。桌面 JVM 上两者都在，
+ * 选谁都行（测试里走 android 替身 —— 它内部就是真 unix socket，能与服务端互操作）。
+ */
+object Clients {
+    fun open(path: String, caps: Capabilities = Capabilities.detect()): Duplex {
+        val reasons = mutableListOf<String>()
+        if (caps.androidLocal) {
+            try {
+                return AndroidLocalTransport.connect(path)
+            } catch (t: Throwable) {
+                reasons += "${AndroidLocalTransport.NAME}：${describe(t)}"
+            }
+        } else {
+            reasons += "${AndroidLocalTransport.NAME}：本机没有 android.net.LocalSocket"
+        }
+        if (caps.nioUnixClient) {
+            try {
+                return OpenClient.nioClient(path)
+            } catch (t: Throwable) {
+                reasons += "nio-unix：${describe(t)}"
+            }
+        } else {
+            reasons += "nio-unix：本机没有 SocketChannel.open(SocketAddress)"
+        }
+        throw IllegalStateException("没有可用的控制面客户端（${reasons.joinToString("；")}）")
+    }
+}
+
+/** 一次请求-响应（协议：一行 JSON 进、一行 JSON 出；连接可复用）。 */
+class ControlClient private constructor(private val duplex: Duplex) : Closeable {
+
+    fun rpc(frame: String): String {
+        duplex.writer.write(frame)
+        duplex.writer.write("\n")
+        duplex.writer.flush()
+        return duplex.reader.readLine()
+            ?: throw IllegalStateException("内核没回话（连接被关掉）")
+    }
+
+    override fun close() {
+        duplex.close()
+    }
+
+    companion object {
+        fun connect(path: String, caps: Capabilities = Capabilities.detect()): ControlClient =
+            ControlClient(Clients.open(path, caps))
+    }
 }
 
 /**
@@ -227,7 +281,9 @@ object OpenClient {
  * ①③ 只能回答"内核起没起来"，回答不了"**通道选中的那条真的能用吗**"。
  * 自检把这句话变成一个可以 `cat` 的结论（`run/control-selftest`）。
  *
- * 结果格式：`ok:<通道名>` / `fail:<每条通道的失败原因>`。
+ * 结果格式：`ok:<通道名>[；<其它通道> 失败：<原因>]` / `fail:<每条通道的失败原因>`。
+ * **所有**通道都会被试一遍并把结果写进结论 —— 2026-09-18 就是靠"每个通道都试"才发现
+ * "真机上 java.nio 的 unix 客户端也不可用"（§3.10.50）。
  */
 object ControlSelfTest {
 
@@ -236,29 +292,37 @@ object ControlSelfTest {
         caps: Capabilities = Capabilities.detect(),
         log: (String) -> Unit = {},
     ): String {
+        // 顺序 = 生产使用顺序：真机上 android-local 是唯一可用的（§3.10.50）
         val clients = mutableListOf<Pair<String, (String) -> Duplex>>()
-        // 真机上 nio 客户端**在**（SocketChannel.open(SocketAddress) 存在）——
-        // 先试它：它能通就说明以后 App 可以继续用同一套 java.nio 客户端。
-        if (caps.nioUnixClient) clients += "nio-unix" to { p: String -> OpenClient.nioClient(p) }
         if (caps.androidLocal) {
             clients += AndroidLocalTransport.NAME to { p: String -> AndroidLocalTransport.connect(p) }
         }
+        if (caps.nioUnixClient) clients += "nio-unix" to { p: String -> OpenClient.nioClient(p) }
 
-        val reasons = mutableListOf<String>()
+        var winner: String? = null
+        val notes = mutableListOf<String>()
         for ((name, open) in clients) {
             try {
                 open(path).use { d ->
                     d.writer.write("{\"op\":\"ping\"}\n")
                     d.writer.flush()
                     val line = d.reader.readLine()
-                    if (line != null && line.contains("pong")) return "ok:$name"
-                    reasons += "$name：回了 ${line ?: "<连接被对方关掉>"}"
+                    if (line != null && line.contains("pong")) {
+                        if (winner == null) winner = name
+                    } else {
+                        notes += "$name 失败：回了 ${line ?: "<连接被对方关掉>"}"
+                    }
                 }
             } catch (t: Throwable) {
-                reasons += "$name：${describe(t)}"
+                notes += "$name 失败：${describe(t)}"
             }
         }
-        val tail = if (reasons.isEmpty()) "没有可用的客户端通道" else reasons.joinToString("；")
+        val w = winner
+        if (w != null) {
+            val tail = if (notes.isEmpty()) "" else "；" + notes.joinToString("；")
+            return "ok:$w$tail"
+        }
+        val tail = if (notes.isEmpty()) "没有可用的客户端通道" else notes.joinToString("；")
         log("[sunsetd] 控制面回环自检失败：$tail")
         return "fail：$tail"
     }
