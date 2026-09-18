@@ -1539,6 +1539,48 @@ App 版本 **0.3.15（versionCode 31）**；模块不变（1.0.40）。
 - 动 UI inset 前先看 `UiInsetsContractTest` / `ShellLayoutContractTest` / `DshFullscreenContractTest`
   （源码级契约，CI 会拦；不是形式主义，每条都对应一次用户看得见的问题）。
 
+
+---
+
+## ★★ 收束 · 换对话框前的最终落点（2026-09-18 14:2x）
+
+### 一句话
+
+**代码侧全部完成并已推送**（main 到 `183d8d8`，工作区干净）；**只差流水线跑完**——
+`v0.3.16`（6 个 APK + 模块 1.0.41 + 5 个离线包）还没落地，两轮流水线正在排队/运行中。
+
+### 已经**上线可验证**的（不必等我）
+
+| 事项 | 怎么验 |
+|---|---|
+| 官方频道 = runtime 1.0.1 + dsh 0.1.6-alpha.2 | `curl -s https://sunsetrne.github.io/SunsetLinux/channel/channel.json \| grep -o '"version":"[^"]*"'`（应见 `1.0.1` 与 `0.1.6-alpha.2`） |
+| 6 个层 URL 都能下 | 上面清单里每个 `url`/`url_gz`，`curl -sL -o /dev/null -w '%{http_code}' -r 0-0 <url>` 应为 **206** |
+| 清单签名 | `bash tools/channel/sunsetlinux-channel verify --pub <公钥> --in channel.json --no-layers`（指纹 `ed25519:06:d0:c4:4d:29:1c:ef:66`） |
+| 层托管 Release | `layers-20260916` 里 `dsh-0.1.6-alpha.2.erofs.{zst,gz}`、`runtime-1.0.1.erofs.{zst,gz}` |
+| 仓库闸门 | App 单测 **278/0**（含 `LayerDecompressorTest` 13/13 真解 443 MB 层）、`cmp-consistency` 16/16、`shell-compat` ✓、`ci-changeset-selftest` 39/0、`offline-bundle selftest` 28/0、`runtime/root/selftest.sh` **122/0**、`runtime/proot/selftest.sh` 20/0 |
+
+### 换对话框后**第一件事**
+
+看这两条流水线（14:02 与 14:06，后者排在队列里）——`⑤ 合并 + 发布 / publish` 是否绿：
+
+- 绿 ⇒ 抽查 v0.3.16 的离线包头：`curl -sL -r 0-4095 <SunsetLinux-0.3.16-root-full.bin 的 Release URL> | strings | grep dsh_version`
+  **应为 `0.1.6-alpha.2`**（这就是"内置目标版本"的最终证据）。
+- 红 ⇒ 先看**失败注解**（`check-runs/<job>/annotations` 里有"日志尾部"）：
+  本轮已修掉两个同类 100 MB 硬限问题（层 `.gz` 走分片；模块 zip 只挂 Release），
+  若还有第三个，照 §"发布路径"那条思路处理：**先问"谁在读它"，没有读者的就别往 git 分支里放**。
+
+### 待办（按优先级，都不阻塞已上线的东西）
+
+1. **B 的第二半**（用户已选 B）：模块改内嵌 **`.zst`**（115 MB → ~79 MB）+
+   `cmd_dsh_builtin` 的解压也走 node 兜底（`bin/zstd-filter.mjs` 已经随模块发了）。
+   做完之后 `layers-release.yml` 的"分片过 git 再拼回"就能退休、dsh 的 `.gz` 也能从清单里摘掉。
+2. **真机端到端**：把两个新层更到手机、用 App 的 WebView 打开 0.1.6 的界面
+   （移动端是**客户端**插件：服务端起得来 ≠ 浏览器里没 JS 报错；已验的是 import 4/4、
+   页面模块清单含 `dsh-web-mobile/client.js`、注入的 client 包全是 0.1.6-alpha.2）。
+3. `libreoffice-kit-wasm`（186 MB）**按用户裁定不裁**；它现在也跑不了（环境里 0 个字体），
+   要真开 Office 预览得先补字体 —— 那是另一个数量级的决定。
+4. `docs/findings.md` 的层体积表还停在 0.1.5-rc.2 那一行（历史实测，未改；新数在 STATUS §3.10.53）。
+
 ---
 
 # 本轮：DSH 目标版本 → **0.1.6-alpha.2**（2026-09-18 11:xx 起，同一对话框）
