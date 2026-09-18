@@ -1426,6 +1426,98 @@ else
     bad "缺少 runtime/common/host-residue.sh（模块打包会漏掉它）"
 fi
 
+
+# ---------------------------------------------------------------------------
+# 内核 v2：status 的相位**以内核为准**（v1 键不变；内核不在/心跳过期则退回 v1 判据）
+#
+# 这条是 P1 的核心验收之一（docs/core-v2-design.md §8）："在不在跑"必须只剩一份实现。
+# 用**假内核状态**验两件事：
+#   ① 内核在线时，即使 v1 标记说"running"，status 也照内核的 phase 说（唯一状态源）；
+#   ② 心跳过期时**绝不拿过期状态冒充** —— 退回 v1 标记判据。
+# ---------------------------------------------------------------------------
+head_ "内核 v2：status 相位以内核为准（v1 键不变 + 心跳过期退回）"
+# 说明：**内核压过 v1** 那几条不依赖 /proc/<pid>/ns/mnt 可读（proot 沙箱里读不到），
+# 所以放在守卫外面 —— 本机也跑得到；只有"退回 v1 判据"那两条需要 v1 真的能判 running。
+_KS="$TMP/kernelstatus"
+mkdir -p "$_KS/run" "$_KS/etc" "$_KS/layers"
+printf '%s\n' "$$" > "$_KS/run/supervisor.pid"
+: > "$_KS/run/ready"
+printf 'env-only\n' > "$_KS/run/env-mode"
+_ks_ctl() { LINUX_HOME="$_KS" "$SH_BIN" "$SELF_DIR/linuxctl.sh" "$@"; }
+_ks_json() { _ks_ctl status 2>/dev/null | tr -d ' \n\t'; }
+_now="$(date +%s)"
+_fresh="$(printf '%s000' "$_now")"          # 毫秒（字符串拼接：不走 32 位算术）
+_stale="$(printf '%s000' "$(( _now - 600 ))")"
+
+# ① 内核说"正在建树"（mounting）⇒ v1 state 必须是 starting（哪怕标记看着像在跑）
+printf '%s\n' '{"schema":1,"generation":3,"phase":"mounting","since":1,"busy":true,"up":false,"backend":"chroot","envMode":null,"port":null,"pid":null,"jobId":"j7","owner":"kernel-job","lastError":null}' > "$_KS/run/state.json"
+printf '%s\n' "$_fresh" > "$_KS/run/heartbeat"
+_j="$(_ks_json)"
+case "$_j" in
+    *'"state":"starting"'*) ok "内核 mounting ⇒ v1 state=starting（内核压过 v1 判据）" ;;
+    *) bad "内核相位没有生效：$_j" ;;
+esac
+case "$_j" in
+    *'"kernel":{"online":true'*) ok "status 带上 kernel.online=true（附加键）" ;;
+    *) bad "status 缺 kernel 块：$_j" ;;
+esac
+case "$_j" in
+    *'"generation":3'*) ok "kernel.generation 来自内核（3）" ;;
+    *) bad "kernel.generation 不对：$_j" ;;
+esac
+case "$_j" in
+    *'"owner":"kernel-job"'*) ok "kernel.owner 来自内核" ;;
+    *) bad "kernel.owner 不对：$_j" ;;
+esac
+for _k in '"schema":1' '"mode":"root"' '"env_mode":"env-only"' '"dsh":{' '"layers":{' '"storage":{'; do
+    case "$_j" in
+        *"$_k"*) ;;
+        *) bad "v1 契约键丢了：$_k（$_j）" ;;
+    esac
+done
+
+# ② 内核说 failed ⇒ v1 state=error（不再"看着像没事"）
+printf '%s\n' '{"schema":1,"generation":3,"phase":"failed","since":1,"busy":false,"up":false,"backend":"chroot","envMode":null,"port":null,"pid":null,"jobId":null,"owner":"none","lastError":"overlay 挂载失败"}' > "$_KS/run/state.json"
+_j2="$(_ks_json)"
+case "$_j2" in
+    *'"state":"error"'*) ok "内核 failed ⇒ v1 state=error" ;;
+    *) bad "内核 failed 没映射成 error：$_j2" ;;
+esac
+
+# ③ 内核 idle ⇒ v1 state=stopped（这是"停下来了"的权威说法）
+printf '%s\n' '{"schema":1,"generation":3,"phase":"idle","since":1,"busy":false,"up":false,"backend":"chroot","envMode":null,"port":null,"pid":null,"jobId":null,"owner":"none","lastError":null}' > "$_KS/run/state.json"
+_j3="$(_ks_json)"
+case "$_j3" in
+    *'"state":"stopped"'*) ok "内核 idle ⇒ v1 state=stopped" ;;
+    *) bad "内核 idle 没映射成 stopped：$_j3" ;;
+esac
+
+# ④ 心跳过期 = 内核已死 ⇒ 退回 v1 判据 + kernel.online=false（绝不拿过期状态冒充）
+#    这两条需要 v1 真的能判出 running ⇒ 依赖 /proc/<pid>/ns/mnt（proot 沙箱读不到就跳过）
+if [ -r "/proc/$$/ns/mnt" ]; then
+    printf '%s\n' '{"schema":1,"generation":3,"phase":"mounting","since":1,"busy":true,"up":false,"backend":"chroot","envMode":null,"port":null,"pid":null,"jobId":"j7","owner":"kernel-job","lastError":null}' > "$_KS/run/state.json"
+    printf '%s\n' "$_stale" > "$_KS/run/heartbeat"
+    _j4="$(_ks_json)"
+    case "$_j4" in
+        *'"state":"running"'*) ok "心跳过期 ⇒ 退回 v1 判据（state=running）" ;;
+        *) bad "心跳过期没有退回 v1：$_j4" ;;
+    esac
+    case "$_j4" in
+        *'"kernel":{"online":false'*) ok "心跳过期 ⇒ kernel.online=false" ;;
+        *) bad "心跳过期却仍报 kernel.online=true：$_j4" ;;
+    esac
+
+    # ⑤ 完全没有内核文件 ⇒ 与今天一致（v1 路径不受影响）
+    rm -f "$_KS/run/state.json" "$_KS/run/heartbeat"
+    _j5="$(_ks_json)"
+    case "$_j5" in
+        *'"state":"running"'*) ok "没有内核 ⇒ v1 判据照旧（兼容降级）" ;;
+        *) bad "没有内核时 v1 路径坏了：$_j5" ;;
+    esac
+else
+    skip_ "本机看不到 /proc/<pid>/ns/mnt（proot 沙箱）→ 跳过「退回 v1 判据」那两条；CI 与真机会跑"
+fi
+
 printf '\n=========================================\n'
 printf '  通过 %d，失败 %d\n' "$pass" "$fail"
 printf '=========================================\n'

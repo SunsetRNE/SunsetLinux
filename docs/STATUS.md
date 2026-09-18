@@ -503,6 +503,56 @@ su -c '/data/sunsetlinux/bin/linuxctl doctor'
 | 已装状态读不到时 | —— | **不给刷入按钮**，先让用户修 root 授权（与"读不到 ≠ 没装"一致） |
 | 重启 | —— | 只报告"重启后生效"（KernelSU 落 `modules_update/`），**App 不替用户重启**，脚本里有单测断言不许出现 `reboot` |
 
+### 3.10.46 内核 v2 · P1 后半：`status` 的相位以内核为准（模块 1.0.36）+ 修 CI 的保守重发兜底
+
+#### 一、`linuxctl status` 变成瘦客户端（App 无感）
+
+`gather_status` 里加了一层**覆盖**而不是"再来一份判定"：
+
+| 内核相位 | v1 `state` |
+|---|---|
+| `preparing` / `mounting` / `starting` | `starting` |
+| `running` / `degraded` | `running` |
+| `stopping` | `stopping` |
+| `failed` | `error` |
+| `idle` | `stopped` |
+
+- **内核在线**（`run/state.json` + `run/heartbeat` 在 **15 秒**内）⇒ 相位以内核为准；
+- **内核不在或心跳过期** ⇒ 自动退回原来的 v1 标记判据（**绝不拿过期状态冒充**）；
+- 新增附加键 `kernel:{online,phase,generation,owner,job}`（`contract-check.mjs` 已确认"附加键允许"，
+  既有键一个没动 ⇒ App 不需要更新）。
+
+心跳是**毫秒**、而 mksh 的算术是 32 位（真机踩过 §3.10.25）⇒ 取秒用**字符串截断**（`${ts%???}`），
+不做乘除。
+
+#### 二、回归
+
+- `runtime/root/selftest.sh` **108 → 114/0**（bash 与 mksh 都跑）：新增一组"内核覆盖"断言 ——
+  内核说 `mounting` 时 v1 `state=starting`（**压过**标记的 running）、`failed → error`、
+  `idle → stopped`、`kernel` 块的 online/generation/owner 来自内核、v1 六个契约键一个不少；
+  "退回 v1 判据 + 心跳过期不冒充"两条依赖 `/proc/<pid>/ns/mnt`（proot 沙箱读不到 → 本机 SKIP，
+  **CI 与真机会跑**）。
+- `tools/contract-check.mjs` 通过，并把 `kernel` 识别为允许的附加键。
+- 模块自测新增两条静态闸门：**入口类名一致**（`service.sh` 写的 `…sunsetd.Main` 必须真的是
+  jar/dex 里的那个类 —— Kotlin 的 `object Main` 编译出来是 `Main` 而**不是** `MainKt`，
+  写错一个字母真机表现只是"内核没起来"，要多花一轮）+ "给 dex 必进包 / 没给要出声"。
+
+#### 三、顺手修的 CI 隐患：站点取不到时的"保守重发"
+
+§3.10.45 记的那次"同 tag 的 16 个资产被改写"**已查实原因**：prep 从**站点** `stable/index.json`
+取"上次发布的版本"，取不到就"保守当作全都变了"（`ci-changeset.mjs` 的设计选择）。
+那次站点 curl 失败 ⇒ `versionBumped=true` ⇒ 整轮重发（1.3 GB）。修法：
+站点取不到时先退到 `https://github.com/<repo>/releases/latest/download/index.json`
+（同一次发布写出去的等价文件），再不行才保守。**核版本请看 `index.json.commit`，别假设 tag 不可变。**
+
+#### 四、本轮交付与"还没验的"
+
+- `/sdcard/Download/sunsetlinux-module-1.0.36.zip`（50,873,368 B，含 `bin/sunsetd.dex`）。
+  **App 不用换**（v1 契约兼容）。
+- **真机未验**（P1 唯一风险点）：`app_process` 起内核的 SELinux 域、socket 能否建。
+  验证清单在交付说明里（6 条），失败时的两种日志（"缺 dex" vs "没起来"）已经写清；
+  **两种情况下行为都完全按 v1**（回退是设计的一部分）。
+
 ### 3.10.45 内核 v2 · P1 前半：`sunsetd`（Kotlin/app_process）成为唯一状态机 + 控制面 + 打包管道
 
 按 `docs/core-v2-design.md` 的 P1 开工。**本轮不发布**（内核还没在真机上跑过；改动没升版本 ⇒
@@ -532,7 +582,7 @@ CI 只会跑门禁并给出"改了产物相关文件却没升版本"的警告，
 
 | 现象 | 证据 | 性质 |
 |---|---|---|
-| **没升版本，v0.3.14 的 16 个资产被同一 tag 全部改写** | `dad3512` 那次 run（`35308217461`）全绿，④ 含 `:sunsetd:test`；随后 release 的 16 个资产 `updated_at` 全部变成 `04:52`，而 `version.properties`/`module.prop` 一字未动 | 与 §3.10.39 写的"**版本号 = 发布意图**、没变只警告不发布"**不一致**：现在"改了产物就重发同 tag"。后果是同一个 tag 下的字节会变（用户按 tag 核 sha256 会对不上）。**下一轮要修**：把"版本没变 ⇒ 不发"的口径落到 publish 判定里（或至少改成"新开一个 -rN 的补丁资产名"而不是覆盖） |
+| **v0.3.14 的 16 个资产被同一 tag 全部改写** | `dad3512` 那次 run（`35308217461`）全绿，④ 含 `:sunsetd:test`；随后 release 与站点的 16 个资产/manifest 都变成 `commit=dad3512`，而 `version.properties`/`module.prop` 一字未动 | **已查实**：不是"版本规则被绕过"，而是 §3.10.39 自己写的兜底 —— prep 步骤从**站点** `stable/index.json` 取"上次发布的版本"，取不到就"保守当作全都变了"。那次站点 curl 失败 ⇒ `versionBumped=true` ⇒ 整轮重发（1.3 GB + 同 tag 字节改写）。**已修**：站点取不到时先退到 `releases/latest/download/index.json`（同一次发布写出去的等价文件），再不行才保守。副作用与可追溯性：`index.json.commit` 一直是对的，按 tag 核 sha256 的人应该改看这个字段 |
 | **我加的 dex 构建步骤把失败吞了** | 发布出去的 `sunsetlinux-module-1.0.35-bare.zip`（277,804 B）里**没有** `bin/sunsetd.dex`；而 CI 里那一步是 `node tools/build-sunsetd-dex.mjs \|\| echo "::warning::…"` | ② 那个 job 没有 Android SDK/d8（d8 在 App 构建 job 那边），脚本按设计 `exit 1`，却被 `\|\|` 吞成警告 —— **又是一次"静默降级"**，正是我这两轮一直在骂的毛病。碰巧的结果是"未验证的内核没被发出去"，但这是运气不是设计。**下一轮要修**：把 dex 构建放到有 SDK 的 job（或装 SDK），并让"应当带内核"成为**硬断言**（内核真机验证通过之后） |
 
 #### 三、还没做的（P1 剩余，按优先级）

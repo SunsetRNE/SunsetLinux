@@ -253,9 +253,13 @@ fi
 # 脱离 terminal 常驻：setsid + 输出重定向（与 dsh 的 supervisor 同一套路）
 if [ -f "$MODDIR/bin/sunsetd.dex" ] && [ -x /system/bin/app_process ] && [ -x /system/bin/setsid ]; then
   (
+    # 入口类名是 `…sunsetd.Main`（Kotlin 的 `object Main` + @JvmStatic main ⇒ 类就是 Main，
+    # **不是 MainKt** —— MainKt 只存在于"顶层函数写在 Main.kt 里"的情形；模块自测会断言这一点）。
+    # classpath 两种写法都给：app_process 认 `CLASSPATH` 环境变量，`-Djava.class.path` 也认。
+    CLASSPATH="$MODDIR/bin/sunsetd.dex" \
     LINUX_HOME="$LINUX_HOME" /system/bin/setsid /system/bin/app_process \
       -Djava.class.path="$MODDIR/bin/sunsetd.dex" /system/bin --nice-name=sunsetd \
-      io.github.sunsetrne.sunsetd.MainKt >> "$SERVICE_LOG" 2>&1 </dev/null &
+      io.github.sunsetrne.sunsetd.Main >> "$SERVICE_LOG" 2>&1 </dev/null &
   ) &
   log "内核：已在后台发起 sunsetd（日志见 $SERVICE_LOG）"
 else

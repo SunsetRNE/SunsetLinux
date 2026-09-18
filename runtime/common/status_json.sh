@@ -343,6 +343,12 @@ dsh_status_emit_flat() {
     # 不设置这两个变量时分别是 false / null（不编造）。
     printf 'dsh.running\t%s\n'        "$(dsh_jbool "${DSH_ST_DSH_RUNNING:-false}")"
     printf 'env_mode\t%s\n'           "$(dsh_jstr "${DSH_ST_ENV_MODE:-}")"
+    # 内核 v2 的附加键（同上）
+    printf 'kernel.online\t%s\n'      "$(dsh_jbool "${DSH_ST_KERNEL_ONLINE:-false}")"
+    printf 'kernel.phase\t%s\n'       "$(dsh_jstr "${DSH_ST_KERNEL_PHASE:-}")"
+    printf 'kernel.generation\t%s\n'  "$(dsh_jnum "${DSH_ST_KERNEL_GENERATION:-}")"
+    printf 'kernel.owner\t%s\n'       "$(dsh_jstr "${DSH_ST_KERNEL_OWNER:-}")"
+    printf 'kernel.job\t%s\n'         "$(dsh_jstr "${DSH_ST_KERNEL_JOB:-}")"
     printf 'layers.base.version\t%s\n'    "$(dsh_jstr "${DSH_ST_LAYER_BASE_VERSION:-}")"
     printf 'layers.base.size\t%s\n'       "$(dsh_jnum "${DSH_ST_LAYER_BASE_SIZE:-}")"
     printf 'layers.base.mounted\t%s\n'    "$(dsh_jbool "${DSH_ST_LAYER_BASE_MOUNTED:-false}")"
@@ -384,6 +390,16 @@ dsh_status_json() {
     # 附加键（§3.1 允许）：本次是「一键启动」full 还是「仅启动环境」env-only；
     # 环境没在跑时是 null。App 的按钮互斥判定 = env_mode + dsh.running 两条。
     printf '"env_mode":%s,'        "$(dsh_jstr "${DSH_ST_ENV_MODE:-}")"
+    # 附加键（§3.1 允许新增）：内核 v2（sunsetd）的**权威相位**。
+    #   为什么要单独暴露：v1 的 `state` 仍是兼容字段（内核在线时由内核决定），而 `kernel`
+    #   块把"内核在不在、世代多少、谁在推进"一起给出来 —— App 将来直接用它做判定，
+    #   不必再自己推导（那正是今晚第 2、3 条那类"两处各自判"的根）。
+    printf '"kernel":{"online":%s,"phase":%s,"generation":%s,"owner":%s,"job":%s},' \
+                "$(dsh_jbool "${DSH_ST_KERNEL_ONLINE:-false}")" \
+                "$(dsh_jstr "${DSH_ST_KERNEL_PHASE:-}")" \
+                "$(dsh_jnum "${DSH_ST_KERNEL_GENERATION:-}")" \
+                "$(dsh_jstr "${DSH_ST_KERNEL_OWNER:-}")" \
+                "$(dsh_jstr "${DSH_ST_KERNEL_JOB:-}")"
     printf '"pid":%s,'             "$pid"
     printf '"uptime_sec":%s,'      "$uptime"
     printf '"dsh":{'

@@ -100,6 +100,23 @@ else bad('bare 包里出现了 dsh/ —— "标 bare 却夹带"必须被拦住')
 // 内核 v2 的 dex：给了就**必须**进包；没给要**出声**（不静默）。
 // 只多打一个包（本套件每打一个包都要跑一次 mkmodule，"给 dex"这条用独立包验；
 // "没给 dex"那条直接复用上面那次 bare 构建的日志 —— 省一次打包）。
+// 入口类名的**静态闸门**：service.sh 里写的是哪个类，dex/jar 里就必须真有它。
+// 背景：Kotlin 的 `object Main`（@JvmStatic main）编译出来是 `…Main`，而不是 `MainKt` ——
+// 写错一个字母，真机表现只是"内核没起来"（一行日志），排查要花一轮。这里提前拦住。
+const kernelEntry = 'io.github.sunsetrne.sunsetd.Main';
+const svc = readFileSync(join(REPO, 'module/service.sh'), 'utf8');
+if (svc.includes(kernelEntry)) ok(`service.sh 的入口类名与内核实现一致（${kernelEntry}）`);
+else bad(`service.sh 里的内核入口类名不是 ${kernelEntry}`);
+const jarDir = join(REPO, 'app/sunsetd/build/libs');
+if (existsSync(jarDir)) {
+  const jar = readdirSync(jarDir).filter((n) => n.endsWith('.jar')).sort()[0];
+  if (jar) {
+    const listing = execFileSync('bash', ['-c', `unzip -l ${JSON.stringify(join(jarDir, jar))} | grep -c 'sunsetd/Main.class' || true`], { encoding: 'utf8' }).trim();
+    if (listing !== '0') ok('sunsetd.jar 里确实有 sunsetd/Main.class');
+    else bad('sunsetd.jar 里没有 sunsetd/Main.class —— 入口类名或包名变了');
+  }
+}
+
 const dexSrc = join(root, 'sunsetd.dex');
 writeFileSync(dexSrc, Buffer.alloc(200_000, 7));   // 内容无所谓，只验打包管道
 const dexZip = join(root, `sunsetlinux-module-${MODULE_VER}-dex.zip`);

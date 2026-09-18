@@ -1183,13 +1183,54 @@ adb-shell tail -20 /data/sunsetlinux/run/service.log # 找"内核：已在后台
 
 ### 4. 本轮 CI 暴露的两件事（下一轮先修，**都不是内核代码问题**）
 
-1. **没升版本却重发了同 tag 的 16 个资产**（`dad3512` 那次 run 全绿后，release 的资产 `updated_at`
-   全变成 04:52）。这与 §3.10.39 记的"版本号 = 发布意图、没变不发"不一致 ⇒
-   同一个 tag 下字节会变，用户按 tag 核 sha256 会对不上。
+1. **同 tag 的 16 个资产被重发**（`dad3512` 那次 run 全绿后，release 与站点的 manifest 都变成
+   `commit=dad3512`）。**已查实原因**：不是版本规则被绕过，而是 prep 从**站点**取"上次发布版本"、
+   取不到就"保守当作全都变了"（§3.10.39 自己写的兜底）——那次站点 curl 失败 ⇒ 整轮重发 1.3 GB
+   并改写同 tag 的字节。**已修**：站点取不到时先退 `releases/latest/download/index.json`。
+   核版本请看 `index.json.commit`，别假设 tag 不可变。
 2. **我加的 dex 构建步骤被 `|| echo "::warning::…"` 吞掉了**：② 那个 job 没有 d8（SDK 在 App 构建 job），
    脚本按设计 `exit 1`，于是发布出的模块**不含** `bin/sunsetd.dex`。
    碰巧"未验证的内核没被发出去"，但这是运气。修法：dex 构建挪到有 SDK 的 job（或装 SDK），
    并在内核真机验证通过之后把"必须带内核"变成**硬断言**。
 
 > 教训（与本仓老规矩同源）：**任何"失败就警告"的写法都等于静默降级**。本轮我自己又犯了一次。
+
+## 第 47 轮（2026-09-18 05:xx）：内核 P1 后半 —— `status` 以内核为准（模块 1.0.36，待真机验）
+
+细节见 `docs/STATUS.md` §3.10.46。下一轮接手要用的：
+
+### 1. 现在的形状（P1 已完成的边界）
+
+```
+linuxctl status ──┬── 内核在线（state.json + 15s 内心跳）⇒ 相位以内核为准 + kernel 附加键
+                  └── 内核不在/心跳过期 ⇒ 退回 v1 标记判据（兼容降级，不拿过期状态冒充）
+service.sh ──────── 先起 sunsetd（dex + app_process），再发起 linuxctl start ⇒ 内核认领为 foreign-observer
+```
+
+**App 不用改**：既有键一个没动，`kernel` 是附加键（`contract-check.mjs` 已确认允许）。
+
+### 2. 下一轮第一件事：真机验证（清单已写进 `/sdcard/Download/本轮交付说明-模块1.0.36-内核P1验证.md`）
+
+六条：`control.sock`/`state.json` 在不在 → `state.json` 内容 → `sunsetd.log` 有没有"控制面已就绪"
+→ `service.log` 有没有"内核：已在后台发起 sunsetd" → `linuxctl status` 的 v1 键 + `kernel` 块
+→ 挪走心跳后 status 是否退回 v1。
+
+失败时的两种日志已经区分好：`跳过（缺 …）` = 打包问题；`sunsetd 没起来（SELinux 域/ART 问题？）`
+= **P1 唯一没验证过的风险点**，把 `sunsetd.log` 尾部原话发出来即可。两种情况行为都按 v1。
+
+### 3. P1 还剩（按优先级）
+
+1. 真机验证结果回来之后的收尾；
+2. **删掉"在不在跑"剩下的重复实现**：`start.sh:running_ns_pid`、App 里那份推导
+   （`linuxctl` 那份已经改成"以内核为准 + `start.lock` 兜底"）；
+3. `submit` 作业模型接到 App（P2 的第一件事；本轮 App 仍走 v1 命令，内核只观察）；
+4. 内核单测进 CI **已经接了**（`:sunsetd:test`），但"内核在线"路径的端到端测试目前只有
+   shell 侧那 6 条 —— 真机验证回来之后可考虑加一条"假内核 + 真 sunsettl status"的 CI 用例。
+
+### 4. 踩到并已修的
+
+- **入口类名**：Kotlin `object Main` + `@JvmStatic main` 编译出来是 `…sunsetd.Main`，不是 `MainKt`。
+  已在模块自测里加静态闸门（比对 `service.sh` 与 jar 内容）。
+- **CI 保守重发**：站点 `index.json` 取不到时会重发整轮（1.3 GB）并改写同 tag 的字节。
+  现在先退 `releases/latest/download/index.json`。
 
