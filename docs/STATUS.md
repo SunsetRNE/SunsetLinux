@@ -572,6 +572,10 @@ su -c '/data/sunsetlinux/bin/linuxctl doctor'
 
 - App 单测 **278 → 297 通过 / 0 失败**：`Ed25519Test` **8** 条（RFC 8032 §7.1 官方向量 4 条 + 改消息/改签名/换公钥/S≥L/长度/非规范编码**全拒** + 真实清单 + 性能）、`ChannelSignatureTest` +4（坏 provider 跳过、平台全挂退内置、失败理由、自证可用）、`UpdateNoticeTest` **6**、`DiagnoserTest` +1。
 - **变异验证**：把 `Ed25519.verify` 的判据改成"永远返回 true"（最危险的缺陷方向）⇒ 相关用例如期判红，改回即绿。
+- 性能：随包实现是 BigInteger 实现的仿射坐标 double-and-add，**一次验签约 40 ms（JVM）**，手机上估计 100~300 ms；
+  频道检查在 `Dispatchers.IO` 上跑、一次只验 1~3 份清单，可接受。若将来嫌慢，可以先做基点的预计算表（`[S]B` 那一半）。
+- 可观测：`describe()` 只在**检查跑过之后**才会被界面渲染（频道检查卡要有 reports 才显示），所以进程级 lazy 的
+  `picked` 已经在 IO 线程上热身过，不会把一次 Ed25519 验签放到主线程上。
 - ⚠️ **本机跑 App 单测必须带 `LC_ALL=C.UTF-8`**：否则中文测试方法名生成的 class 文件名会编解码失败，Kotlin 编译器直接 ICE（`Malformed input or input contains unmappable characters`）—— CI 那一步一直设着这个变量，本机这次才踩到。
 
 ### 3.10.56 真机核验 v0.3.17 落地：一处「更新了却没生效」+ 一次 git 事故 + 三处修复（2026-09-18 深夜）
