@@ -1282,3 +1282,82 @@ service.sh ──────── 先起 sunsetd（dex + app_process），再�
 修法：`embed_bundles` 用 `steps.norm.outputs.embed_bundles`，读自己 outputs 的地方一律 `|| true`。
 **本地用真实 changeset + 真实 git diff 端到端复现过**（`build_bundles=false → 强制 true`）。
 
+
+## 第 49 轮（2026-09-18 08:xx）：P1 真机结果回来了 —— 风险点排除，控制面撞上"ART 与 SDK 桩不一致"
+
+细节见 `docs/STATUS.md` §3.10.48。这一轮**没有靠猜**：真机结果、根因、修法都有证据。
+
+### 0. 上一轮（1.0.37）的真机结果
+
+| 清单项 | 实测 |
+|---|---|
+| `state.json` | ✅ 在 |
+| `control.sock` | ❌ **不在** |
+| `sunsetd.log` | ❌ `控制面启动失败：No static method open(Ljava/net/ProtocolFamily;)…ServerSocketChannel;` |
+| `service.log` | ✅ `内核：已在后台发起 sunsetd` |
+| `linuxctl status` | ✅ v1 键齐 + `kernel:{online:true,…}`（P1-d 真机通过） |
+
+**P1 唯一没验证过的风险点（`app_process` 起内核的 SELinux 域 / ART）通过了** —— 内核确实跑起来了。
+坏的是控制面 socket。
+
+### 1. 根因：真机 ART **没有** `ServerSocketChannel.open(ProtocolFamily)`
+
+从真机 `/apex/com.android.art/javalib/core-oj.jar` 抽 `classes.dex`，按 `method_ids`/`class_data`
+逐条 dump（本机 python 解析；`dexdump` 是 x86_64 静态二进制，在设备上跑不了）：
+
+- 真机：`ServerSocketChannel` **只有 `open()`**（没有 `open(ProtocolFamily)`）；
+- SDK 桩 `android-35/android.jar`：**有** `open(ProtocolFamily)`；
+- 真机 `sun.nio.ch.UnixDomainSockets`（connect/bind/accept/socket…22 个方法）**实现是齐的**，
+  `SocketChannel.open(SocketAddress)` 也在 ⇒ **unix 域只给了客户端半边**。
+
+**为什么 34 条单测全绿也没挡住**：单测在桌面 JVM（JDK 17）上跑，那里有这个静态方法；
+`android.jar` 是**平台桩**，与设备实际装的 **ART apex 模块**可以不一致。这条差异**只有真机或设备 dex 能看见**。
+
+### 2. 修法（模块 1.0.38，全在公开 SDK API 上）
+
+| 改动 | 说明 |
+|---|---|
+| `app/sunsetd/.../Transport.kt`（新） | `Duplex` + `ControlListener` 把"什么 socket"与"协议"分开；选择器按**可注入的能力**选通道；回环自检 |
+| `app/sunsetd/.../AndroidLocalTransport.kt`（新） | 真机通道：`LocalSocket.bind(FILESYSTEM)` → `LocalServerSocket(fd)`（内部 listen）→ `Os.chmod 0600`；纯字符串反射，dex 里**没有** `android.net.*` 引用 |
+| `ControlServer.kt` / `World.kt` / `Main` | 接上通道选择；落 `run/control-transport` 与 `run/control-selftest`；失败时打印每条通道的失败原因 + 栈前 12 行 |
+| `src/test/kotlin/android/net/*`（新） | **android.net 测试替身**：让 android-local 通道在 JVM 上整条跑通（不进产物） |
+
+判据（AOSP 源码逐条核对，不是猜）：`LocalSocketImpl.bind → bindLocal(fd,name,namespace)`（支持 FILESYSTEM）；
+`LocalServerSocket(FileDescriptor) → impl.listen(50)`；`LocalSocketImpl.close()` 对**外部传入的 fd 不关**
+⇒ 关 fd 的是创建它的 `LocalSocket`，只有关它才能解开阻塞中的 `accept`。
+
+### 3. 这一轮的验证（本机完成）
+
+- 内核单测 **42 / 0**（原 34）：真机情形选择器、两条都缺、nio 被占用退让、探测口径、回环自检，
+  以及 android 替身上的完整通道测试（收发 + 0600 + close 解开 accept）。
+- 模块自测 41/0；两个 zip 里的 `bin/sunsetd.dex` 与本地构建 **sha256 严格一致**（`99a7833b…`）。
+- 跑单测要注意：**中文方法名 + Gradle 守护进程的 ASCII locale** 会炸（`InvalidPathException`），
+  必须 `LANG=C.UTF-8 LC_ALL=C.UTF-8`（`tools/build-sunsetd-dex.mjs` 一直是这么做的，手敲别忘）。
+
+### 4. 交付
+
+`/sdcard/Download/sunsetlinux-module-1.0.38-bare.zip`（1,060,692 B，**你装的这个变体**）
+/ `sunsetlinux-module-1.0.38.zip`（50,885,375 B）+ 《本轮交付说明-模块1.0.38-控制面修复.md》。
+
+### 5. 下一轮第一件事
+
+收 1.0.38 真机结果，只要两行：
+
+```bash
+cat /data/sunsetlinux/run/control-transport   # 期望 android-local
+cat /data/sunsetlinux/run/control-selftest    # 期望 ok:nio-unix（或 ok:android-local）
+ls -l /data/sunsetlinux/run/control.sock      # 期望存在
+tail -20 /data/sunsetlinux/run/sunsetd.log    # 找"控制面已就绪"+"回环自检"
+```
+
+`ok:*` ⇒ **P1 主线收口**，进 P2（`submit` 作业模型接到 App；`docs/decisions-core-v2.md` §六 的开放问题）。
+`fail:*` ⇒ 日志里已有每条通道的失败原话（SELinux/权限那种），照原话修，别换判据。
+
+### 6. 留给下一轮的坑（这轮学到的）
+
+- **别拿 SDK 桩当设备事实**：`android.jar` 只保证"能编译"，设备上装的是**某个 ART apex 模块**。
+  凡是要落到真机的能力，要么做**能力探测**（本轮这么做的），要么**按设备 dex 静态核对**。
+- **真机不能跑临时程序**：`app_process` 会被设备策略判成"不认识的命令"（`POLICY_BLOCKED`）。
+  所以"探针"要么进模块/进 dex，要么别做 —— **自检必须内建在交付物里**（`run/control-selftest` 就是这么来的）。
+- 容器里 `/apex`、`/system/framework/*.jar` **可以直接读**（`/system/bin` 不行）；dex 解析用 python
+  自己的小解析器（本机 `dexdump` 是 x86_64，跑不了）。

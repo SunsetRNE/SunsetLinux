@@ -9,19 +9,20 @@ import java.io.BufferedReader
 import java.io.File
 import java.io.InputStreamReader
 import java.io.OutputStreamWriter
-import java.net.StandardProtocolFamily
 import java.net.UnixDomainSocketAddress
 import java.nio.channels.Channels
-import java.nio.channels.ServerSocketChannel
 import java.nio.channels.SocketChannel
 
 /**
  * 控制面（unix domain socket + 行分隔 JSON）的行为测试。
  *
  * 为什么值得单测：真机上"内核起没起来"的第一证据就是这条 socket ——
- * 它是"客户端不再依赖命令返回"的前提（决策 D3）。这里跑的是**真 socket**（容器与真机
- * 都支持 `java.nio` UNIX 协议族），不是内存桩，所以协议帧、连接复用、陈旧 socket 清理、
+ * 它是"客户端不再依赖命令返回"的前提（决策 D3）。这里跑的是**真 socket**（桌面 JVM 走
+ * `java.nio` 的 UNIX 协议族，即 `nio-unix` 通道），所以协议帧、连接复用、陈旧 socket 清理、
  * 重复启动都被真实验证过一遍。
+ *
+ * ★ 注意"真机上也一样"这句话在 2026-09-18 被证伪过：真机 ART **没有** `java.nio` 的
+ * UNIX 服务端入口，通道选择与真机情形见 [TransportTest] 与 `docs/STATUS.md` §3.10.48。
  */
 class ControlServerTest {
 
@@ -122,22 +123,17 @@ class ControlServerTest {
             override fun spawn(cmd: List<String>, onExit: (Int) -> Unit): Long = 1L
             override fun alive(pid: Long): Boolean = false
             override fun kill(pid: Long) {}
-        }), {})
+        }), log = {})
         val e = runCatching { second.start() }.exceptionOrNull()
         assertTrue("第二个内核必须起不来：${e?.message}", e is IllegalStateException)
         second.stop()
     }
 
     @Test
-    fun `我们的实现真的用 java_nio 的 UNIX 协议族（设备 ART 里已实测有此类）`() {
-        // 这条断言的意义：如果哪天换成 Android 专有 LocalSocket，设备上就不再是同一套代码，
-        // 这个测试会红 —— 提醒改动者同步真机验证。
-        val path = "/tmp/sunsetd-probe-${System.nanoTime()}.sock"
-        val ch = ServerSocketChannel.open(StandardProtocolFamily.UNIX)
-        ch.bind(UnixDomainSocketAddress.of(path))
-        val bound: java.net.SocketAddress? = ch.getLocalAddress()
-        ch.close()
-        File(path).delete()
-        assertTrue("绑定出来的地址必须是 unix 路径族，实际=$bound", bound is UnixDomainSocketAddress)
+    fun `协议帧：未知 op 走内核的兜底回复，不会把连接搞断`() {
+        startServer()
+        val (a, b) = rpc("""{"op":"不存在的操作"}""", """{"op":"ping"}""")
+        assertTrue("未知 op 要有可读回复：$a", a.isNotBlank())
+        assertTrue("后面的帧还得能问：$b", b.contains("pong"))
     }
 }

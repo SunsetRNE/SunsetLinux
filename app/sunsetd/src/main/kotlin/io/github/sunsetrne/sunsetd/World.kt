@@ -17,6 +17,15 @@ class RuntimeEnv(
     val heartbeatFile: String get() = "$runDir/heartbeat"
     val socketFile: String get() = "$runDir/control.sock"
 
+    /**
+     * 控制面**通道**诊断（`nio-unix` / `android-local` / `none`）。
+     * 不是会话状态，是"这条通道在这台设备上选到了哪条路"——给 doctor 与交付验证看。
+     */
+    val transportFile: String get() = "$runDir/control-transport"
+
+    /** 控制面回环自检结论：`running` / `ok:<通道名>` / `fail:<原因>`。 */
+    val selfTestFile: String get() = "$runDir/control-selftest"
+
     // ── v1 世界的标记（内核**只读**它们：用来认领"别人起的会话"，而不是自己再推导一遍）
     val readyFile: String get() = "$runDir/ready"
     val supervisorPidFile: String get() = "$runDir/supervisor.pid"

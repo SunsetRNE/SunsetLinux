@@ -19,6 +19,13 @@
 跑不起来"是唯一一处**已确定的不可用功能**，现在两个脚本都能被 mksh 解析、并在 mksh 下通过
 纯函数回归；顺带修掉一个语法闸门抓不到的运行时缺陷（bash `/dev/tcp` 在 mksh 里不存在）。
 
+**2026-09-18 补记（最新，先看这条）**：项目正在做**内核 v2**（`sunsetd`，Kotlin/app_process 常驻，
+成为"环境在不在跑"的唯一状态源）。P1 的真机结果已回：**SELinux 域/ART 通过**，
+但控制面撞上"**真机 ART 没有 `ServerSocketChannel.open(ProtocolFamily)`**"（SDK 桩里有，
+桌面单测因此看不见）⇒ 修法是把控制面**通道**与协议分层 + 能力探测 + 开机回环自检，
+交付 **模块 1.0.38**，待收两行真机结果。完整证据链与教训见 **§3.10.48**；
+决策更新见 `docs/decisions-core-v2.md` 的 **A10 / B1**（"设备运行时事实优先于 SDK 桩"）。
+
 ---
 
 ## 二、交付物（`dist/`，哈希见 `dist/MANIFEST.txt`）
@@ -502,6 +509,81 @@ su -c '/data/sunsetlinux/bin/linuxctl doctor'
 | 版本比较 | 没有（不比较） | `compareModuleVersion` **逐段数字比**：`1.0.10 > 1.0.9`（字符串比会得出相反结论）；`1.0` 与 `1.0.0` 视为同版，避免假更新提示 |
 | 已装状态读不到时 | —— | **不给刷入按钮**，先让用户修 root 授权（与"读不到 ≠ 没装"一致） |
 | 重启 | —— | 只报告"重启后生效"（KernelSU 落 `modules_update/`），**App 不替用户重启**，脚本里有单测断言不许出现 `reboot` |
+
+### 3.10.48 内核 v2 · P1 首次真机验证：**风险点排除，但控制面撞上"ART 运行时与 SDK 桩不一致"**（模块 1.0.38）
+
+**一、真实结果（1.0.37 装上、重启后，2026-09-18 16:03）**
+
+| 清单项 | 实测 |
+|---|---|
+| ① `state.json` | ✅ 在（`phase=idle`、`generation=0`、`owner=none`） |
+| ① `control.sock` | ❌ **不在** —— 上一轮 P1 欠的就是这条 |
+| ③ `sunsetd.log` | ❌ `控制面启动失败：No static method open(Ljava/net/ProtocolFamily;)Ljava/nio/channels/ServerSocketChannel; …` |
+| ④ `service.log` | ✅ `内核：已在后台发起 sunsetd`（新路径生效） |
+| ⑤ `linuxctl status` | ✅ v1 键一个不少 + `kernel:{online:true,phase:"idle",generation:0,owner:"none",job:null}`（P1-d 真机通过） |
+| ⑥ 心跳过期回退 | 未测（被 ①③ 挡住） |
+
+**结论（重要）**：P1 唯一没验证过的风险点 —— **`app_process` 起内核的 SELinux 域 / ART 兼容性 —— 通过了**。
+内核真的跑起来了、Kotlin 代码执行了、状态与心跳都在写。失败点只在**控制面 socket**。
+
+**二、根因：这台设备的 ART 运行时**没有** `ServerSocketChannel.open(ProtocolFamily)`**
+
+不是猜的：把真机 `/apex/com.android.art/javalib/core-oj.jar` 里的 `classes.dex` 抽出来，
+按 dex 的 `method_ids`/`class_data` 逐条 dump（本机 python 解析，`dexdump` 是 x86_64 静态二进制、在设备上跑不了）：
+
+| 类/方法 | 真机 core-oj.jar | SDK 桩 `android-35/android.jar` |
+|---|---|---|
+| `ServerSocketChannel.open()` | ✅ | ✅ |
+| `ServerSocketChannel.open(ProtocolFamily)` | ❌ **没有** | ✅ **有** |
+| `SocketChannel.open(SocketAddress)` | ✅ | ✅ |
+| `SocketChannel.open(ProtocolFamily)` | ❌ | ✅ |
+| `java.net.UnixDomainSocketAddress` / `StandardProtocolFamily` | ✅ | ✅ |
+| `sun.nio.ch.UnixDomainSockets`（connect/bind/accept/socket/…22 个方法） | ✅ **实现是齐的** | — |
+| `sun.nio.ch.ServerSocketChannelImpl` | ✅（有 `(SelectorProvider, FileDescriptor, boolean)` 构造器） | — |
+
+⇒ Android 的 NIO 只给了 unix 域的**客户端**半边，**服务端入口被拿掉了**。
+
+**为什么"34 条内核单测全绿"没挡住**：单测跑在桌面 JVM（JDK 17）上，那里**有** `open(ProtocolFamily)`；
+而 `android.jar` 是**平台桩**，与设备实际安装的 **ART apex 模块**可以不一致（这台就撞上了）。
+**通用教训**：*"照 SDK 桩写代码 + 在桌面跑单测"对"设备运行时 API 面"是没有发言权的* ——
+要么真机自检，要么按设备 dex 静态核对。
+
+**三、修法（模块 1.0.38）**
+
+1. 控制面**通道**与协议分层（新增 `app/sunsetd/.../Transport.kt`）：
+   `Duplex`（一条连接的两端）+ `ControlListener`（能 accept 的监听端），协议代码两边**同一份**。
+2. **能力探测选通道**（可注入 ⇒ 真机情形能在 JVM 单测里断言）：
+   有 `ServerSocketChannel.open(ProtocolFamily)` ⇒ `nio-unix`（桌面单测）；
+   否则 ⇒ **`android-local`**：`LocalSocket.bind(FILESYSTEM 路径)` + `LocalServerSocket(fd)`（内部 `listen`）
+   + `Os.chmod 0600`，accept 出来的是带 Java 流的 `LocalSocket`。
+   依据按 AOSP 源码逐条核对（`LocalSocketImpl.bind → bindLocal`、`LocalServerSocket(fd) → listen(50)`、
+   对外部 fd **不负责关闭** ⇒ 关 fd 的是创建它的 `LocalSocket`，`close` 才能解开阻塞的 `accept`）。
+   全部是**公开 SDK API**，没有 hidden API 风险。
+3. **开机回环自检**：内核起来后连自己、发一帧 `ping`、读回一帧，结论落盘：
+   `run/control-transport`（选中哪条）+ `run/control-selftest`（`running` / `ok:<通道>` / `fail:<原因>`）。
+   异步跑（主循环一秒都不被挡）。两条通道都起不来时，诊断文件与日志写清**每条各自的失败原因**。
+4. 真机 dex 里**没有任何 `android.net.*` 引用**（纯 `Class.forName` 字符串）⇒ 不会再有"链接期才发现缺方法"。
+
+**四、这一轮的验证（都在本机做完，不靠 CI 不靠真机）**
+
+- 内核单测 **34 → 42 / 0**：新增"真机情形（nio 缺服务端）⇒ 选择器必须走 android-local 并说清原因"、
+  "两条都缺 ⇒ 原因两条都在"、"nio 被占用 ⇒ 自动退下一条"、"探测口径就是 `open(ProtocolFamily)`"、
+  "回环自检在真 socket 上得到 `ok:nio-unix`"。
+- **`android.net` 测试替身**（`src/test/kotlin/android/net/*`，按 AOSP 源码语义写）：
+  让 android-local 通道在 JVM 上**整条跑通** —— 反射管道（类名/方法/构造器/字段/静态性）、
+  bind→listen→accept、收发帧、`close` 解开阻塞中的 `accept`、socket 是 `0600`。
+  替身**不进产物**（已核对 dex 里没有该类，也没有 android.net 的 method_id）。
+- 模块自测 41/0；两个变体的 zip 里 `bin/sunsetd.dex` 与本地构建 sha256 严格一致
+  （`99a7833b…`，2,508,864 B）。
+
+**五、交付与下一轮第一件事**
+
+交付：`/sdcard/Download/sunsetlinux-module-1.0.38-bare.zip`（1,060,692 B）/ `…-1.0.38.zip`（50,885,375 B）
++ 《本轮交付说明-模块1.0.38-控制面修复.md》。
+
+下一轮第一件事：**收 1.0.38 的真机结果** —— `cat run/control-transport`（期望 `android-local`）、
+`cat run/control-selftest`（期望 `ok:*`）。两条都对 ⇒ P1 主线收口，进 P2（`submit` 作业模型接到 App）。
+若 `control-selftest` 是 `fail:`，日志里已有每条通道的失败原话（含 SELinux/权限），照原话继续。
 
 ### 3.10.47 收束（P1 收尾 + 把"在不在跑"的第 N 份实现删掉 + 修 CI 不变式）
 

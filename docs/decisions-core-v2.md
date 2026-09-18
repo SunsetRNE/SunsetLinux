@@ -43,6 +43,7 @@
 | **A7** | **世界可以领先于内核**：观察到的相位允许 `IDLE→RUNNING` 之类迁移（带 `Owner.FOREIGN`），但只允许迁到"世界能观察到的"相位 | 建树 30~50 秒，内核这一拍才从 `preparing` 过来时世界已经 `running` | §3.10.43 |
 | **A8** | 内核**不重写**挂载/命名空间：它驱动现有 `linuxctl start|stop|dsh *` 并**观察**结果（P2/P3 才把挂载表变成数据） | 一次只搬一块，P1 的收益（唯一状态源）已经足够大 | — |
 | **A9** | 内核读的 v1 标记（`ready`/`supervisor.pid`/`start.lock`/`env-mode`/`dsh.*`）**只读**，不改它们的语义 | 保证"内核不在 ⇒ 行为与今天完全一致"（D4 的落地） | — |
+| **A10** | **设备运行时事实优先于 SDK 桩**：凡是要落到真机的能力，要么做**能力探测**（可注入 ⇒ 能在 JVM 单测里断言真机情形），要么**按设备 dex 静态核对**；交付物内建**开机自检**，把结论落进 `run/`（`control-transport` / `control-selftest`） | `android.jar` 只保证"能编译"，设备上装的是**某个 ART apex 模块**，两者可以不一致 —— 2026-09-18 实测：真机 `core-oj.jar` 的 `ServerSocketChannel` **没有** `open(ProtocolFamily)`，而 SDK 桩里有 ⇒ 34 条桌面单测全绿也挡不住（§3.10.48）。另外真机**不允许跑临时程序**（`app_process` 会被判 `POLICY_BLOCKED`），所以探针只能内建在交付物里 |
 
 ---
 
@@ -50,7 +51,7 @@
 
 | # | 决策 | 理由 / 防的坑 |
 |---|---|---|
-| **B1** | 控制面用 **`java.nio` 的 UNIX 协议族**，不用 Android 私有 `LocalSocket` | 同一份代码在真机与容器单测里都能跑（设备 ART 实测有 `UnixDomainSocketAddress`；`ControlServerTest` 跑真 socket） |
+| **B1** | 控制面**通道与协议分层**：协议只认 `Duplex`（行分隔 JSON），通道由**能力探测**选 —— 有 `ServerSocketChannel.open(ProtocolFamily)` 走 `nio-unix`（桌面单测），否则走 **`android-local`**：`LocalSocket.bind(FILESYSTEM 路径)` → `LocalServerSocket(fd)`（内部 `listen`）→ `Os.chmod 0600`，全是**公开 SDK API** | ~~原决策：统一用 `java.nio` 的 UNIX 协议族~~ —— 已被真机证伪（设备 ART 没有 `open(ProtocolFamily)`，§3.10.48）。分层之后协议代码两边仍是**同一份**，且"缺哪条通道"变成可测的分支而不是运行时崩溃 |
 | **B2** | 心跳写**毫秒**、判"内核是否还活着"用 **15 秒**（`SUNSETLINUX_KERNEL_STALE_SEC` 可覆盖）；心跳过期 ⇒ **退回 v1 判据，绝不拿过期状态冒充** | 内核被 `kill -9` 后，状态文件还在 |
 | **B3** | shell 侧取秒用**字符串截断** `${ts%???}`，不做乘除 | mksh 的算术是 **32 位**（真机踩过：KB 乘字节溢出） |
 | **B4** | 内核状态的读取收进 `runtime/common/kernel-state.sh`（`linuxctl` 与 `start.sh` **共用一份**） | 避免又出现"两份实现"（这正是要治的病） |
@@ -86,8 +87,10 @@
 
 ## 六、留给下一轮的开放问题
 
-1. **真机验证结果**（P1 唯一未验证项）：`app_process` 起内核的 SELinux 域、socket 能否建。
-   失败时行为完全按 v1（回退是设计的一部分）。清单见 `/sdcard/Download/本轮交付说明-模块1.0.36-内核P1验证.md`。
+1. **真机验证结果**（P1 唯一未验证项）：~~`app_process` 起内核的 SELinux 域、socket 能否建~~
+   → **2026-09-18 已有结论**：SELinux 域/ART **通过**（内核起来了、状态在写）；但控制面撞上
+   "真机 ART 没有 `ServerSocketChannel.open(ProtocolFamily)`"（§3.10.48），修法见 **A10 / B1**，
+   交付模块 1.0.38。**待收**：`run/control-transport` 与 `run/control-selftest` 两行真机结果。
 2. `run/start.lock` 还要不要留：它是"内核不在"时的降级判据（v1 兜底）。P2 之后如果内核常驻可靠，
    可以考虑让 `start.sh` 完全交给内核的互斥。
 3. App 何时切到 socket（P2）：切了之后 `busy` 不再与命令生死耦合，但要求内核常驻可靠 +
