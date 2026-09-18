@@ -1899,3 +1899,77 @@ dsh rc.1+rc.2 / 模块 1.0.41，把三个新层更上去，用 App 的 WebView �
 **恢复**：远端完整 ⇒ `--no-checkout` 克隆干净 `.git` 换入 + `git reset --mixed HEAD`（工作区一个没动），fsck 通过。
 **硬化**：`gc.auto=0`；3 个只余 SHA 的本地分支记在 `/var/tmp/lost-local-refs.txt`。
 ⇒ 教训：**"提交成功"不等于"仓库安全"**，这台设备的宿主是**会重启的手机**。
+
+---
+
+# ★★ 收束 · 换对话框前的最终落点（2026-09-19 00:4x）
+
+## 一句话
+
+**代码与发布都收口了**：`v0.3.18`（App **0.3.18/34** + 模块 **1.0.43/10043**，run 60 绿、`releases/latest` 已指向它，
+工作区干净、HEAD `b525554`）；**设备那边你正在刷模块 1.0.43 + 重启** —— 起来后第一件事就是看
+**内置切换有没有把生效层切到 dsh 0.1.6**（这一轮的代码修复就是为这件事）。
+
+## 换对话框后按这个顺序读（3 分钟恢复上下文）
+
+1. 本文件 **第 53 轮**（本轮全过程：核验 → 发现 → 三处修复 → git 事故）。
+2. `docs/STATUS.md` **§3.10.56**（①落地核验 ②环境仍跑旧层 ③三处修复 ④比较器对拍 ⑤git 事故 ⑥闸门 ⑦App 更新页待查 ⑧待办）。
+3. 然后直接做「第一件事」。
+
+## 第一件事：验**内置切换**有没有生效（命令级，逐条跑）
+
+```bash
+# ① 自愈日志：这次应该是「启用更新=true」（刷模块前是 false）
+adb-shell 'cat /data/sunsetlinux/run/service.log'
+# ② 生效的 dsh 层文件（刷模块前是 dsh-0.1.5-rc.2.erofs）
+adb-shell 'cat /sys/block/loop52/loop/backing_file'
+# ③ 挂载层里真实 DSH 版本（应为 0.1.6-alpha.2）
+adb-shell 'grep -m1 version /data/sunsetlinux/layers-mnt/dsh/usr/local/lib/node_modules/@deepseek-ai/dsh/package.json'
+# ④ DSH 起来了没
+adb-shell 'cat /data/sunsetlinux/run/dsh.url'
+```
+
+预期：`service.log` 里出现 `内置 DSH 就位：…/dsh-0.1.6-alpha.2.erofs（版本 0.1.6-alpha.2；启用更新=true）`，
+loop52 指向 `dsh-0.1.6-alpha.2.erofs`，挂载层版本 `0.1.6-alpha.2`。
+**如果还是 rc.2**：先看 `service.log` 里自愈那两行（新代码有「载荷已在盘上 → 同步跑完再自启」这句），
+再确认模块版本确实是 1.0.43（`grep version /data/adb/modules/sunsetlinux/module.prop`）。
+
+## 第二件事：0.1.6 的 **WebView**（唯一还没验的一环）
+
+- **无障碍已开**（用户开的，本会话有效）；但 **DSHA 会时不时抢回前台** ——
+  每次点按前先确认前台，用本轮写的工具：`/root/Q/sl-ui.sh {fg|dump|tap "文字"|swipe x1 y1 x2 y2}`
+  （它内部会 `launch` 目标 App、必要时点掉 ColorOS 的「想要打开…」弹窗选**仅本次允许**，再确认前台）。
+- 验什么：打开 DSH 网页 → 不白屏、不报错；抓 `adb-shell 'logcat -d -t 400'` 里 `chromium: [INFO:CONSOLE` 的 JS 报错。
+  移动端是**客户端**插件 —— **服务端起得来 ≠ 浏览器里没 JS 报错**，这正是要验的。
+- 参考：DSH 起来后 `run/dsh.url` 里带 token，App 首页点「打开 DSH」即可。
+
+## 待办（按优先级）
+
+1. **⑤ 上面两件**（内置切换 + WebView）。做完就等于把 0.1.6 这条链在真机上闭环。
+2. **查 App 更新页那条**（STATUS §3.10.56 ⑦）：点刷新显示「已是最新」，而 dsh/runtime 两条都该报更新。
+   先做两件低风险改动：① 让「检查失败」的文案**优先于**「已是最新」；② 把每频道 `reports` 显示出来。
+   （App 偏好/排障包在私有目录，我这边 shell 看不到 `/data/user/0/<pkg>` ⇒ 只能从代码与 UI 侧推。）
+3. **runtime 层若重出**：版本必须 +1；顺手修 dsh 层里那 5 个重复入口脚本副本（它们会静默吞掉 runtime 层的改动，
+   等下次 dsh 升级一起修）。
+4. `testdata/channel/` 快照：本轮频道没变，**不需要**动。
+
+## 这一轮的坑（别再犯）
+
+- **`git commit` 会在后台跑 `gc --auto`**；本仓库大（pack ~900 MB），**重启会把它掐断并毁掉对象库**
+  （现场：真 pack 全没、只剩 4 个不可用 `tmp_pack_*`、`refs/heads/main` 消失）。
+  ⇒ 已设 **`gc.auto=0`**，**不要随手改回去**；要整理就手动 `git gc`，挑设备稳定的时间。
+- **"提交成功" ≠ "仓库安全"**；同理 **"推送成功" ≠ "发出去了"**（发布只在版本号变时跑）、
+  **"层文件在盘上" ≠ "生效"**（`dsh builtin` 这次就是不切）、**"启动器改了" ≠ "生效"**
+  （生效的是模块 `bin/` 同步到 `$LINUX_HOME/bin/` 的那份）。
+- 设备 shell 守卫**按策略拒绝**"非系统目录下的命令"。**不要**换入口（App 终端/别的解释器）去执行同一条命令 ——
+  那是"用 UI 绕过设备策略"，明确不做；该走 App 的正常功能或让用户点。
+
+## 环境/工具状态（换对话框后仍然有效）
+
+| 项 | 状态 |
+|---|---|
+| 仓库 | `.git` 是**新克隆**的（旧的在重启里毁了、已删）；`gc.auto=0`；HEAD `b525554` |
+| 本地分支 | 只剩 `main` —— `beta`/`channel`/`channel-publish` **本地没了**（SHA 在 `/var/tmp/lost-local-refs.txt`；要推 `layers`/`channel` 分支先 `git fetch`） |
+| 设备 | 模块 1.0.42 → 正在刷 **1.0.43**；App 0.3.17 → 可装 **0.3.18**；**无障碍已开**；`etc/channels.json` 已由 App 同步写入（300 B，00:31） |
+| 发布 | `releases/latest` = **v0.3.18**（6 APK + 6 离线包 + 模块 1.0.43 full/bare）；频道未变（base 24.04.3-l1 / runtime 1.0.1 / dsh 0.1.6-alpha.2） |
+| 本轮新工具 | `/root/Q/sl-ui.sh`（App 界面操作，自动确认前台）、`/root/Q/verify-module-zip.mjs`（HTTP range 抽查 zip 内容）、`/root/Q/cmp-crosscheck.sh`（shell↔JS 版本比较对拍） |
