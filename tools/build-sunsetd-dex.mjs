@@ -112,8 +112,12 @@ if (CHECK_ONLY) {
 }
 
 const d8 = findD8();
-const stdlib = findKotlinStdlib();
+// ★ 顺序要紧：**先构建 jar，再找 stdlib**。`gradlew :sunsetd:jar` 会把 kotlin-stdlib
+//   拉进 Gradle 缓存；反过来（先 findKotlinStdlib）在**冷缓存**的 CI runner 上必然失败 ——
+//   2026-09-18 之前的 CI 步骤只能用 `|| echo "::warning::"` 兜着，于是**发出去的模块包里
+//   从来没有内核**（见 docs/STATUS.md §3.10.49）。现在这一步可以硬失败。
 buildJar();
+const stdlib = findKotlinStdlib();
 const jar = jarPath();
 rmSync(OUT_DIR, { recursive: true, force: true });
 mkdirSync(OUT_DIR, { recursive: true });

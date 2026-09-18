@@ -172,6 +172,9 @@ jobs:
         run: |
           set -euo pipefail
           command -v zip >/dev/null 2>&1 || sudo apt-get install -y -qq zip
+          # ★ 先构建内核 dex：这一步以前没有 ⇒ 发布用的 full 模块**不含内核**
+          #   （2026-09-18 实锤：发布的 full zip 50,107,403 B ≈ 无 dex；§3.10.49）。
+          node tools/build-sunsetd-dex.mjs
           MODV="$(sed -n 's/^version=//p' module/module.prop | head -n1 | tr -d '[:space:]')"
           MODV="${MODV#v}"
           DSH_GZ="$(ls -1 dist/dsh-*.erofs.gz 2>/dev/null | head -n1 || true)"

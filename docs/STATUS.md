@@ -510,6 +510,45 @@ su -c '/data/sunsetlinux/bin/linuxctl doctor'
 | 已装状态读不到时 | —— | **不给刷入按钮**，先让用户修 root 授权（与"读不到 ≠ 没装"一致） |
 | 重启 | —— | 只报告"重启后生效"（KernelSU 落 `modules_update/`），**App 不替用户重启**，脚本里有单测断言不许出现 `reboot` |
 
+### 3.10.49 发布路径的静默残缺：**CI 发出去的模块包从来没有内核**（模块 1.0.39 修）
+
+**怎么发现的**：核对 1.0.38 的发布产物时看到 Release 上 `sunsetlinux-module-1.0.38-bare.zip`
+只有 **282,760 B**，而本地打的是 **1,060,692 B** —— 差的 780 KB 正好是 dex 压缩后的大小。
+下下来 `unzip -l` 一看：**没有 `bin/sunsetd.dex`**。再用 `--allow-no-kernel` 打一个对照包，
+**282,762 B** —— 两个字节级一致（差的是 zip 里的时间戳）。实锤。
+
+**影响面**（三个打包路径全中，而且全都只是"记一行 warning"）：
+
+| 路径 | 产物 | 以前 |
+|---|---|---|
+| `ci.yml`（App 构建作业里） | APK 内嵌的 `assets/module/sunsetlinux-module.zip` | **不含内核**（"一键刷入内置模块"装完内核永远起不来） |
+| `offline-bundle.yml` | 发布用的默认模块（full，自带 DSH） | **不含内核** |
+| `publish.yml` | 发布用的 bare | **不含内核** |
+| `release.yml` / `pipeline.yml` | 同上（prep 的 bare） | `pipeline.yml` 见下；`release.yml` 不含内核 |
+
+后果与 0.2.6 那次"该内嵌的没内嵌"同款：装上后 `service.sh` 只记一句
+`内核：跳过（缺 bin/sunsetd.dex 或 app_process/setsid）`，**内核 v2 静默消失**。
+（`pipeline.yml` 的 prep 那条**确实**建了 dex，但它带的是 `|| echo "::warning::"`；
+而 `build-sunsetd-dex.mjs` 当时**先找 kotlin-stdlib 再构建 jar**，所以在**冷缓存**的 CI runner 上
+必然失败 ⇒ 警告一出、包照样发 —— 这就是那几处 `|| echo warning` 的由来。）
+
+**修法（四处一起）**：
+
+1. **`module/mkmodule.sh`：缺 dex 直接 die**（不再是 warning）。确实要打"不含内核"的包
+   （例如专验 v1 回退）必须显式 `--allow-no-kernel`，那时仍打一行很响的警告。
+   这样"静默残缺"在**唯一入口**上就不可能出现（本地和 CI 同一条闸门）。
+2. **`tools/build-sunsetd-dex.mjs`：先 `gradle :sunsetd:jar`，再找 kotlin-stdlib** ——
+   冷缓存 runner 上因此能自愈，这一步才可能**硬失败**（不再需要 warning 兜着）。
+3. **三个 CI 打包路径补齐"先构建 dex"**（`ci.yml` / `offline-bundle.yml` / `publish.yml` /
+   `release.yml`），`pipeline.yml` 去掉 `|| echo warning` 并改成**无条件断言**
+   "模块包里必须有 `bin/sunsetd.dex`"。
+4. 版本推到 **1.0.39**：频道/Release 上那份"1.0.38"是没有内核的字节，而本地验过的那份有内核 ——
+   **同一个号码下两份不同字节**是本仓明确要避免的事（§3.10.47 的 C1 就是为此），所以换号。
+
+**验证**：`mkmodule.sh` 两条分支都实测过（缺 dex ⇒ die 且报错给出补救命令；
+`--allow-no-kernel` ⇒ 出声并继续）；本地 1.0.39 两个变体的 `bin/sunsetd.dex` 与构建产物
+sha256 一致（`99a7833b…`）。发布侧由 CI 的新断言盯着。
+
 ### 3.10.48 内核 v2 · P1 首次真机验证：**风险点排除，但控制面撞上"ART 运行时与 SDK 桩不一致"**（模块 1.0.38）
 
 **一、真实结果（1.0.37 装上、重启后，2026-09-18 16:03）**

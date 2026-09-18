@@ -344,6 +344,14 @@ jobs:
       #   于是 CI 出的 0.2.12 官方 APK 里没有 `assets/module/` —— 用户点
       #   「一键刷入内置模块」只会看到"这个 APK 没有内嵌模块包"（本机自测有、
       #   官方包没有，属于最坏的一类不一致）。
+      - name: 构建内核 dex（模块包里必须有 bin/sunsetd.dex）
+        # ★ 2026-09-18：这一步以前**三个打包路径都没有**，于是发出去的模块包全都不含内核
+        #   （装上后 service.sh 只会记一句"内核：跳过（缺 bin/sunsetd.dex…）"，没人会注意）。
+        #   mkmodule 现在缺 dex 直接 die；脚本内部先 `gradle :sunsetd:jar` 再 d8。
+        #   见 docs/STATUS.md §3.10.49。
+        if: ${{ inputs.build_apks != false }}
+        run: node tools/build-sunsetd-dex.mjs
+
       - name: 打包模块 zip（供 APK 内嵌）
         if: ${{ inputs.build_apks != false }}
         run: |

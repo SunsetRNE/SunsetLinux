@@ -1361,3 +1361,23 @@ tail -20 /data/sunsetlinux/run/sunsetd.log    # 找"控制面已就绪"+"回环�
   所以"探针"要么进模块/进 dex，要么别做 —— **自检必须内建在交付物里**（`run/control-selftest` 就是这么来的）。
 - 容器里 `/apex`、`/system/framework/*.jar` **可以直接读**（`/system/bin` 不行）；dex 解析用 python
   自己的小解析器（本机 `dexdump` 是 x86_64，跑不了）。
+
+### 7. 收尾时抓到的第二个问题（同一轮，模块推到 1.0.39）：**发出去的模块包从来没有内核**
+
+对发布产物做最后核对的习惯救了一次：Release 上的 `sunsetlinux-module-1.0.38-bare.zip`
+**282,760 B**，而本地打的是 **1,060,692 B** —— 差的正是 dex 压缩后的大小。下下来一看，
+**没有 `bin/sunsetd.dex`**；用 `--allow-no-kernel` 打对照包是 **282,762 B**（差时间戳），实锤。
+
+- 三个打包路径（`ci.yml` 的 APK 内嵌包 / `offline-bundle.yml` 的 full / `publish.yml` 的 bare）
+  都**没先构建 dex**，而且每处都只是 `|| echo "::warning::"`；
+  `pipeline.yml` 的 prep 倒是建了，但同一句 warning 兜着 —— 而 `build-sunsetd-dex.mjs`
+  当时**先找 kotlin-stdlib 再构建 jar**，冷缓存 CI 上必然失败 ⇒ warning 一出、包照样发。
+- 后果同 0.2.6：装上后 `service.sh` 只记一句"内核：跳过（缺 bin/sunsetd.dex…）"，**内核静默消失**。
+
+**修法**：`mkmodule.sh` 缺 dex **直接 die**（要无内核包必须显式 `--allow-no-kernel`，且大声警告）；
+`build-sunsetd-dex.mjs` 调整顺序（先 jar 后 stdlib）使这一步可以硬失败；三个 CI 路径补齐构建 dex；
+`pipeline.yml` 改成无条件断言"包里必须有 `bin/sunsetd.dex`"。版本推 **1.0.39**（同一个号码下不许有两份不同字节）。
+
+交付：`/sdcard/Download/sunsetlinux-module-1.0.39{,-bare}.zip` + 《本轮交付说明-模块1.0.39-控制面修复.md》
+（1.0.38 的文件已从手机上撤掉，避免装错那份没内核的）。**内核 dex 与 1.0.38 完全相同**（`99a7833b…`），
+所以已经装了 1.0.38 的话，直接按 §5 验即可。

@@ -36,10 +36,15 @@ import { fileURLToPath } from 'node:url';
 
 const REPO = join(fileURLToPath(new URL('.', import.meta.url)), '..');
 
-// 内核 v2 的 dex：本套件默认指向一个**不存在**的路径，让"本包不含内核"这条路径**确定**出现 ——
-// 否则开发者本机一旦构建过 build/sunsetd/classes.dex，同一个断言就会随环境漂移（实测踩到）。
-// 要验"给了 dex 就一定进包"时，显式传 SUNSETLINUX_SUNSETD_DEX（见下面那一段）。
-process.env.SUNSETLINUX_SUNSETD_DEX = join(REPO, 'build', 'sunsetd', 'classes.dex.不存在');
+// 内核 v2 的 dex：默认指向**本套件自己造的一个假 dex**。
+//   · 为什么要显式指向：不指的话 mkmodule 会用 build/sunsetd/classes.dex —— 开发者本机
+//     构建过就有、没构建过就没有，同一个断言会随环境漂移（实测踩到）。
+//   · 2026-09-18 起 **缺 dex 会被 mkmodule 直接拒绝**（发布路径的静默残缺修法，见 §3.10.49），
+//     所以"没给 dex"那条路径改成断言**拒绝打包**，另有一条断言 `--allow-no-kernel` 的情形。
+const FAKE_DEX = join(REPO, 'build', 'selftest-fake-sunsetd.dex');
+mkdirSync(join(REPO, 'build'), { recursive: true });
+writeFileSync(FAKE_DEX, Buffer.alloc(200_000, 7));
+process.env.SUNSETLINUX_SUNSETD_DEX = FAKE_DEX;
 const FIXTURE = join(REPO, 'testdata/fixtures/erofs-head.bin');
 const LAYER_V1 = '9.9.9';    // 模块自带的（内置）版本
 const LAYER_V2 = '9.9.10';   // 频道里的更新版本
@@ -127,9 +132,30 @@ if (rDex.status === 0 && zipList(dexZip).includes('bin/sunsetd.dex')) {
 } else {
   bad(`内核 dex 没进包：${rDex.stderr || rDex.stdout}`);
 }
-const bareBuildLog = (r.stdout || '') + (r.stderr || '');
-if (/不含内核 v2/.test(bareBuildLog)) ok('没给 dex 时打包会明说「本包不含内核」（不静默）');
-else bad(`没给 dex 时没有出声：${bareBuildLog.slice(-200)}`);
+
+// ★ 2026-09-18 起：**没给 dex 必须拒绝打包**（发布路径的静默残缺 —— 三个 CI 路径都漏了构建 dex，
+//   发出去的模块包全都不含内核，而每处只是记一行 warning；见 docs/STATUS.md §3.10.49）。
+//   要打不含内核的包必须显式 `--allow-no-kernel`，那时才允许"出声并继续"。
+const noDexEnv = { SUNSETLINUX_SUNSETD_DEX: join(root, '不存在的内核.dex') };
+const noDexZip = join(root, `sunsetlinux-module-${MODULE_VER}-nodex.zip`);
+const rNoDex = sh(['module/mkmodule.sh', '--variant', 'bare', '--version', MODULE_VER, '--out', noDexZip],
+                  { env: noDexEnv });
+const noDexLog = (rNoDex.stdout || '') + (rNoDex.stderr || '');
+if (rNoDex.status !== 0 && /没有内核 dex/.test(noDexLog) && !existsSync(noDexZip)) {
+  ok('没给 dex 时**拒绝打包**（不许静默发出不含内核的模块）');
+} else {
+  bad(`没给 dex 时没有拒绝（status=${rNoDex.status}，产物在=${existsSync(noDexZip)}）：${noDexLog.slice(-200)}`);
+}
+const rAllow = sh(['module/mkmodule.sh', '--variant', 'bare', '--version', MODULE_VER,
+                   '--allow-no-kernel', '--out', noDexZip], { env: noDexEnv });
+const allowLog = (rAllow.stdout || '') + (rAllow.stderr || '');
+if (rAllow.status === 0 && existsSync(noDexZip) && /不含内核 v2/.test(allowLog)) {
+  ok('显式 --allow-no-kernel 时才出声并继续（且警告很响）');
+} else {
+  bad(`--allow-no-kernel 的行为不对（status=${rAllow.status}）：${allowLog.slice(-200)}`);
+}
+if (zipList(bareZip).includes('bin/sunsetd.dex')) ok('默认路径下的模块包也带上了内核 dex');
+else bad('默认路径下的模块包缺 bin/sunsetd.dex');
 
 const bareProp = zipGet(bareZip, 'module.prop') || '';
 if (/^variant=bare$/m.test(bareProp)) ok('bare 包的 module.prop 写了 variant=bare');
@@ -554,6 +580,7 @@ if (existsSync(official) && /"id":\s*"official"/.test(readFileSync(official, 'ut
 }
 
 rmSync(root, { recursive: true, force: true });
+rmSync(FAKE_DEX, { force: true });   // 本套件自造的假 dex，别留在 build/ 里冒充真实产物
 
 console.log('\n=========================================');
 console.log(`  通过 ${pass}，失败 ${fail}`);

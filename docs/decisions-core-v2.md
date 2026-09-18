@@ -69,6 +69,7 @@
 |---|---|---|
 | **C1** | prep 取"上次发布版本"时：站点 `stable/index.json` 失败 ⇒ 先退到 `releases/latest/download/index.json`，**再**保守 | 之前站点一抖就"当作全都变了"⇒ 整轮重发 1.3 GB 并**改写同一个 tag 的字节**（2026-09-18 04:52 真发生过）。核版本请看 `index.json.commit`，别假设 tag 不可变 |
 | **C2** | **不变式：要编 APK 且要内嵌离线包 ⇒ 离线包必须产出**（prep 里强制 `build_bundles=true`） | 编译节点是否取 `offline-bundles` 看 `embed_bundles`，而 ② 是否产出它看 `build_bundles`；不一致时会去下载不存在的制品 ⇒ 六个节点全红（2026-09-18 实跑）。更坏的是"跳过去包、发出不带环境的 APK"（0.2.6 事故） |
+| **C3** | **发布路径上"缺东西"一律红，不许 warning 兜着**：`mkmodule.sh` 缺内核 dex **直接 die**（要无内核包必须显式 `--allow-no-kernel`）；每个打包路径**自己**先构建 dex；`pipeline.yml` 无条件断言"模块包里有 `bin/sunsetd.dex`" | 2026-09-18 实锤：三个打包路径都没建 dex，**发出去的模块包全都不含内核**，而每处只是 `\|\| echo "::warning::"`（`build-sunsetd-dex.mjs` 当时先找 stdlib 再构建 jar，冷缓存 CI 上必然失败 ⇒ 警告一出、包照样发）。和 0.2.6 是同一种病：**发布路径的"优雅降级"= 静默发出残缺产物** |
 
 ---
 

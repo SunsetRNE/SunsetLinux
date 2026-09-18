@@ -38,6 +38,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: 构建内核 dex（模块包里必须有 bin/sunsetd.dex）
+        # 2026-09-18：以前所有打包路径都漏了这一步 ⇒ 发出去的模块全都不含内核（§3.10.49）。
+        run: node tools/build-sunsetd-dex.mjs
       - name: 打包模块 zip（APK 内嵌用的 bare 变体）
         run: |
           set -euo pipefail

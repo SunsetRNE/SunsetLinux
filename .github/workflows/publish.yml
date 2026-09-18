@@ -190,6 +190,9 @@ jobs:
 
           # ① bare：APK 内嵌用的那种（不带 DSH），也是"想自己控制 DSH 版本"的人的备用包。
           #    ★ 必须显式 --variant bare：默认变体是 full，而这里拿不到 dsh 层。
+          #    ★★ 先构建内核 dex：这一步以前没有 ⇒ Release 上的模块包全都不含内核
+          #       （2026-09-18 实锤：发布的 bare zip 282,760 B = 无 dex 的尺寸；§3.10.49）。
+          node tools/build-sunsetd-dex.mjs
           bash module/mkmodule.sh --version "$VER" --variant bare
 
           # ② 默认（full）：来自 ② bundles 节点的制品（它拿的是**签名频道里**的 dsh 层）。

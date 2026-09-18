@@ -10,6 +10,7 @@
 # 用法：
 #   bash module/mkmodule.sh [--version <ver>] [--out <zip 路径>] [--variant full|bare]
 #                           [--dsh-layer <dsh-<版本>.erofs.gz>] [--dsh-sums <SHA256SUMS.layers.txt>]
+#                           [--allow-no-kernel]
 # 产物（见 docs/module-variants.md §2）：
 #   full → dist/sunsetlinux-module-<ver>.zip        ← **默认版本**，自带 DSH（dsh/ 目录）
 #   bare → dist/sunsetlinux-module-<ver>-bare.zip   ← 不带 DSH，一条指令从频道装
@@ -19,6 +20,13 @@
 #   发现起不来，而这正是要消灭的失败模式。所以两条都硬拦：
 #     · full 且没给 --dsh-layer → 拒绝打包（提示改用 --variant bare）
 #     · bare 且给了 --dsh-layer → 也拒绝（不许"标 bare 却夹带"）
+#
+# ★ 内核 v2 的 dex（`bin/sunsetd.dex`）**默认必须进包**（2026-09-18 起）：
+#   2026-09-18 发现 CI 的三个打包路径（APK 内嵌的 bare / 发布用的 bare / 发布用的 full）
+#   都没先构建 dex，于是**发出去的模块包全都不含内核**，而每一处只是"记一行 warning"就过去了 ——
+#   装上后 `service.sh` 只会记一句"内核：跳过（缺 bin/sunsetd.dex…）"，没人会注意到。
+#   现在缺 dex 直接 die。确实要打"不含内核"的包（例如专门验 v1 回退）时显式给
+#   `--allow-no-kernel`，那时仍然会打一行很响的警告。
 # =============================================================================
 set -euo pipefail
 
@@ -30,6 +38,7 @@ OUT=""
 VARIANT="full"
 DSH_LAYER=""
 DSH_SUMS=""
+ALLOW_NO_KERNEL=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --version) VERSION="${2:-}"; shift 2 ;;
@@ -42,6 +51,7 @@ while [ $# -gt 0 ]; do
         --dsh-layer=*) DSH_LAYER="${1#*=}"; shift ;;
         --dsh-sums) DSH_SUMS="${2:-}"; shift 2 ;;
         --dsh-sums=*) DSH_SUMS="${1#*=}"; shift ;;
+        --allow-no-kernel) ALLOW_NO_KERNEL=1; shift ;;
         -h|--help) sed -n '2,20p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "未知参数：$1" >&2; exit 2 ;;
     esac
@@ -220,15 +230,21 @@ for f in "${BIN_REQUIRED[@]}"; do
     fi
 done
 [ "$missing" -eq 0 ] || die "有必需脚本缺失，拒绝打包（否则模块装上去是残缺的）"
-# ---- 内核 v2 的 dex（可选，但**缺了就要出声**）---------------------------------
+# ---- 内核 v2 的 dex（**默认必须有**：缺了就 die，不静默跳过）------------------
 # 内核跑在宿主 app_process 上（决策 D1）；产物由 tools/build-sunsetd-dex.mjs 生成。
-# 这里刻意不做"静默跳过"：0.2.6 的事故就是"该进包的没进、CI 只数数量所以全绿"。
+# 0.2.6 的事故是"该进包的没进、CI 只数数量所以全绿"；2026-09-18 又踩了同款：
+# 三个 CI 打包路径都没先构建 dex，发出去的模块包**全都不含内核**，而每处只是 warning。
+# 所以这里不再"可选"：要么有 dex，要么显式 `--allow-no-kernel`（会给警告）。
 SUNSETD_DEX="${SUNSETLINUX_SUNSETD_DEX:-$REPO_DIR/build/sunsetd/classes.dex}"
 if [ -f "$SUNSETD_DEX" ]; then
     install -m 0644 "$SUNSETD_DEX" "$STAGE/bin/sunsetd.dex"
     log "内核：已内嵌 sunsetd.dex（$(wc -c < "$STAGE/bin/sunsetd.dex" | tr -d ' ') B，来自 $SUNSETD_DEX）"
+elif [ "$ALLOW_NO_KERNEL" -eq 1 ]; then
+    log "⚠️⚠️ 内核：**按 --allow-no-kernel 打出不含内核 v2 的包**（没有 $SUNSETD_DEX）—— 只该用于验 v1 回退，不要发布"
 else
-    log "内核：⚠️ 没有 $SUNSETD_DEX —— 本包不含内核 v2（先跑 node tools/build-sunsetd-dex.mjs）"
+    die "没有内核 dex：$SUNSETD_DEX
+       先跑：node tools/build-sunsetd-dex.mjs（它内部会先 gradle :sunsetd:jar）
+       确实要打不含内核的包：显式加 --allow-no-kernel"
 fi
 
 log "bin/ 由目录派生：$bin_count 个 runtime/root 脚本 + layer-spec.sh + $((${#BIN_COMMON[@]})) 个 common"
