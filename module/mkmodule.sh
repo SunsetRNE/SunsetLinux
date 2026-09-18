@@ -149,7 +149,14 @@ if [ -n "$DSH_LAYER" ]; then
     DSH_SRC_NAME="$(basename "$DSH_LAYER")"
     case "$DSH_SRC_NAME" in
         *.erofs.gz) ;;
-        *) die "只接受 .erofs.gz（设备侧没有 zstd；裸镜像 201 MB 也不该塞进模块）——实际：$DSH_SRC_NAME" ;;
+        # ★ 为什么**不许**收 .zst（2026-09-18 真机实测，别"顺手优化"成 .zst 省 30 MB）：
+        #   展开这份载荷的是 module/customize.sh（装模块时）与 service.sh（开机自愈），
+        #   两者都跑在**宿主侧** `/system/bin/sh` 上 —— 那里既没有 `zstd`（toybox 也没这个
+        #   applet），也跑不了层里的 node（它是 glibc 二进制，PT_INTERP 要
+        #   /lib/ld-linux-aarch64.so.1，而 Android 宿主没有这个路径）。
+        #   ⇒ 收 .zst 的后果不是"慢一点"，而是**装完什么都没有**。详见 docs/STATUS.md §3.10.55 ②。
+        #   真要改这条路，前提是先随模块发一个宿主侧能跑的**静态**解压器（NDK 静态编译，约 1 MB）。
+        *) die "只接受 .erofs.gz（展开载荷的是宿主侧 shell：没有 zstd，也跑不了层里的 glibc node ⇒ .zst 解不开；裸镜像也不该塞进模块）——实际：$DSH_SRC_NAME，详见 docs/STATUS.md §3.10.55 ②" ;;
     esac
     DSH_VER="${DSH_SRC_NAME#dsh-}"
     DSH_VER="${DSH_VER%.erofs.gz}"

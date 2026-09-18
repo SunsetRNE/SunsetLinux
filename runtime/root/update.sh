@@ -196,6 +196,9 @@ write_node_verifier() {
 // 零第三方依赖，只用 Node 内置模块。**验签失败一律拒绝，不静默降级。**
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+// node:zlib 用**默认导入**（老 Node 上命名导入缺失的导出会直接 SyntaxError，
+// 那样连"本机解不了 .zst"都判断不了，整个验签器一起挂）。Node 24 起它自带 zstd。
+import zlib from 'node:zlib';
 
 const channelsPath = process.argv[2];
 const statePath = process.argv[3];
@@ -343,13 +346,31 @@ for (const c of enabled) {
         out.module = rec.module;
       }
     }
+    // 本机到底能不能解 .zst：① 系统 `zstd`（shell 探好传进来）② 跑这段 JS 的 node
+    // 自带 node:zlib zstd（Node 24 起）。两者都没有 ⇒ 只能用 .gz。
+    //
+    // ★ 这里**不再写死"本机没有 zstd"**（2026-09-18 修）：老写法永远只挑 url_gz，
+    //   于是 183d8d8 给 update.sh 加的 .zst 解压能力在**任何机器上都不会被用到**，
+    //   等于是死代码。产物选择必须跟"本机实际能力"一致，而不是跟"最弱设备"一致。
+    //   `SUNSET_NO_ZSTD=1` 是排障用的显式开关（强制走 .gz，也用来测这条分支）。
+    let zstdInNode = false;
+    try { zstdInNode = typeof zlib.createZstdDecompress === 'function'; } catch { zstdInNode = false; }
+    const canZst = process.env.SUNSET_NO_ZSTD !== '1'
+      && (process.env.SUNSET_HAVE_ZSTD === '1' || zstdInNode);
+    const isGzUrl  = (u) => /\.gz$/i.test(u ?? '');
+    const isZstUrl = (u) => /\.(zst|zstd)$/i.test(u ?? '');
     for (const L of manifest.layers ?? []) {
-      // 只挑我们这条路径能用的产物：本机没有 zstd，所以优先 url_gz
-      const url = L.url_gz || (/\.(gz)$/i.test(L.url ?? '') ? L.url : null)
-                || (/\.(zst|zstd)$/i.test(L.url ?? '') ? L.url : null);
-      const sha = L.sha256_gz || (url === L.url ? L.sha256 : null);
-      const size = L.size_gz || (url === L.url ? L.size : null);
-      const kind = /\.gz$/i.test(url ?? '') ? 'gzip' : /\.(zst|zstd)$/i.test(url ?? '') ? 'zstd' : 'none';
+      // 选一份**本机解得开**的产物：能解 .zst 就优先它（dsh 层 109.5 MB → 79.1 MB），
+      // 否则退回 url_gz；清单只有一份产物时（base/runtime 现在就是）照原样用。
+      let url = null, sha = null, size = null;
+      if (canZst && isZstUrl(L.url)) {
+        url = L.url; sha = L.sha256 ?? null; size = L.size ?? null;
+      } else if (L.url_gz) {
+        url = L.url_gz; sha = L.sha256_gz ?? null; size = L.size_gz ?? null;
+      } else if (L.url) {
+        url = L.url; sha = L.sha256 ?? null; size = L.size ?? null;
+      }
+      const kind = isGzUrl(url) ? 'gzip' : isZstUrl(url) ? 'zstd' : 'none';
       const cur = installed[L.id] ?? null;
       rec.layers.push({
         id: L.id, version: L.version, url, sha256: sha ?? null, size: size ?? null,
@@ -451,8 +472,12 @@ cmd_check() {
         return 1
     fi
     write_node_verifier
+    # 把"本机有没有系统 zstd"告诉验签器：它据此决定挑 .zst 还是 .gz
+    # （另一个能力来源是 node 自己，由脚本内部探测）。两者都没有 ⇒ 只挑 .gz。
+    local have_zstd=0
+    if have zstd; then have_zstd=1; fi
     local out=""
-    out="$("$node" "$NODE_VERIFIER" "$CHANNELS_JSON" "$STATE_JSON" 2>/dev/null)" || true
+    out="$(SUNSET_HAVE_ZSTD="$have_zstd" "$node" "$NODE_VERIFIER" "$CHANNELS_JSON" "$STATE_JSON" 2>/dev/null)" || true
     if [ -z "$out" ]; then
         emit '{"ok":false,"error":"检查更新失败（验签脚本没有输出）","hint":"可手动运行：linuxctl exec -- node /data/sunsetlinux/cache/.update-verify.mjs /data/sunsetlinux/etc/channels.json /data/sunsetlinux/etc/state.json"}'
         return 1

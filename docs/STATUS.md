@@ -519,6 +519,85 @@ su -c '/data/sunsetlinux/bin/linuxctl doctor'
 | 已装状态读不到时 | —— | **不给刷入按钮**，先让用户修 root 授权（与"读不到 ≠ 没装"一致） |
 | 重启 | —— | 只报告"重启后生效"（KernelSU 落 `modules_update/`），**App 不替用户重启**，脚本里有单测断言不许出现 `reboot` |
 
+### 3.10.55 「改了」不等于「发出去了」，也不等于「会被用到」：三件事一起查（2026-09-18 续）
+
+换对话框后照交接单第一件事核验 v0.3.16，结果**三条都跟预期不一样**。三条都是"看着像完成了、
+实际没生效"的同一类病，所以记在一起。
+
+#### ① run 56 绿了，但它**什么都没发**
+
+| run | 提交 | 结果 | 实际影响 |
+|---|---|---|---|
+| 55 | `a571ddf` | success | **发出 v0.3.16**（`releases/latest` → v0.3.16）|
+| 56 | `183d8d8`（选项 b） | success | **一个字节都没发** |
+
+判据不是"绿不绿"，而是 Release 里的 `index.json`：`run_number=55`、`commit=a571ddf`、
+`module_version=1.0.41`（模块 zip sha256 `d403353a…`，115,018,513 B）。
+原因在 `pipeline.yml:332` 的发布闸门 + `tools/ci-changeset.mjs:142`：
+**发布只在「版本号变了」时跑**（App 或模块，二者其一即可）；版本没变就只跑门禁。
+run 56 改的是 `runtime/` `module/` `rootfs/`，版本号一个没动 ⇒ `publish=false` ⇒ ⑤ 整块跳过。
+
+> 教训与 §5.1「改了 `/opt/sunsetlinux/*.sh` 不等于用户就拿到了」是**同一族**，这是第二层：
+> **推了 main ≠ 发出去了**。要发就必须动版本号（或手动 `force_publish`）。
+
+#### ② 选项 (b) 有一半**不可能成立**：宿主侧解不了 `.zst`（真机证据）
+
+交接单里"模块改内嵌 `.zst`"这一条建立在"解压时环境里的 node 一定在"这个假设上。实测不成立：
+
+| 证据 | 取法 | 结果 |
+|---|---|---|
+| 设备没有 zstd 命令 | `adb-shell ls /system/bin/zstd` | No such file or directory |
+| toybox 也没有这个 applet | AOSP `external/toybox` 的 help.h 里只有 `zcat`，无 `zstd` | 不成立 |
+| 设备上有 `bzip2`，但没有 `xz`/`lz4`/`7z` | `ls /system/bin/{xz,bzip2,lz4,7z}` | 只有 bzip2 |
+| 层里的 node 是 **glibc** 二进制 | `readelf -l build/rt-layer/opt/node/bin/node` | `[Requesting program interpreter: /lib/ld-linux-aarch64.so.1]` |
+| 而设备宿主**没有**这个解释器 | `adb-shell ls /lib/ld-linux-aarch64.so.1` | No such file or directory |
+| 三种后端都是私有命名空间 + chroot | `runtime/root/linuxctl.sh` 的 `run_in_env`（`nsenter` + `chroot`） | 宿主侧看不到 `/opt/node`（实测该路径不存在） |
+
+而 `module/customize.sh` 展开内置 DSH 时用的正是**宿主侧**的 `/system/bin/sh`
+（`service.sh` 的自愈同理）⇒ **模块内嵌 `.zst` 会当场解不开**，把"装完就有 DSH"变成"装完什么都没有"。
+
+⇒ 结论：**模块里的 dsh 载荷必须保持 `.gz`**（`module/mkmodule.sh` 的 `.erofs.gz` 白名单**保留**，
+并把这个理由写进那里的报错文案）。想让模块吃 `.zst`，前提是**随模块发一个宿主侧能跑的静态
+解压器**（NDK 静态编译，约 1 MB）——那是一个独立的决定，不是"顺手改个后缀"。
+
+#### ③ 而 (b) 真正落地的那一半，是**死代码**
+
+`update.sh` 的验签器里产物选择写死成"优先 `url_gz`"（原话：*本机没有 zstd，所以优先 url_gz*）。
+于是 183d8d8 辛苦加的"node 兜底解 `.zst`"**在任何机器上都不会被走到** —— 能力和选择逻辑互相矛盾。
+
+**改法**：选择跟随**本机实际能力**，而不是跟随"最弱设备"：
+
+- 能力两个来源：系统 `zstd`（shell 探好，经 `SUNSET_HAVE_ZSTD` 传进验签器）+ 跑这段 JS 的 node
+  自带 `node:zlib` zstd（Node 24 起，用 `import zlib from 'node:zlib'` **默认导入**探测 ——
+  老 Node 上命名导入缺失导出会直接 SyntaxError，整个验签器一起挂）。
+- 能解 ⇒ 挑 `url`（`.zst`）；不能 ⇒ 挑 `url_gz`；清单只有一份产物（base/runtime 现在也两份都有）⇒ 照原样用。
+- `SUNSET_NO_ZSTD=1` 显式强制 `.gz`（排障用，同时让这条分支可测）。
+
+**验证（三条都用线上那份**真签名**清单 `file://` 直读，不是桩）**：
+
+| 场景 | 结果 |
+|---|---|
+| 本机 node 自带 zstd | base/runtime/dsh **三层全挑 `.zst`**，`signature_valid=true` |
+| `SUNSET_NO_ZSTD=1` | 三层全退回 `.gz` |
+| 只有系统 zstd（`SUNSET_HAVE_ZSTD=1`） | dsh 挑 `.zst` |
+
+过滤器**真跑**过一次 443 MB 的层（不是小样本往返）：`dsh-0.1.6-alpha.2.erofs.zst`（79,078,686 B）
+→ 解出 443,654,144 B，sha256 `1f1e5dd5…` 与裸镜像**逐字节一致**，耗时 **16 秒**（流式，不占内存峰值）。
+
+`runtime/root/selftest.sh` **122 → 126 通过 / 0 失败**（新增 4 条：探测 node zstd、能力传参、
+关闭开关、**反面断言**"不许回到写死 url_gz 的老写法"）。反面验证：把老写法放回一份副本，
+第 2、4 条如期判红 ✓。
+
+#### 仍然待判的两件（都没动）
+
+1. **模块 1.0.41 的内容在两次流水线里不一样**（run 55 的没有 `bin/zstd-filter.mjs`，
+   run 56 的有但没发出去 —— 手机 `/data/adb/modules/sunsetlinux/bin/` 实测确实没有这个文件）。
+   同版本号两种内容违反"内容变了就 +1"。因为 APK 内嵌的是 bare 模块 zip，**只升模块号会让
+   App 版本不变而 APK 字节变**，所以正解是 **App 0.3.17 + 模块 1.0.42 + runtime 层 1.0.2 一起发**
+   （`runtime/root/update.sh` 也在 runtime 层里，它改了而层版本还是 1.0.1，同一问题）。
+2. **真机端到端**（0.1.6 的 WebView/客户端插件那唯一一环）仍未做；手机现装的是
+   runtime 1.0.0 / dsh rc.1+rc.2 / 模块 1.0.41。
+
 ### 3.10.54 设备侧也能解 `.zst`：CLI 不再被 `.gz` 绑死（选项 b，2026-09-18）
 
 **为什么做**：0.1.6 的 dsh 层 `.gz` 产物 **109.5 MB**，同时撞上三件事 ——
@@ -537,8 +616,13 @@ GitHub 的 git 单文件 100 MB 硬限（`layers` 分支与 `gh-pages` 都推不
 所以"两种都发"的规矩**不变**；变的只是**dsh 这类"装它时 node 一定已经在了"的层**：
 CLI 现在可以走 `.zst`（79.1 MB 而不是 109.5 MB）。App 侧本来就走 `.zst`，不受影响。
 
-> 后续（等模块 1.0.41+ 铺开）：dsh 的 `.gz` 可以从清单里摘掉、模块也可以改内嵌 `.zst`（zip 回落到 ~79 MB），
-> `layers-release.yml` 里那个"分片过 git 再拼回"的权宜之计就能退休。
+> 后续（等模块 1.0.41+ 铺开）：dsh 的 `.gz` 可以从清单里摘掉，`layers-release.yml` 里那个
+> "分片过 git 再拼回"的权宜之计就能退休。
+>
+> ⚠️ **但"模块也改内嵌 `.zst`"这一条已经作废**（2026-09-18 实测）：宿主侧既没有 `zstd`
+> 也没有能跑的 node（层里的 node 要 glibc 的 `/lib/ld-linux-aarch64.so.1`，Android 宿主没有），
+> 而 `customize.sh` 展开载荷正在宿主侧 ⇒ 模块载荷**必须保持 `.gz`**。详见 §3.10.55 ②。
+> 同一节 ③ 还记了另一件事：本节这段能力当时是**死代码**（选择逻辑写死 `url_gz`），已修。
 
 ### 3.10.53 移植目标版本推进到 DSH **0.1.6-alpha.2**：两处"启动即失败"的坑 + 层重打 + 频道（2026-09-18）
 

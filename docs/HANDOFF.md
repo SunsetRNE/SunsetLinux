@@ -1571,9 +1571,12 @@ App 版本 **0.3.15（versionCode 31）**；模块不变（1.0.40）。
 
 ### 待办（按优先级，都不阻塞已上线的东西）
 
-1. **B 的第二半**（用户已选 B）：模块改内嵌 **`.zst`**（115 MB → ~79 MB）+
-   `cmd_dsh_builtin` 的解压也走 node 兜底（`bin/zstd-filter.mjs` 已经随模块发了）。
-   做完之后 `layers-release.yml` 的"分片过 git 再拼回"就能退休、dsh 的 `.gz` 也能从清单里摘掉。
+1. ~~**B 的第二半**（用户已选 B）：模块改内嵌 **`.zst`**（115 MB → ~79 MB）~~ ⇒
+   **此条已作废**（2026-09-18 真机实测）：展开模块载荷的是**宿主侧** shell，那里没有 `zstd`、
+   也跑不了层里的 glibc node（要 `/lib/ld-linux-aarch64.so.1`，Android 宿主没有）
+   ⇒ 模块载荷**必须保持 `.gz`**。真想让模块吃 `.zst`，前提是随模块发一个**静态**解压器
+   （NDK 静态编译，约 1 MB）——那是个独立决定。见 `docs/STATUS.md` §3.10.55 ②。
+   （(b) 的另一半"CLI 能解 `.zst`"保留，但当时是**死代码**，已在本轮修好：§3.10.55 ③）
 2. **真机端到端**：把两个新层更到手机、用 App 的 WebView 打开 0.1.6 的界面
    （移动端是**客户端**插件：服务端起得来 ≠ 浏览器里没 JS 报错；已验的是 import 4/4、
    页面模块清单含 `dsh-web-mobile/client.js`、注入的 client 包全是 0.1.6-alpha.2）。
@@ -1751,3 +1754,61 @@ App 的 `ModuleUpdate` 拼的是 `releases/download/<tag>/<name>`（退 `release
 
 边界：base/runtime 仍只发 `.gz`（自举期没有 node ⇒ "两种都发"不变）；
 dsh 这类"装它时 node 一定在"的层，CLI 现在可以走 `.zst`（79.1 MB 而不是 109.5 MB）。
+
+---
+
+# ★★ 第 52 轮（2026-09-18 14:xx，换对话框后）：核验 v0.3.16 ⇒ 三条「看着完成了、其实没生效」
+
+## 一句话
+
+**换对话框前那两条流水线都绿了、v0.3.16 确实发出去了**（离线包实测内置 `dsh 0.1.6-alpha.2` +
+`runtime 1.0.1`）；但顺着核验扒出**三条"以为完成了、实际没生效"**，其中两条已修，
+第三条（要不要发一版把 (b) 真正推出去）**等你拍板**。
+
+## 1. 核验结果（都有实物证据）
+
+| 事项 | 结论 |
+|---|---|
+| run 55（`a571ddf`）/ run 56（`183d8d8`） | **都 success**；`releases/latest` = **v0.3.16** |
+| 6 个 APK + 6 个离线包 + 模块 1.0.41（full/bare） | 都在 Release 上 |
+| 离线包头里的内置版本 | `root-full` / `proot-full` 实测 `dsh_version=0.1.6-alpha.2`、`runtime_version=1.0.1`、`base=24.04.3-l1` ✓ |
+| **已发布**模块 zip 里的启动器 | 用 HTTP range 抠出 `bin/supervise.sh` 单独 inflate：启动行确实是 `node --expose-internals <dsh> web`（9 处提及）✓ |
+
+## 2. 三条「没生效」
+
+1. **run 56 绿了但一个字节都没发**：Release 的 `index.json` 写着 `run_number=55`、`commit=a571ddf`。
+   发布闸门是"**版本号变了才发**"（`tools/ci-changeset.mjs:142`），183d8d8 一个版本号都没动。
+   ⇒ **选项 (b) 当时根本没到设备**。（教训第二层：推 main ≠ 发出去了。）
+2. **模块内嵌 `.zst` 这条路不成立**（已作废，见上面待办 1）：宿主侧没有 `zstd`（toybox 也没有）、
+   层里的 node 是 glibc 二进制而 Android 宿主没有 `/lib/ld-linux-aarch64.so.1`，
+   而展开载荷的 `customize.sh` 正在宿主侧。
+3. **而 (b) 真落地的那一半是死代码**：验签器的产物选择写死"优先 `url_gz`" ⇒ 新加的
+   `.zst` 解压能力在任何机器上都不会被走到。
+
+## 3. 本轮改了什么（都在工作区，未推）
+
+| 文件 | 改动 |
+|---|---|
+| `runtime/root/update.sh` | 产物选择**跟随本机能力**：系统 `zstd`（`SUNSET_HAVE_ZSTD` 传入）或 node 自带 `node:zlib` zstd ⇒ 挑 `.zst`，否则退 `.gz`；`SUNSET_NO_ZSTD=1` 可强制 `.gz`（排障 + 可测）。`node:zlib` 用**默认导入**探测（老 Node 上命名导入会 SyntaxError，把整个验签器带走） |
+| `runtime/root/selftest.sh` | 新增 4 条断言（含**反面断言**：不许回到写死 `url_gz` 的老写法）⇒ **126 通过 / 0 失败** |
+| `module/mkmodule.sh` | `.erofs.gz` 白名单保留，但把"为什么不能收 `.zst`"写进报错与注释（含真机证据） |
+| `docs/STATUS.md` | 新增 §3.10.55（三条发现 + 验证矩阵）；§3.10.54 的"模块也可改内嵌 .zst"标注作废 |
+
+**验证力度**（不是桩）：用线上那份**真签名**清单（`file://` 直读）跑真验签器，三条分支各自对拍；
+再用**真产物**跑过滤器：79,078,686 B 的 `.zst` → 443,654,144 B，sha256 `1f1e5dd5…` 与裸镜像
+逐字节一致，**16 秒**（流式）。闸门：`shell-compat` ✓、`cmp-consistency` 16/16 ✓、
+`module-variant-selftest` 43/0 ✓、`runtime/root/selftest.sh` 126/0 ✓。
+
+## 4. 待你拍板
+
+**要不要发一轮把 (b) 真推出去？** 三个版本号得一起动（只动一个会造成"App 版本没变但 APK 字节变了"）：
+
+- **App 0.3.17**（内嵌的 bare 模块 zip 变了 ⇒ APK 字节变，必须跟着动）
+- **模块 1.0.42**（`bin/update.sh` + `bin/zstd-filter.mjs`；现装的 1.0.41 实测**没有**后者）
+- **runtime 层 1.0.2**（`update.sh` 就在 runtime 层里，它改了而层版本还是 1.0.1 = 同版本两种内容）
+
+发出去后用户侧能拿到：CLI/WebUI 更新 dsh 时走 `.zst`（109.5 MB → 79.1 MB）。
+
+**另一件（随时可做，需要你在手机边上）**：真机端到端 —— 手机现在还装着 runtime 1.0.0 /
+dsh rc.1+rc.2 / 模块 1.0.41，把三个新层更上去，用 App 的 WebView 打开 0.1.6 界面
+（移动端是**客户端**插件，服务端起得来 ≠ 浏览器里没 JS 报错，这是唯一还没验的一环）。

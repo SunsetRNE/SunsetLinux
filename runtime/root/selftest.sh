@@ -1573,6 +1573,32 @@ else
     bad "找不到 zstd-filter.mjs（CLI 侧将无法解 .zst）"
 fi
 
+# 产物选择必须**按本机能力**，不能写死「本机没有 zstd 所以永远挑 url_gz」。
+# 背景（2026-09-18 实测）：update.sh 的 .zst 解压能力加好了，但选择逻辑写死 url_gz
+# ⇒ 那段能力在任何机器上都不会被走到（**死代码**），dsh 层每次更新照旧白下 34 MB。
+head_ "单元：产物选择跟随本机能力（能解 .zst 才挑 .zst）"
+if grep -q "typeof zlib.createZstdDecompress === 'function'" "$SELF_DIR/update.sh"; then
+    ok "验签器探测 node 自带的 zstd（不依赖外部命令）"
+else
+    bad "验签器没有探测 node:zlib 的 zstd 能力（选择会退化成写死 .gz）"
+fi
+if grep -q 'SUNSET_HAVE_ZSTD="\$have_zstd"' "$SELF_DIR/update.sh"; then
+    ok "cmd_check 把「本机有没有系统 zstd」传给验签器"
+else
+    bad "update.sh 没有把系统 zstd 能力传给验签器"
+fi
+if grep -q "process.env.SUNSET_NO_ZSTD !== '1'" "$SELF_DIR/update.sh"; then
+    ok "有显式关闭开关（排障用，也让这条分支可测）"
+else
+    bad "缺少 SUNSET_NO_ZSTD 开关（无法强制走 .gz，分支不可测）"
+fi
+# 反面断言：老写法（一上来就 `L.url_gz || …` 定产物）不许回来
+if grep -qF 'L.url_gz || (/\.(gz)$/' "$SELF_DIR/update.sh"; then
+    bad "产物选择又写死成「优先 url_gz」了（.zst 能力会退化成死代码）"
+else
+    ok "产物选择里没有「写死 url_gz」的老写法"
+fi
+
 
 # ---------------------------------------------------------------------------
 # 启动器契约：`supervise.sh` 必须用 `node --expose-internals <dsh> web` 起 DSH
