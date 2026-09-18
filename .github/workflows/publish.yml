@@ -496,14 +496,14 @@ jobs:
                       f'<div class="card"><h3>KernelSU 模块 {html.escape(str(mod))} · {html.escape(str(mv.get("id","")))}'
                       f'{tag}</h3>'
                       f'<p class="tagline">{html.escape(MOD_DESC.get(mv.get("id",""), ""))}</p>'
-                      f'<a class="dl" href="{html.escape(str(mv.get("name") or ""))}">下载模块 zip'
+                      f'<a class="dl" href="{html.escape(bundle_base + "/" + str(mv.get("name") or ""))}">下载模块 zip'
                       f'（{human(mv.get("size") or f.get("size") or 0)}）</a>'
                       f'<p class="kv">sha256 {html.escape(str(mv.get("sha256","")))}</p></div>')
               modcard = "\n".join(parts)
           elif modzip:
               modcard = (f'<div class="card"><h3>KernelSU 模块 {html.escape(str(mod))}</h3>'
                          f'<p class="tagline">装完<b>重启一次</b>：模块负责开机自启与设备侧构建入口。</p>'
-                         f'<a class="dl" href="{html.escape(modzip["name"])}">下载模块 zip'
+                         f'<a class="dl" href="{html.escape(bundle_base + "/" + modzip["name"])}">下载模块 zip'
                          f'（{human(modzip["size"])}）</a></div>')
 
           rows = "".join(
@@ -612,7 +612,27 @@ jobs:
           #   而每个版本 660 MB 的 .bin 塞进 gh-pages 会：① 每次发布多推 660 MB（~80 s）；
           #   ② **每个版本往分支里再添 660 MB**（keep_files 只增不删）→ 早晚撞 Pages 的 1 GB 限制。
           #   历史的那些 .bin 由 cleanup_pages 输入清一次（见文件末尾那一步）。
-          find dist/_publish -maxdepth 1 -type f -not -name '*.apk' -not -name '*.bin' -exec cp -v {} "$SITE/$DIR/" \;
+          # ★ 模块 zip 也**只挂 Release**（2026-09-18 实测事故：full 变体内嵌 dsh 层，
+          #   dsh 涨到 109.5 MB 后 zip 变成 115 MB > git 单文件 100 MB 硬限 ⇒
+          #   `git push gh-pages` 被 `GH001: Large files detected` 拒收，
+          #   **整条发布失败**（Release 那一步也被跳过，0.3.16 根本没发出去）。
+          #   站点上那份本来就没人读：App 的 ModuleUpdate 拼的是
+          #   `releases/download/<tag>/<name>`（并退 `releases/latest/download`），
+          #   下载页已同步改成指向 Release（见下面的 modcard）。
+          find dist/_publish -maxdepth 1 -type f \
+               -not -name '*.apk' -not -name '*.bin' -not -name '*.zip' \
+               -exec cp -v {} "$SITE/$DIR/" \;
+          # 发布前**自己先拦**：gh-pages 是 git 分支，单文件 100 MB 是硬限。
+          # 与其让 `git push` 用 `GH001` 拒收（错误里只有一个文件名，看不出"该挂 Release"），
+          # 不如在这里带尺寸与处置建议报红。
+          oversize="$(find "$SITE" -type f -size +99M | sort || true)"
+          if [ -n "$oversize" ]; then
+            echo "::error::以下文件 >99 MB，会被 gh-pages 的 git 单文件 100 MB 硬限拒收："
+            while IFS= read -r f; do echo "::error::  $(stat -c %s "$f") B  $f"; done <<< "$oversize"
+            echo "::error::处置：APK / 离线包 .bin / 模块 zip 一律只挂 Release（App 与下载页都指向 Release）"
+            exit 1
+          fi
+          echo "站点待推文件都 < 99 MB ✓"
           # 频道清单：**站点根**的 /channel/（不是 <通道>/channel/），验签不过就不带；
           # 不带 = gh-pages 上旧的频道目录原样保留（keep_files 只增不删），不会被清成空目录。
           if [ "${{ steps.chan.outputs.include }}" = "1" ]; then

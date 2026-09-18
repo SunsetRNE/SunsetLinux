@@ -1667,3 +1667,30 @@ App 版本 **0.3.15（versionCode 31）**；模块不变（1.0.40）。
 - `runtime/root/selftest.sh` → **118 通过 / 0 失败**（新增 2 条）
 - `runtime/proot/selftest.sh` → **20 通过 / 0 失败**（新增 2 条）
 - 反面验证：把 `--expose-internals` 从脚本里删掉，断言会判红 ✓
+
+### 补（同轮）：发布路径的第二个 100 MB 硬限 —— **模块 zip**
+
+13:46 那轮流水线**红在最后一步**（`gh-pages` 推送被拒），实测原文：
+
+```
+remote: error: File stable/sunsetlinux-module-1.0.41.zip is 109.69 MB;
+              this exceeds GitHub's file size limit of 100.00 MB
+ ! [remote rejected] gh-pages -> gh-pages (pre-receive hook declined)
+```
+
+根因链：模块 **full 变体内嵌 dsh 层** → dsh 层 0.1.6 涨到 109.5 MB →
+模块 zip 变成 **115.0 MB** → 站点（gh-pages，git 分支）拒收 → **整条发布失败**
+（连 `发布到 GitHub Releases` 那一步都被跳过 ⇒ **0.3.16 根本没发出去**）。
+
+**修法（本轮已改，未依赖任何新机制）**：站点上那份模块 zip **本来就没人读** ——
+App 的 `ModuleUpdate` 拼的是 `releases/download/<tag>/<name>`（退 `releases/latest/download`），
+只有下载页的链接还指着站点。所以：
+
+1. `publish.yml` 合成站点树时**也排除 `*.zip`**（与 `.apk` / `.bin` 同样只挂 Release）；
+2. 下载页的模块链接改为 Release 绝对地址（与 APK 用 `apk_url` 同理）；
+3. 加一条**发布前自检**：站点树里出现 >99 MB 的文件就直接报红并列出尺寸，
+   而不是等 `git push` 用 `GH001` 拒收（那时只有一个文件名，看不出"该挂 Release"）。
+
+> 这与用户选的 **(b) 让 CLI 侧能解 `.zst`** 是两件事，但方向一致：
+> (b) 做完之后模块可以内嵌 **`.zst`（79 MB）** 而不是 `.gz`（109.5 MB），
+> zip 自然回落到 ~79 MB，连"排除"都不再必要 —— 那一步留到 (b) 落地时一起做。
