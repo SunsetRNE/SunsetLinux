@@ -1484,3 +1484,57 @@ App 版本 **0.3.15（versionCode 31）**；模块不变（1.0.40）。
 2. P2 主线：App 的 `start/stop` 切到 `su -c … Ctl submit …` + `Ctl wait`（内核在线时），
    否则退回 v1 命令 —— 客户端地基（模块 1.0.40 的 `Ctl`）已经就位；
 3. 事件流 `subscribe`；免 root 前台服务（D2）。
+
+## 收束（2026-09-18 10:3x，换对话框前）—— 现状、待你反馈、下一步
+
+### 0. 换对话框后，按这个顺序读（5 分钟恢复上下文）
+
+1. **本节**（当前落点 + 待办）；
+2. `docs/STATUS.md` **§3.10.50 → §3.10.52**（最近三件事：P1 真机闭环 / 发布路径静默残缺 / DSH 网页全屏渲染）；
+3. `docs/decisions-core-v2.md`（这一轮新增：**A10** 设备运行时事实优先于 SDK 桩、**B1** 通道分层、
+   **B11** 客户端也必须走 LocalSocket、**C3** 发布路径缺东西一律红）；
+4. `app/VERSION-NOTES.md` 最后一行（App 0.3.15 改了什么）。
+
+### 1. 现在的事实（都有证据，别凭印象）
+
+| 项 | 状态 |
+|---|---|
+| 内核 v2 · P1 | ✅ **真机闭环**（模块 1.0.39 实测）：`run/control-transport=android-local`、`run/control-selftest=ok:android-local`、`control.sock` 存在且 `srw-------`、`state.json`=`running/foreign-observer/generation=1`、`sunsetd` 常驻 |
+| 发布路径 | ✅ 修好（1.0.39 起，CI 发出去的模块包真的带内核 dex；`mkmodule.sh` 缺 dex **直接拒绝**；APK 内嵌那份也验过） |
+| P2 地基 | ✅ 模块 **1.0.40**：宿主侧客户端 `Ctl`（status/ping/version/submit/job/wait/raw，退出码 0/2/3/4/5）+ 开机客户端自检；内核单测 **50/0** |
+| DSH 网页渲染 | ✅ App **0.3.15**：覆盖整窗 + 沉浸系统栏 + 常驻悬浮「返回壳」；App 单测 **278/0**；Release v0.3.15（6 APK）已发 |
+| 设备现状 | App **0.3.15 已装**（versionCode 31，18:16）；模块仍 **1.0.39**（1.0.40 未装）；`run/ctl-status.json` 尚不存在（那是 1.0.40 才写的） |
+
+### 2. 待你做的两件事（都不阻塞后续开发）
+
+1. （推荐）装模块 **1.0.40** + 重启，回两行：
+   `cat /data/sunsetlinux/run/ctl-status.json`（期望 `{"ok":true,…,"protocol":1}`）
+   `tail -3 /data/sunsetlinux/run/service.log`（找 `内核客户端自检（Ctl status）：rc=0`）
+   —— 验的是 **P2 要走的那条客户端路**（App 以后用 `su` 起同一个客户端提交作业）。
+2. 试 App 0.3.15 的 DSH 全屏：顶栏 DSH 图标 → 网页铺满（含系统栏之下）、左上角「返回壳」、系统返回也能回。
+   有问题就把现象告诉我（截图/描述均可）。
+
+### 3. 下一步（P2 主线，地基已就位）
+
+1. **App 的 `start/stop` 切到 socket**（`app/app/.../core/LinuxCtl.kt`）：
+   内核在线 ⇒ `su -c "…app_process … io.github.sunsetrne.sunsetd.Ctl submit <action>"` 拿 jobId，
+   再 `Ctl wait <jobId> <秒>`；**连不上（rc=3）或任何异常 ⇒ 退回 v1 命令**（D4 的降级路径必须留着）。
+   `status` 继续走 `linuxctl`（内核的 `status` op 是内核形态，UI 要的是 v1 形态 —— 这两者别混）。
+   目的：把"命令永不返回"那类事故与 App 解耦（作业归内核所有，App 挂了作业照样跑完）。
+2. HTML5 **网页内**全屏（`WebChromeClient.onShowCustomView/onHideCustomView`）—— 见 §3.10.52 末段。
+3. 事件流 `subscribe`（App 不再轮询）；免 root 前台服务（D2，让 proot 也有常驻内核）。
+4. 遗留小项（不影响功能，但"我验的就是发出去的"这条不成立）：
+   `tools/build-sunsetd-dex.mjs` 找 kotlin-stdlib 是"取 Gradle 缓存里最新的" ⇒ 本机与 CI 可能选到
+   不同版本，同一个 commit 打出的 dex 字节不同（1.0.39 实测：本机 2,508,864 B / CI 2,527,684 B）。
+   修法：优先取 `KOTLIN_VERSION` 那个版本，取不到再退"最新"。
+
+### 4. 这一轮的坑（别再犯，都写进 §3.10.4x 了）
+
+- **SDK 桩 ≠ 设备运行时**：设备 ART 里 `ServerSocketChannel.open(ProtocolFamily)` **没有**、
+  `SocketChannel.open(UnixDomainSocketAddress)` **也不通** ⇒ 服务端与客户端都只能 `android.net.LocalSocket`。
+  桌面单测看不见这条差异（34 条全绿照样在真机崩）。
+- **发布路径的"优雅降级" = 静默发残缺产物**：`|| echo "::warning::"` 让三个打包路径都没带内核 dex，
+  发出去的模块装上后内核静默消失（与 0.2.6 同款）。
+- 跑 App / 内核单测必须 `LANG=C.UTF-8 LC_ALL=C.UTF-8`（中文测试方法名 + Gradle 守护进程 ASCII locale 会炸）。
+- 动 UI inset 前先看 `UiInsetsContractTest` / `ShellLayoutContractTest` / `DshFullscreenContractTest`
+  （源码级契约，CI 会拦；不是形式主义，每条都对应一次用户看得见的问题）。
