@@ -1433,3 +1433,54 @@ P2 = "App 改成提交作业 + 订阅"，但 **socket 是 `0600 root`**（D3，�
    + `Ctl wait <id>`，否则退回 v1 命令（D4 的降级路径必须留着）；
 3. 事件流（`subscribe`）—— App 不再轮询；
 4. 免 root 版（D2 前台服务）让 proot 也有常驻内核，App 的 socket 路径才能对它也生效。
+
+## 第 51 轮（2026-09-18 10:xx）：DSH 网页改为**覆盖整窗** + 沉浸 + 悬浮「返回壳」（App 0.3.15）
+
+**用户诉求（原话）**：「调整 DSH 的 web 页面渲染（网页渲染逻辑）在应用"壳"上渲染逻辑调整，
+原来的约束在应用内改为**覆盖应用全屏渲染显示**，允许返回"壳"（无论免 root 还是 root 模式都存在这类设计问题）。」
+
+### 1. 改之前是什么形状（三层 chrome）
+
+DSH 是外壳里的一个 tab，**夹在顶栏与底栏之间**（`AppShell` 里还专门写着"底栏放内容下方
+（不遮挡网页）"），通知栏入口的 `DshWebActivity` 又用 `safeDrawingPadding()` 内缩 + 顶栏一行"返回"。
+加上网页自带的头部，真机上整块网页应用只剩屏幕中间一条。**root / 免 root 是同一个 App 的
+同一段渲染代码** —— 所以这是"两类模式都有"的同一个问题，不需要按 edition 分叉。
+
+### 2. 改之后
+
+浮层（铺到屏幕四边、含系统栏之下）+ 收起系统栏 + 常驻悬浮「返回壳」键；
+返回语义不变（网页有历史先回网页历史，否则回壳，跟手）。
+
+| 文件 | 作用 |
+|---|---|
+| `ui/DshFullscreen.kt`（新） | 纯策略：`coversWindow` / `hidesSystemBars` / `needsBackAffordance`（判据只有一处） |
+| `ui/ImmersiveBars.kt`（新） | 窗口级沉浸（离开必须恢复，否则壳其它页停在沉浸态） |
+| `ui/DshWebPane.kt` | `fullBleed` 形参 + 悬浮「返回壳」键（唯一避开系统栏的控件） |
+| `ui/AppShell.kt` | DSH 改浮层（在 `MessageBanner` **之前** ⇒ 失败提示仍浮在网页之上） |
+| `DshWebActivity.kt` | 通知栏入口同形状 |
+
+### 3. 同类项目的借鉴（用户问了"有没有这类问题"）
+
+- **KernelSU 自己也踩过**：PR #3190 把 manager 的 WebUI 宿主重构成 Compose，并把
+  `enableInsets` 改名 `enableEdgeToEdge` —— 宿主一旦用 inset 内缩，模块网页同样只剩中间一块。
+- **Android 官方为 WebView 的窗口边衬区单开一页**：WebView 不会自己处理系统栏 inset，
+  边到边之后要么内容被压、要么宿主必须喂 inset。
+- **Chromium 的 WebView 全屏文档**：网页里的 HTML5 `requestFullscreen` **不会自己生效**，
+  宿主必须实现 `onShowCustomView/onHideCustomView`。
+- 通病都是"全屏之后怎么回去"（Andronix 的 AndroVNC 这类 Web-as-app 也一样）。
+
+★ **还没做的一格**：HTML5 全屏（`onShowCustomView/onHideCustomView`）没接 —— 网页里点"全屏"
+现在不会铺满。这与"网页覆盖 App 窗口"是两件事，做法有 Chromium 的标准路径，列进下一步。
+
+### 4. 回归与交付
+
+App 单测 **278/0**（新增 `ui/DshFullscreenContractTest` 7 条；`UiInsetsContractTest` 的 inset
+委托表补登 `DshWebActivity.kt → ui/DshWebPane.kt`，并写清"整屏刻意不内缩，只给悬浮键留 inset"）。
+App 版本 **0.3.15（versionCode 31）**；模块不变（1.0.40）。
+
+### 5. 下一步
+
+1. HTML5 全屏（`onShowCustomView`）+ 「全屏时隐藏悬浮键、滑动唤出」这类细节；
+2. P2 主线：App 的 `start/stop` 切到 `su -c … Ctl submit …` + `Ctl wait`（内核在线时），
+   否则退回 v1 命令 —— 客户端地基（模块 1.0.40 的 `Ctl`）已经就位；
+3. 事件流 `subscribe`；免 root 前台服务（D2）。

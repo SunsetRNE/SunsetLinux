@@ -90,6 +90,10 @@ class UiInsetsContractTest {
         // 所以它必须一起登记：否则它自己漏了 safeDrawingPadding 也没人拦（内容会被状态栏压住）
         "LauncherActivity.kt" to listOf("ui/AppShell.kt", "ui/BootPlaceholder.kt", "ui/ProotBootstrapScreen.kt"),
         "WelcomeActivity.kt" to listOf("ui/WelcomeScreen.kt"),
+        // DSH Web 是**覆盖整窗**的（用户要求：网页铺满整个应用，不再夹在顶栏/底栏之间）——
+        // Activity 自己刻意**不**内缩，网页要画到系统栏之下。此时唯一需要避开系统栏的
+        // 是面板里那颗悬浮「返回壳」键，所以契约落到面板上（它必须含 statusBarsPadding）。
+        "DshWebActivity.kt" to listOf("ui/DshWebPane.kt"),
     )
 
     @Test

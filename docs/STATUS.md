@@ -510,6 +510,52 @@ su -c '/data/sunsetlinux/bin/linuxctl doctor'
 | 已装状态读不到时 | —— | **不给刷入按钮**，先让用户修 root 授权（与"读不到 ≠ 没装"一致） |
 | 重启 | —— | 只报告"重启后生效"（KernelSU 落 `modules_update/`），**App 不替用户重启**，脚本里有单测断言不许出现 `reboot` |
 
+### 3.10.52 DSH 网页改为**覆盖整窗**渲染 + 回壳出口（App 0.3.15）
+
+**用户原话**：「调整 DSH 的 web 页面渲染（网页渲染逻辑）在应用"壳"上渲染逻辑调整，原来的约束
+在应用内改为**覆盖应用全屏渲染显示**，允许返回"壳"（无论免 root 还是 root 模式都存在这类设计问题）。」
+
+**改之前的真实形状**（三层 chrome 叠起来）：
+
+```
+┌ 壳的顶栏（标题 + 状态 + DSH 入口 + 模式 + 刷新）      ← 壳
+│   ┌ DSH 网页（WebView）                            ← 网页
+│   └ 网页自己的头部
+└ 壳的胶囊底栏                                        ← 壳（AppShell 里写着"底栏放内容下方（不遮挡网页）"）
+```
+通知栏入口（`DshWebActivity`）另一套：`safeDrawingPadding()` 内缩 + 顶栏一行"返回" ⇒ 同样被切掉上下两条。
+**免 root 与 root 是同一个 App 的同一段渲染代码**，所以这是"两类模式都有"的同一个问题，不需要按 edition 分叉。
+
+**改之后**：DSH 页画成**顶层浮层**，铺到屏幕四边（含系统栏之下），并收起系统栏（沉浸）；
+回壳有三条路 —— 常驻悬浮「返回壳」键、系统返回手势（网页有历史先回网页历史）、网页自身入口。
+
+| 文件 | 作用 |
+|---|---|
+| `ui/DshFullscreen.kt`（新） | 纯策略：`coversWindow` / `hidesSystemBars` / `needsBackAffordance` —— 判据只有一处 |
+| `ui/ImmersiveBars.kt`（新） | 窗口级沉浸效果（离开/`onDispose` 必须恢复，否则壳的其它页会停在沉浸态） |
+| `ui/DshWebPane.kt` | 新增 `fullBleed`；整窗时把 `Column` 包进 `Box` 并加悬浮「返回壳」键（唯一避开系统栏的控件） |
+| `ui/AppShell.kt` | DSH 从"夹心"改成**浮层**（在 `MessageBanner` 之前 ⇒ 失败提示仍浮在网页之上）；挂 `ImmersiveBarsEffect` |
+| `DshWebActivity.kt` | 通知栏入口同形状（整窗 + 沉浸 + 悬浮返回） |
+
+**同类项目的同款问题与借鉴**（用户问"相关的借鉴上有没有这类问题"）——
+
+| 来源 | 它遇到/解决的同一件事 |
+|---|---|
+| [KernelSU PR #3190：manager 把 WebUI 重构成 Compose，并把 `enableInsets` 改名 `enableEdgeToEdge`](https://github.com/tiann/KernelSU/pull/3190) | **WebUI 宿主必须显式决定边到边**：宿主用 inset 内缩时，模块网页同样只剩中间一块 —— 与这里的病一模一样 |
+| [Android 官方：了解 WebView 中的窗口边衬区](https://developer.android.com/develop/ui/views/layout/webapps/understand-window-insets) | WebView **自己不会**处理系统栏 inset：边到边后要么内容被压、要么必须由宿主喂 inset。官方为此单开一页 |
+| [Chromium：How WebView Full Screen Works](https://chromium.googlesource.com/chromium/src/+/HEAD/android_webview/docs/full-screen.md) | 网页里的"全屏"（HTML5 `requestFullscreen`）**不会自己生效**：宿主必须实现 `onShowCustomView`/`onHideCustomView`。★ 这是本轮**还没做**的一格（见下） |
+| [AndroVNC（Andronix 的 HTML VNC 客户端）](https://github.com/AndronixApp/AndroVNC) | 把"网页"当成 App 的主表面（整屏）是这类工具的通行做法；它们的通病也是"全屏之后怎么回去" |
+
+**已知还差的一格（记下来，别当已完成）**：HTML5 全屏（`WebChromeClient.onShowCustomView/onHideCustomView`）
+还没接 —— 网页里点"全屏"（视频、某些 Web IDE）现在不会铺满屏幕。这是**网页内的全屏**，
+与本轮的"网页覆盖 App 窗口"是两件事，Chromium 那份文档给了标准做法（把 custom view 挂到一个
+全屏容器 + 处理返回）。列进下一步。
+
+**回归**：App 单测 **278/0**（新增 `ui/DshFullscreenContractTest` 7 条：策略穷举 + 壳里必须走
+`DshFullscreen` 判据而不是写死 `ShellTab.DSH` + 通知栏入口同形状 + 悬浮键避开状态栏 + 返回先回网页历史）；
+`UiInsetsContractTest` 的 inset 委托表补登 `DshWebActivity.kt → ui/DshWebPane.kt`
+（整屏**刻意**不内缩，只有悬浮键留 inset —— 契约跟着设计走，而不是把旧断言删掉）。
+
 ### 3.10.51 内核 v2 · P2 起步：宿主侧客户端（`Ctl`）+ 客户端选路 + 开机自检（模块 1.0.40）
 
 **为什么 P2 的第一块是这个**：P2 的目标是"App 改成提交作业 + 订阅"，但控制面 socket 是

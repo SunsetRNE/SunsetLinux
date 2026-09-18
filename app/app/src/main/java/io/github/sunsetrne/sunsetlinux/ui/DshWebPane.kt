@@ -26,8 +26,11 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Warning
@@ -109,6 +112,13 @@ fun DshWebPane(
     onGoHome: () -> Unit = {},
     /** 顶部是否自带一行标题栏（tab 模式关掉，改由外层 Shell 提供） */
     showHeader: Boolean = true,
+    /**
+     * **覆盖整个窗口**：网页铺到屏幕四边（含状态栏/导航栏之下），并给一颗悬浮「返回壳」。
+     *
+     * 壳里打开 DSH 时用它 —— 原先是夹在顶栏与底栏之间，真机上整块网页只剩屏幕中间一条
+     * （见 [DshFullscreen] 的说明）。独立 Activity（通知栏入口）同样用整窗。
+     */
+    fullBleed: Boolean = false,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -208,8 +218,9 @@ fun DshWebPane(
         }
     }
 
+    Box(modifier.fillMaxSize()) {
     Column(
-        modifier
+        Modifier
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.background)
             // 边到边下窗口不会为键盘让位，必须自己消费 IME inset，
@@ -371,6 +382,51 @@ fun DshWebPane(
                     }
                 }
             }
+        }
+    }
+
+        // 覆盖整窗时没有顶栏可放「返回」——给一颗悬浮键。
+        // 它是画面里**唯一**需要避开系统栏的东西（网页本身要铺满四边），也是"永远找得到
+        // 回壳的路"的保证（系统栏同时被收起来了，见 ImmersiveBarsEffect）。
+        if (fullBleed && DshFullscreen.needsBackAffordance(ShellTab.DSH)) {
+            ShellBackChip(
+                onClick = onBack,
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .statusBarsPadding()
+                    .padding(8.dp),
+            )
+        }
+    }
+}
+
+/**
+ * 悬浮的「返回壳」键。
+ *
+ * 刻意做成**常驻**（不做自动隐藏）：全屏覆盖 + 沉浸式系统栏之下，它是唯一可见的出口；
+ * 自动隐藏会让"怎么回去"变成要去猜的事。
+ */
+@Composable
+private fun ShellBackChip(onClick: () -> Unit, modifier: Modifier = Modifier) {
+    Surface(
+        onClick = onClick,
+        modifier = modifier,
+        shape = CircleShape,
+        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.88f),
+        tonalElevation = 3.dp,
+        shadowElevation = 4.dp,
+    ) {
+        Row(
+            Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(
+                Icons.AutoMirrored.Filled.ArrowBack,
+                contentDescription = null,
+                modifier = Modifier.size(18.dp),
+            )
+            Spacer(Modifier.width(6.dp))
+            Text("返回壳", style = MaterialTheme.typography.labelLarge)
         }
     }
 }

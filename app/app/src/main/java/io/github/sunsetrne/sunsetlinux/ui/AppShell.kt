@@ -160,6 +160,10 @@ fun AppShell(
     }
 
     var tab by remember { mutableStateOf(initialTab) }
+
+    // DSH 覆盖整窗时收起系统栏（离开 DSH 自动恢复）。
+    // 窗口级效果，必须随 tab 变化而进出 —— 见 ImmersiveBarsEffect 的注释。
+    ImmersiveBarsEffect(enabled = DshFullscreen.hidesSystemBars(tab))
     var showAbout by remember { mutableStateOf(false) }
     var confirmReset by remember { mutableStateOf(false) }
 
@@ -299,26 +303,10 @@ fun AppShell(
                 }
             }
 
-            if (tab == ShellTab.DSH) {
-                // DSH tab：底栏放内容下方（不遮挡网页），其余 tab 用悬浮样式
-                Column(Modifier.weight(1f)) {
-                    Box(Modifier.weight(1f)) {
-                        DshWebPane(
-                            modifier = Modifier.fillMaxSize(),
-                            showHeader = false,
-                            onBack = { tab = ShellTab.START },
-                            onGoHome = { tab = ShellTab.START },
-                        )
-                    }
-                    CapsuleBar(
-                        selected = tab,
-                        onSelect = { tab = it },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .navigationBarsPadding()
-                            .padding(horizontal = 16.dp, vertical = 10.dp),
-                    )
-                }
+            if (DshFullscreen.coversWindow(tab)) {
+                // DSH 是**覆盖整窗**的（见下面那个浮层）：内容区只留占位，
+                // 顶栏/底栏都不参与 —— 网页要铺满整个窗口，它们本来也会被盖住。
+                Box(Modifier.weight(1f))
             } else {
                 Box(Modifier.weight(1f)) {
                     when (tab) {
@@ -391,6 +379,28 @@ fun AppShell(
                     )
                 }
             }
+        }
+
+        // ── DSH：**覆盖整个应用窗口**（不是夹在顶栏与底栏之间）────────────────
+        //
+        // 用户原话："原来的约束在应用内改为覆盖应用全屏渲染显示，允许返回壳。"
+        // 所以这里把它画成顶层浮层：
+        //   · 铺到屏幕四边（含系统栏之下）—— 壳的所有 chrome 都被它盖住；
+        //   · 系统栏同时收起（ImmersiveBarsEffect），可用高度最大化；
+        //   · 回壳有三条路：悬浮「返回壳」键、系统返回手势（网页有历史时先回网页历史，
+        //     见 DshWebPane 的 PredictiveBackHandler）、以及网页自己的入口。
+        // 位置在 MessageBanner **之前** ⇒ "操作失败：…" 这类提示仍然浮在网页之上（不被吃掉）。
+        if (DshFullscreen.coversWindow(tab)) {
+            DshWebPane(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .align(Alignment.Center),
+                showHeader = false,
+                showBack = true,
+                fullBleed = true,
+                onBack = { tab = ShellTab.START },
+                onGoHome = { tab = ShellTab.START },
+            )
         }
 
         // 一次性提示（含"操作失败：…"）：浮层横幅，不打断操作
