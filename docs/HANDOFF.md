@@ -1847,3 +1847,55 @@ dsh rc.1+rc.2 / 模块 1.0.41，把三个新层更上去，用 App 的 WebView �
    （移动端是**客户端**插件，服务端起得来 ≠ 浏览器里没 JS 报错）。
    ⚠️ 模块更新要**重启**才生效，而重启会结束当前会话里跑着的 agent —— 所以这一步留给用户自己挑时间。
 3. runtime 层若以后要重出：记得版本 +1，并顺手修上面那条 dsh 层重复副本的问题。
+
+---
+
+## ★★ 第 53 轮（2026-09-18 深夜）：真机核验 v0.3.17 ⇒ 「更新了却没生效」+ git 事故
+
+**用户原话**：「好了刷入覆盖更新以及重启了，可以验证一下实机（建议以时间戳为准）」。
+两个裁定：**我来切层**（走 linuxctl，可回滚）、**修「内置比生效层新就切」**。
+
+### 1. 真机核验（时间戳为准，详见 STATUS §3.10.56 ①）
+
+模块 **1.0.42**（模块目录 mtime 23:01）、App **0.3.17**（构建号 `1d7fdb4` = run 58 那一版，23:01:03）、
+`$LINUX_HOME/bin/update.sh` = **46894 B** 且 `SUNSET_HAVE_ZSTD` ×2、`zstd-filter.mjs` **5241 B**（1.0.41 时没有）。
+**投递链自证**：启动日志里 `supervise.sh` 的启动行带 `--expose-internals`，而生效的 runtime 层是**旧的 1.0.0**
+（那份脚本没这个 flag）⇒ 模块 `bin/` 确实盖住了层里的旧脚本 —— `update.sh` 走同一条路。
+
+### 2. 但环境跑的还是旧层（这才是 WebView 验不了的原因）
+
+`loop51 → runtime-1.0.0.erofs`、`loop52 → dsh-0.1.5-rc.2.erofs`；设备日志：
+`内置 DSH 就位：…/dsh-0.1.6-alpha.2.erofs（启用更新=false）` —— `dsh builtin` **不比较版本号**，生效层健康就不切。
+盘上那份 0.1.6 层是好的（sha256 `1f1e5dd5…` 与线上清单 `sha256_raw` 一致）。
+
+**切层卡在权限上**：设备 shell 守卫按策略拒绝"非系统目录下的命令"（`[POLICY_BLOCKED]`，不允许 root 绕过）
+⇒ 只能走 **App 界面**（需无障碍服务）或用户自己点一下，见 §4。
+
+### 3. 本轮改动（**未发版**；要随模块 **1.0.43** 才到设备）
+
+| 文件 | 改动 |
+|---|---|
+| `runtime/root/linuxctl.sh` | `dsh builtin` 新增规则 ③（内置**更新**就切，反向不动）；新增 `dsh_ver_cmp()`；`dsh info` 增 `builtin.newer_than_active` |
+| `module/service.sh` | 载荷已在盘上时**同步**跑完自愈再自启（消掉与自启抢跑；否则要多重启一次） |
+| `runtime/root/update.sh` | `.zst` 能力判据补全：**引擎 + 过滤器**两个都要；抽出 `find_zstd_filter()` 与解压共用 |
+| 自测 | `module-variant-selftest` **49/0**（+6）、`provision-selftest` **89/0**、`root selftest` **127/0**、shell-compat ✓、cmp-consistency 16 组 ✓ |
+
+**跨实现对拍**：shell 的 `dsh_ver_cmp` 与 JS 的 `cmp` 在 16 组用例上逐例一致（`/root/Q/cmp-crosscheck.sh`）。
+顺带实测否掉 `sort -V`（它把预发布判成**更大**，与项目语义相反 ⇒ 判"内置是否更新"会误判成回退）。
+
+### 4. 需要你的两件事
+
+1. **把生效层切到 0.1.6**（二选一）：开一下**无障碍服务**（DSHA「设置 → 设备能力授权」→「设置屏幕操作」），
+   我用 App 界面替你走完并截图验证；或者你在 App 更新页点一下，点完告诉我，我去验 WebView。
+2. **要不要发模块 1.0.43（+ App 0.3.18）**把 §3 那三处修复送到设备 —— 不发也没坏处，
+   但"覆盖更新模块 + 重启就该生效"这件事得等它。
+
+### 5. ⚠️ 本轮另一起事故：重启打断 `git gc --auto`（已恢复，工作区零损失）
+
+`.git/objects/pack` 里一个真 pack 都没有、只剩 4 个不可用的 `tmp_pack_*`（2 个 `early EOF`、2 个瘦包基底已丢），
+`refs/heads/main` 消失；`.git/objects` 与 `refs/heads/` 的 mtime 都是 **15:01 UTC = 本地 23:01**（重启那一刻）。
+机制：`git commit` 结束会在**后台**跑 `gc --auto`，这个仓库大（pack ~900 MB）要跑几分钟 —— 重启把它掐断在半路
+（`gc` 本来会留 `gc.log` 并回滚，硬重启不给它机会）。
+**恢复**：远端完整 ⇒ `--no-checkout` 克隆干净 `.git` 换入 + `git reset --mixed HEAD`（工作区一个没动），fsck 通过。
+**硬化**：`gc.auto=0`；3 个只余 SHA 的本地分支记在 `/var/tmp/lost-local-refs.txt`。
+⇒ 教训：**"提交成功"不等于"仓库安全"**，这台设备的宿主是**会重启的手机**。

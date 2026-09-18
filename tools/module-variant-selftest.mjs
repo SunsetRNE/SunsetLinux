@@ -294,6 +294,71 @@ try { j = JSON.parse(r.stdout.trim().split('\n').pop()); } catch { j = {}; }
 if (j.action === 'already') ok('第二次执行是幂等的（不会重复解 200 MB）');
 else bad(`dsh builtin 不幂等：${r.stdout}`);
 
+// ── ②b 内置**更新**要能顶掉"健康但更旧"的生效层（2026-09-18 真机暴露） ──────
+//   现场：模块 1.0.42 自带内置 dsh 0.1.6-alpha.2，而生效层是**健康**的 0.1.5-rc.2。
+//   旧逻辑只看"生效层有没有 web profile" ⇒ 判定"层是好的"⇒ **不切**；
+//   于是用户"覆盖更新模块 + 重启"之后环境照旧跑 rc.2，看起来像什么都没发生
+//   （service.log 那行 `内置 DSH 就位 …（启用更新=false）` 就是它）。
+//   新规则：内置**更新**才切；内置更旧或相同一律不动（不把用户从频道更新的版本回退）。
+console.log('\n②b 内置比生效层新 ⇒ 要切（且不许反向回退）');
+
+function writeActiveDsh(ver, makeFile = true) {
+  mkdirSync(join(lh, 'etc'), { recursive: true });
+  writeFileSync(join(lh, 'etc/state.json'), JSON.stringify({
+    schema: 1, spec: 1, generated_at: '2026-09-18T00:00:00Z', generator: 'selftest',
+    erofs_compress: 'none', transport_compress: 'zstd',
+    layers: {
+      base: { version: '24.04.3-l1', size: 1, sha256: null, format: 'erofs', file: 'base-24.04.3-l1.erofs' },
+      runtime: { version: '1.0.0', size: 1, sha256: null, format: 'erofs', file: 'runtime-1.0.0.erofs' },
+      dsh: { version: ver, size: 1, sha256: null, format: 'erofs', file: `dsh-${ver}.erofs` },
+    },
+  }, null, 2));
+  // makeFile=false 时**只改 state.json**：收尾还原用，免得把 ② 落地的**真**内置层文件覆盖成假的
+  if (makeFile) {
+    // 只要求"文件在"：它不是合法镜像 ⇒ layer_has_path 返回 2（判不了），
+    // 而"判不了"**不算**坏层 ⇒ 正好走到"生效层健康"这一支，也就测到了新规则。
+    writeFileSync(join(lh, `layers/dsh-${ver}.erofs`), 'not-a-real-image');
+  }
+}
+const dshVerOf = () => {
+  const m = readFileSync(join(lh, 'etc/state.json'), 'utf8').match(/"dsh":\s*\{[^}]*"version":\s*"([^"]*)"/);
+  return m ? m[1] : null;
+};
+
+writeActiveDsh('1.0.0');                        // 生效层更旧（内置 9.9.9）
+r = sh([ctl, 'dsh', 'info'], { env });
+try { j = JSON.parse(r.stdout.trim().split('\n').pop()); } catch { j = {}; }
+if (j.builtin?.newer_than_active === true) ok('dsh info 报出 builtin.newer_than_active=true（可观测）');
+else bad(`dsh info 没报出 newer_than_active=true：${r.stdout}`);
+
+r = sh([ctl, 'dsh', 'builtin', '--module-dir', modDir], { env });
+try { j = JSON.parse(r.stdout.trim().split('\n').pop()); } catch { j = {}; }
+if (j.state_updated === true && /比生效层/.test(j.reason ?? '')) {
+  ok(`生效层健康但更旧 ⇒ 切到内置（理由：${j.reason}）`);
+} else {
+  bad(`内置更新没切：action=${j.action} state_updated=${j.state_updated} reason=${j.reason}`);
+}
+if (dshVerOf() === LAYER_V1) ok(`state.json 已指向内置版本 ${LAYER_V1}`);
+else bad(`state.json 没切到内置版本：${dshVerOf()}`);
+
+writeActiveDsh('9.9.10');                       // 生效层比内置更新（9.9.10 > 9.9.9）
+r = sh([ctl, 'dsh', 'info'], { env });
+try { j = JSON.parse(r.stdout.trim().split('\n').pop()); } catch { j = {}; }
+if (j.builtin?.newer_than_active === false) ok('dsh info：内置不比生效层新 = false（方向没反）');
+else bad(`newer_than_active 方向错了：${r.stdout}`);
+
+r = sh([ctl, 'dsh', 'builtin', '--module-dir', modDir], { env });
+try { j = JSON.parse(r.stdout.trim().split('\n').pop()); } catch { j = {}; }
+if (j.state_updated === false && dshVerOf() === '9.9.10') {
+  ok('生效层更新 ⇒ 不切（不把频道更新的版本回退成更旧的内置）');
+} else {
+  bad(`内置更旧却切了：state_updated=${j.state_updated} 现版本=${dshVerOf()}`);
+}
+
+// 收尾：把 state.json 还原成 ② 结束时的样子（LAYER_V1），**但不碰层文件** ——
+// 后面的 `dsh install` 要看到"装的是 9.9.9、频道里是更新的版本"才会去装。
+writeActiveDsh(LAYER_V1, false);
+
 r = sh([ctl, 'dsh', 'info'], { env });
 try { j = JSON.parse(r.stdout.trim().split('\n').pop()); } catch { j = {}; }
 if (j.builtin?.present === true && j.builtin?.version === LAYER_V1) ok('dsh info 报出内置版本');
@@ -394,14 +459,14 @@ else bad(`负例没拦住：rc=${r.status} stdout=${r.stdout}`);
 // "dsh 层内没有 profile"，用户根本无从下手。
 // 规则：**没有记录** 或 **生效层确定缺 profile** → 切到内置；生效层是好的 → 绝不动。
 {
-  const mkSandbox = (tag, activeHasProfile) => {
+  const mkSandbox = (tag, activeHasProfile, ver = '9.9.8') => {
     const lh = join(root, `lh-active-${tag}`);
     mkdirSync(join(lh, 'layers'), { recursive: true });
     mkdirSync(join(lh, 'etc'), { recursive: true });
-    // 生效层：9.9.8（假的 erofs 夹具，magic 在偏移 1024）
-    cpSync(join(REPO, 'testdata/fixtures/erofs-head.bin'), join(lh, 'layers/dsh-9.9.8.erofs'));
+    // 生效层：默认 9.9.8（假的 erofs 夹具，magic 在偏移 1024）
+    cpSync(join(REPO, 'testdata/fixtures/erofs-head.bin'), join(lh, `layers/dsh-${ver}.erofs`));
     writeFileSync(join(lh, 'etc/state.json'),
-      '{"schema":1,"layers":{"dsh":{"version":"9.9.8","file":"dsh-9.9.8.erofs"}}}\n');
+      `{"schema":1,"layers":{"dsh":{"version":"${ver}","file":"dsh-${ver}.erofs"}}}\n`);
     // 桩 dump.erofs：按"哪个层文件"回答有没有 profile
     const fb = join(root, `fakebin-dump-${tag}`);
     mkdirSync(fb, { recursive: true });
@@ -410,7 +475,7 @@ else bad(`负例没拦住：rc=${r.status} stdout=${r.stdout}`);
       : 'echo "<E> erofs: read inode failed @ /root/.dsh/profiles/web/package.json"; exit 1';
     writeFileSync(join(fb, 'dump.erofs'),
       `#!/bin/sh\nf=""; for a in "$@"; do case "$a" in *.erofs) f="$a" ;; esac; done\n` +
-      `case "$f" in *9.9.8*) ${verdict} ;; *) echo "Path : /root/.dsh/profiles/web/package.json"; exit 0 ;; esac\n`);
+      `case "$f" in *${ver}*) ${verdict} ;; *) echo "Path : /root/.dsh/profiles/web/package.json"; exit 0 ;; esac\n`);
     execFileSync('bash', ['-c', `chmod +x ${JSON.stringify(join(fb, 'dump.erofs'))}`]);
     return { lh, fb };
   };
@@ -455,19 +520,39 @@ else bad(`负例没拦住：rc=${r.status} stdout=${r.stdout}`);
       bad(`already 快路径跳过了启用判断：action=${json.action} state_updated=${json.state_updated}`);
     }
   }
-  // ② 生效层是好的 → 绝不动它（用户从频道更新的层不能被模块升级悄悄退回）
+  // ② 生效层是好的、而且**比内置新** → 绝不动它（用户从频道更新的层不能被模块升级悄悄退回）
   {
-    const { lh, fb } = mkSandbox('good', true);
+    const { lh, fb } = mkSandbox('good', true, '9.9.10');
     const out = spawnSync('mksh', [ctl, 'dsh', 'builtin', '--module-dir', modDir], {
       encoding: 'utf8', cwd: REPO,
       env: { ...process.env, PATH: `${fb}:${process.env.PATH}`, LINUX_HOME: lh, LINUXCTL_KERNEL_FS_OVERRIDE: 'erofs' },
     });
     const json = (() => { try { return JSON.parse((out.stdout || '').trim().split('\n').pop()); } catch { return {}; } })();
     const st = readFileSync(join(lh, 'etc/state.json'), 'utf8');
-    if (json.state_updated === false && /"dsh":\s*\{[^}]*"version":\s*"9\.9\.8"/.test(st)) {
-      ok('生效层是好的时不抢它（用户的频道更新不会被模块退回）');
+    if (json.state_updated === false && /"dsh":\s*\{[^}]*"version":\s*"9\.9\.10"/.test(st)) {
+      ok('生效层更新（9.9.10 > 内置 9.9.9）时不抢它（用户的频道更新不会被模块退回）');
     } else {
-      bad(`好层被无故切走了：state_updated=${json.state_updated} state=${st.slice(0, 160)}`);
+      bad(`更新的好层被切走了：state_updated=${json.state_updated} state=${st.slice(0, 160)}`);
+    }
+  }
+
+  // ③ 生效层是好的、但**比内置旧** → 必须切（2026-09-18 真机现场：模块 1.0.42 带
+  //    dsh 0.1.6-alpha.2，生效层是健康的 0.1.5-rc.2；旧逻辑只判"有没有 profile" ⇒ 不切，
+  //    于是"覆盖更新模块 + 重启"之后环境照旧跑 rc.2。这里用桩 dump.erofs 如实模拟
+  //    "层是健康的、profile 在"这一半，确认新规则仍然会切。）
+  {
+    const { lh, fb } = mkSandbox('good-older', true, '9.9.8');
+    const out = spawnSync('mksh', [ctl, 'dsh', 'builtin', '--module-dir', modDir], {
+      encoding: 'utf8', cwd: REPO,
+      env: { ...process.env, PATH: `${fb}:${process.env.PATH}`, LINUX_HOME: lh, LINUXCTL_KERNEL_FS_OVERRIDE: 'erofs' },
+    });
+    const json = (() => { try { return JSON.parse((out.stdout || '').trim().split('\n').pop()); } catch { return {}; } })();
+    const st = readFileSync(join(lh, 'etc/state.json'), 'utf8');
+    if (json.state_updated === true && /比生效层/.test(json.reason ?? '') &&
+        /"dsh":\s*\{[^}]*"version":\s*"9\.9\.9"/.test(st)) {
+      ok('健康但更旧的生效层被内置更新顶掉（真机那次的病根）');
+    } else {
+      bad(`内置更新没顶掉健康旧层：state_updated=${json.state_updated} reason=${json.reason}`);
     }
   }
 }

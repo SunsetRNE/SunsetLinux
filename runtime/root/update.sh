@@ -172,6 +172,21 @@ find_node() {
     return 1
 }
 
+# zstd-filter.mjs 的位置（**唯一一份实现在 tools/seed/**，构建期铺到 runtime 层 / 模块 bin / 自建层）。
+# 抽成函数是因为**两个地方必须用同一份查找顺序**：
+#   · cmd_apply 解压 .zst 时要用它；
+#   · cmd_check 判定"本机能不能走 .zst"时也要知道它在不在 ——
+#     否则会出现"选了 .zst、下载完才发现没有过滤器"，那是本项目最忌讳的失败方式。
+#   （真机教训方向：模块 1.0.41 及以前**没有**这个文件，只有 1.0.42 起随 bin/ 同步到 $LH/bin/。）
+find_zstd_filter() {
+    local cand
+    for cand in "$SELF_DIR/zstd-filter.mjs" "$SELF_DIR/tools/seed/zstd-filter.mjs" \
+                "$LH/bin/zstd-filter.mjs"; do
+        [ -f "$cand" ] && { printf '%s' "$cand"; return 0; }
+    done
+    return 1
+}
+
 # channel 工具链位置（验签逻辑的唯一实现，绝不在这里重写密码学）
 find_channel_tool() {
     local c
@@ -346,17 +361,21 @@ for (const c of enabled) {
         out.module = rec.module;
       }
     }
-    // 本机到底能不能解 .zst：① 系统 `zstd`（shell 探好传进来）② 跑这段 JS 的 node
-    // 自带 node:zlib zstd（Node 24 起）。两者都没有 ⇒ 只能用 .gz。
+    // 本机到底能不能解 .zst：① 系统 `zstd`（shell 探好传进来）
+    //   ② 跑这段 JS 的 node 自带 node:zlib zstd（Node 24 起）**且**找得到 zstd-filter.mjs
+    //      （shell 用 find_zstd_filter 找好传进来）—— 少任何一半都只能用 .gz。
     //
     // ★ 这里**不再写死"本机没有 zstd"**（2026-09-18 修）：老写法永远只挑 url_gz，
     //   于是 183d8d8 给 update.sh 加的 .zst 解压能力在**任何机器上都不会被用到**，
     //   等于是死代码。产物选择必须跟"本机实际能力"一致，而不是跟"最弱设备"一致。
+    // ★ 但能力判据必须**完整**：只看 node 有 zstd 就选 .zst，会在还没有
+    //   bin/zstd-filter.mjs 的老模块设备上"下载完才发现解不开"（自测 `dsh install` 抓到）。
     //   `SUNSET_NO_ZSTD=1` 是排障用的显式开关（强制走 .gz，也用来测这条分支）。
     let zstdInNode = false;
     try { zstdInNode = typeof zlib.createZstdDecompress === 'function'; } catch { zstdInNode = false; }
+    const haveFilter = (process.env.SUNSET_ZSTD_FILTER ?? '') !== '';
     const canZst = process.env.SUNSET_NO_ZSTD !== '1'
-      && (process.env.SUNSET_HAVE_ZSTD === '1' || zstdInNode);
+      && (process.env.SUNSET_HAVE_ZSTD === '1' || (zstdInNode && haveFilter));
     const isGzUrl  = (u) => /\.gz$/i.test(u ?? '');
     const isZstUrl = (u) => /\.(zst|zstd)$/i.test(u ?? '');
     for (const L of manifest.layers ?? []) {
@@ -472,12 +491,18 @@ cmd_check() {
         return 1
     fi
     write_node_verifier
-    # 把"本机有没有系统 zstd"告诉验签器：它据此决定挑 .zst 还是 .gz
-    # （另一个能力来源是 node 自己，由脚本内部探测）。两者都没有 ⇒ 只挑 .gz。
+    # 把"本机拿什么解 .zst"告诉验签器：它据此决定挑 .zst 还是 .gz。
+    #   · 系统 zstd 在 → 够了（不依赖过滤器）
+    #   · 否则要 **node 自带 zstd + 找得到 zstd-filter.mjs**，两个都在才算有能力
+    #     （少判过滤器这一条，就会在"模块还没有 bin/zstd-filter.mjs"的老设备上
+    #      选走 .zst、下载完才发现解不开 —— 从"能更新"退化成"报错"。2026-09-18 自测抓到。）
     local have_zstd=0
     if have zstd; then have_zstd=1; fi
+    local zfilter=""
+    zfilter="$(find_zstd_filter || true)"
     local out=""
-    out="$(SUNSET_HAVE_ZSTD="$have_zstd" "$node" "$NODE_VERIFIER" "$CHANNELS_JSON" "$STATE_JSON" 2>/dev/null)" || true
+    out="$(SUNSET_HAVE_ZSTD="$have_zstd" SUNSET_ZSTD_FILTER="$zfilter" \
+           "$node" "$NODE_VERIFIER" "$CHANNELS_JSON" "$STATE_JSON" 2>/dev/null)" || true
     if [ -z "$out" ]; then
         emit '{"ok":false,"error":"检查更新失败（验签脚本没有输出）","hint":"可手动运行：linuxctl exec -- node /data/sunsetlinux/cache/.update-verify.mjs /data/sunsetlinux/etc/channels.json /data/sunsetlinux/etc/state.json"}'
         return 1
@@ -607,10 +632,7 @@ cmd_apply() {
             else
                 local znode="" zfilter=""
                 znode="$(find_node 2>/dev/null || true)"
-                for cand in "$SELF_DIR/zstd-filter.mjs" "$SELF_DIR/tools/seed/zstd-filter.mjs" \
-                            "$LH/bin/zstd-filter.mjs"; do
-                    [ -f "$cand" ] && { zfilter="$cand"; break; }
-                done
+                zfilter="$(find_zstd_filter || true)"
                 if [ -n "$znode" ] && [ -n "$zfilter" ] && "$znode" -e '1' >/dev/null 2>&1; then
                     log "本机没有 zstd，改用环境里的 node 解压（$znode + $(basename "$zfilter")）"
                     if ! "$znode" --no-warnings "$zfilter" -d < "$fname" > "$raw" 2>/dev/null; then

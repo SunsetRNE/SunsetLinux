@@ -193,12 +193,30 @@ if [ -f "$MODDIR/dsh/manifest.json" ]; then
   done
   if [ -n "$_dhctl" ]; then
     log "内置 DSH 自愈检查（载荷存在）→ linuxctl dsh builtin（幂等：缺就展开，指向不对就纠正）"
-    if [ -x /system/bin/setsid ]; then
+    # ★ 顺序：**载荷已经在盘上时先同步跑完，再往下走自启**（2026-09-18 真机）。
+    #   为什么：这一步现在不只是"缺就展开"，还会**决定要不要把生效层切到内置那份**
+    #   （内置比生效层新就切，见 linuxctl.sh 的规则 ③）。而紧接着就是开机自启，
+    #   两者真机实测在**同一秒内并发** —— 抢跑的后果是环境可能先用旧层起来，
+    #   用户看到的是"覆盖更新模块 + 重启，却什么都没变"，得再重启一次才到位。
+    #   快路径**不做解压**（载荷文件已在盘上就直接跳过），只是一次状态判断 + 写 state.json
+    #   （最多再用 dump.erofs 读一次元数据），毫秒级；真正贵的解压留在 else 分支后台跑。
+    #   ★ 这里**不写** `[ -f …/dsh-builtin.json ]` 这种"拿记录有无当条件"的形状 ——
+    #     那个形状正是 2026-09-17 真机 bug（"有记录就不自愈"）的写法，读不到就当没有即可。
+    _dh_bf="$(tr -d ' \n\t' < "$LINUX_HOME/etc/dsh-builtin.json" 2>/dev/null \
+              | sed -n 's/.*"file":"\([^"]*\)".*/\1/p' | head -n1 || true)"
+    _dh_fast=0
+    [ -n "$_dh_bf" ] && [ -f "$LINUX_HOME/layers/$_dh_bf" ] && _dh_fast=1
+    if [ "$_dh_fast" = "1" ]; then
+      log "内置 DSH 自愈：载荷已在盘上 → 同步跑完再自启（避免与自启抢跑，见注释）"
+      LINUX_HOME="$LINUX_HOME" /system/bin/sh "$_dhctl" dsh builtin --module-dir "$MODDIR" >>"$SERVICE_LOG" 2>&1 || true
+      log "内置 DSH 自愈：同步那一段结束（结果见 $SERVICE_LOG）"
+    elif [ -x /system/bin/setsid ]; then
       setsid /system/bin/sh -c "LINUX_HOME='$LINUX_HOME' /system/bin/sh '$_dhctl' dsh builtin --module-dir '$MODDIR' >>'$SERVICE_LOG' 2>&1" >/dev/null 2>&1 &
+      log "内置 DSH 自愈已在后台发起（载荷还没展开，不能拖住 boot；结果见 $SERVICE_LOG）"
     else
       ( LINUX_HOME="$LINUX_HOME" /system/bin/sh "$_dhctl" dsh builtin --module-dir "$MODDIR" >>"$SERVICE_LOG" 2>&1 ) &
+      log "内置 DSH 自愈已在后台发起（载荷还没展开，不能拖住 boot；结果见 $SERVICE_LOG）"
     fi
-    log "内置 DSH 自愈已在后台发起（不阻塞 boot；结果见 $SERVICE_LOG）"
   else
     log "内置 DSH 自愈：找不到 linuxctl（模块包不完整？）"
   fi

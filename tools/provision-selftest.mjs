@@ -244,9 +244,22 @@ printf 'nodisk|%s\\n' "$(autoprovision_decision 0 1 0 1 '')"
   ok(!/dsh-builtin\.json"?\s*\]/.test(code),
     '"还有内置记录就不跑"这个条件已去掉（真机现场：记录在、指向坏层 → 必须能纠正）');
   ok(/dsh builtin --module-dir/.test(code), '自愈走的是 linuxctl dsh builtin（唯一实现，不另写解压逻辑）');
-  const dhIdx = code.indexOf('dsh builtin --module-dir');
-  const dhWin = code.slice(Math.max(0, dhIdx - 400), dhIdx);
-  ok(/setsid/.test(dhWin), '内置 DSH 的展开脱离 boot 进程（不阻塞开机）');
+  // ★ 2026-09-18：自愈现在分两条路 ——
+  //     载荷**已经在盘上** → **同步**跑完再自启（否则"切生效层"会与紧随的自启抢跑：
+  //                          真机实测两者在同一秒并发 ⇒ 用户"覆盖更新模块 + 重启"却
+  //                          什么都没变，得再重启一次才到位）；
+  //     载荷**还没展开**   → 照旧 setsid 后台（200 MB，绝不能拖住 boot）。
+  //   两条路**都会**跑 `dsh builtin`，所以判据是"两条都在调它"——
+  //   比"禁用某个文件名"更贴近本意（最初的写法就是这么被自己绕进去的）。
+  const dhCalls = (code.match(/dsh builtin --module-dir/g) || []).length;
+  ok(dhCalls >= 2, `两条路（已在盘上 → 同步 / 还没展开 → 后台）都会跑 dsh builtin（实测 ${dhCalls} 处）`);
+  ok(/_dh_fast/.test(code) && /载荷已在盘上/.test(code),
+    '载荷已在盘上时走**同步**快路径（切层必须赶在自启之前）');
+  // 只在**自愈段落之后**找 setsid：前面自动部署那段也有一处，别抓错（本测试第一版就抓错了）
+  const dhStart = code.indexOf('内置 DSH 自愈检查');
+  const bgIdx = code.indexOf('setsid', dhStart);
+  ok(bgIdx > 0 && code.slice(bgIdx, bgIdx + 400).includes('dsh builtin --module-dir'),
+    '载荷还没展开那条路仍用 setsid 脱离 boot（不阻塞开机）');
 }
 
 // ---------------------------------------------------------------------------

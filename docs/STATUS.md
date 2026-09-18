@@ -519,6 +519,83 @@ su -c '/data/sunsetlinux/bin/linuxctl doctor'
 | 已装状态读不到时 | —— | **不给刷入按钮**，先让用户修 root 授权（与"读不到 ≠ 没装"一致） |
 | 重启 | —— | 只报告"重启后生效"（KernelSU 落 `modules_update/`），**App 不替用户重启**，脚本里有单测断言不许出现 `reboot` |
 
+### 3.10.56 真机核验 v0.3.17 落地：一处「更新了却没生效」+ 一次 git 事故 + 三处修复（2026-09-18 深夜）
+
+#### ① 落地核验（**以时间戳为准**，都是设备实测）
+
+| 事项 | 证据 |
+|---|---|
+| 模块 **1.0.42** 已装 | `module.prop` = `1.0.42/10042`；模块目录 mtime **23:01**（设备本地时间） |
+| App **0.3.17** 已装 | `versionName=0.3.17-20260918-2254-1d7fdb4`、`versionCode=33`、`lastUpdateTime=23:01:03` —— 构建号正是 run 58 发的 `1d7fdb4` |
+| (b) 的载荷**真的上了设备** | `$LINUX_HOME/bin/update.sh` = **46894 B**（旧版 43109），`grep -c SUNSET_HAVE_ZSTD` = **2**、`SUNSET_NO_ZSTD` = 2 |
+| 过滤器就位 | `$LINUX_HOME/bin/zstd-filter.mjs` = **5241 B**（1.0.41 时该文件**不存在**） |
+| **模块确实盖住了层里的旧脚本** | 启动日志里 `supervise.sh` 的启动行带 `--expose-internals`，而当时生效的 runtime 层是**旧的 1.0.0**（那份脚本没这个 flag）⇒ 模块 `bin/` → `$LINUX_HOME/bin/` 这条投递链是通的（`update.sh` 走同一条） |
+
+#### ② 但**环境跑的还是旧层** —— "更新了却没生效"的又一例
+
+- `/proc/mounts` 的 loop 后端：`loop51 → runtime-1.0.0.erofs`、`loop52 → dsh-0.1.5-rc.2.erofs`；
+  挂载中的 dsh 层里 `@deepseek-ai/dsh/package.json` = **0.1.5-rc.2**。
+- 设备自己的日志把原因写得清清楚楚：`[linuxctl] 内置 DSH 就位：…/dsh-0.1.6-alpha.2.erofs（启用更新=false）`
+  ⇒ `dsh builtin` **只在"没有记录"或"生效层确定缺 profile"时才切**，它**不比较版本号**；
+  生效层 rc.2 是**健康**的 ⇒ 不切。于是"覆盖更新模块 + 重启"之后，模块里那份更新的内置 DSH 永远不会生效。
+- 盘上那份 0.1.6 层本身是好的：sha256 `1f1e5dd5…`、443,654,144 B，**与线上清单的 `sha256_raw` 逐字节一致**。
+
+#### ③ 本轮修的三处（都带自测）
+
+1. **`dsh builtin` 新增规则 ③：内置比生效层新就切**（`runtime/root/linuxctl.sh`）。
+   方向是**单向**的：内置更旧或相同一律不动（保住"不把用户从频道更新的版本回退"的原意）。
+   同时 `dsh info` 暴露 **`builtin.newer_than_active`**（true/false/null），行为可观测、App/doctor 以后可直接用。
+   ⇒ 自测 `module-variant-selftest`：**43 → 49 通过 / 0 失败**（新增 6 条：可观测性 + 切 + 反向不切 + state 落点），
+   并把原来那条"好层不许动"的夹具从 `9.9.8`（比内置旧，按新规则**就该切**）改成 `9.9.10`，真实意图原样保住。
+2. **切层必须赶在自启之前**（`module/service.sh`）：真机日志显示自愈与自启**在同一秒内并发**。
+   载荷**已经在盘上**时改为**同步**跑完再自启（不做解压，毫秒级）；载荷还没展开时才照旧 `setsid` 后台
+   （200 MB，不能拖住 boot）。否则即便判据修好了，用户仍可能要多重启一次才到位。
+3. **`.zst` 的能力判据补全**（`runtime/root/update.sh`）：原来只看"有没有解压引擎"。自测 `dsh install`
+   当场抓到：沙箱里没有 `zstd-filter.mjs` 却被选走了 `.zst` ⇒ 下载完解不开。现在**两个都要**
+   （系统 `zstd`，或 node 自带 zstd **且** `find_zstd_filter` 找得到过滤器）；
+   过滤器查找抽成 `find_zstd_filter()`，解压与能力判定**共用同一份顺序**。
+
+#### ④ 版本比较：shell 侧新增实现，并与 JS 逐例对拍
+
+`dsh_ver_cmp()`（awk，mksh 安全：不做 32 位乘法）——语义与 App 的 `PURE.cmpVer`、update.sh 验签器的 `cmp` 一致。
+**对拍**：16 组用例（含 `0.1.5` vs `0.1.5-rc.2`、`0.1.6` vs `0.1.6-alpha.2`、`0.1.6-alpha.2` vs `-alpha.10`、
+`0.1.9` vs `0.1.10`）**两套实现逐例一致**（脚本 `/root/Q/cmp-crosscheck.sh`）。
+
+> ★ 顺带否掉一个"顺手就能用"的方案：**GNU `sort -V` 的版本序把预发布判成更大** ——
+> `printf '0.1.5\n0.1.5-rc.2\n' | sort -V | tail -n1` → `0.1.5-rc.2`；`0.1.6` vs `0.1.6-alpha.2` 也判成 alpha 更大。
+> 与项目语义**相反**，拿它判"内置是不是更新"会把旧预发布当升级去激活。
+> （本文件 `find_layer` / `rollback` 用的就是 `sort -V`，那两处只用于"挑层文件"且 state.json 版本优先，暂不受影响。）
+
+#### ⑤ 一次 git 事故：**重启打断 `git gc --auto`**（已恢复，工作区零损失）
+
+- 现场：`.git/objects/pack` 里**一个真 pack 都没有**，只有 4 个 `tmp_pack_*`（`PACK` magic 完好但不可用：
+  2 个 `early EOF`、2 个基底已丢的瘦包）；`in-pack: 0 / packs: 0`；`refs/heads/main` 消失（`beta`/`channel` 等旧 ref 还在）；
+  `.git/objects` 与 `refs/heads/` 的 mtime 都是 **15:01 UTC = 设备本地 23:01**，正是重启那一刻。
+- 机制：`git commit` 结束会在**后台**跑 `git gc --auto`（`gc.autoDetach` 默认开）。这个仓库历史大（pack ~900 MB），
+  重打包要几分钟；**重启把容器连同它一起掐断** ⇒ 新包停在 `.tmp`、旧包已被 `-d` 删掉、刚写的松散对象与 `main` ref 一起丢
+  （`gc` 本有"失败留 `gc.log` 并回滚"的保护，硬重启不给它机会；实测没有 `gc.log`）。
+- 恢复：远端完整（每次提交都推了）⇒ `--no-checkout` 克隆一份干净 `.git` 换入（工作区文件**一个没动**），
+  再 `git reset --mixed HEAD` 重建索引。恢复后 `git fsck --connectivity-only` 通过，`git status` 恰好只列出本轮改的 5 个文件。
+- **硬化**：仓库设 **`gc.auto=0`**（不再自动重打包；要整理就手动 `git gc`，挑设备稳定的时间）。
+- 另外记下 3 个"只剩 SHA、对象已丢"的本地分支（`/var/tmp/lost-local-refs.txt`）：`beta=35ac91d7`、`channel=0d1efffc`、`channel-publish=2d67da0f`。
+- ⚠️ 教训（与项目老账同族）：**"提交成功"不等于"仓库安全"** —— 后台维护有自己的时间窗，而这台设备的宿主是**会重启的手机**。
+
+#### ⑥ 闸门（本轮全绿）
+
+| 闸门 | 结果 |
+|---|---|
+| `module-variant-selftest` | **49 通过 / 0 失败**（+6） |
+| `provision-selftest` | **89 通过 / 0 失败**（自愈的两条路都断言了） |
+| `runtime/root/selftest.sh` | **127 通过 / 0 失败**（并发跑两个自测时偶发过一次计时类断言失败；串行 3 次全绿） |
+| `shell-compat-check` / `cmp-consistency` | ✅ / **16 组三方一致** |
+| `ci-changeset-selftest` | 39 通过 / 0 失败 |
+
+#### ⑦ 待办
+
+1. **真机 WebView 验证仍差一步**：要在设备上把生效层切到 0.1.6（`linuxctl update dsh … --version 0.1.6-alpha.2`，或 App 更新页），重启环境后打开 DSH 网页。
+   设备 shell 守卫按策略拒绝"非系统目录下的命令"（不允许 root 绕过），所以这条路只能走 **App 界面**（需无障碍服务）或用户点一下。
+2. 上面 ③ 的三处修复要**随下一个模块版本**（1.0.43）才会到设备；App 侧若跟着发就是 0.3.18。
+
 ### 3.10.55 「改了」不等于「发出去了」，也不等于「会被用到」：三件事一起查（2026-09-18 续）
 
 换对话框后照交接单第一件事核验 v0.3.16，结果**三条都跟预期不一样**。三条都是"看着像完成了、

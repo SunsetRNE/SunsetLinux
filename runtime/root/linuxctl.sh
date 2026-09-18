@@ -1626,10 +1626,50 @@ dsh_module_dir() {
 # JSON 值：空 → null
 _jstr() { if [ -n "${1:-}" ]; then printf '"%s"' "$(jesc "$1")"; else printf 'null'; fi; }
 
+# ---------------------------------------------------------------------------
+# dsh 版本比较 —— 语义**必须**与另外两处一致：App 的 `PURE.cmpVer`、
+# update.sh 验签器里的 `cmp`（三处不一致 → "界面说能更新、CLI 说不用"这种自相矛盾）。
+#   主干（第一个 `-` 之前）逐段按**数值**比；都没预发布后缀则相等；
+#   有后缀的更小（0.1.5-rc.2 < 0.1.5）；两边都有后缀时逐段比
+#   （数字段按数值、数字段 < 非数字段、其余字典序）。
+# 返回：0 = 相等；1 = $1 更新；2 = $2 更新。
+#
+# ★ 为什么**不用** `sort -V`（本文件 find_layer / rollback 用的是它）：
+#   实测 GNU 的版本序把**预发布判成更大** ——
+#     `printf '0.1.5\n0.1.5-rc.2\n' | sort -V | tail -n1` → `0.1.5-rc.2`
+#     `printf '0.1.6\n0.1.6-alpha.2\n' | sort -V | tail -n1` → `0.1.6-alpha.2`
+#   而本项目的语义正相反。拿它判"内置是不是更新"，会把**旧的预发布**当成升级去激活 ——
+#   正是"看起来在升级、其实在回退"那类事故。
+# ★ 设备侧是 mksh（`$(( ))` 只有 32 位有符号），所以整数比较全交给 awk，不自己乘大数。
+dsh_ver_cmp() {
+    have awk || return 0     # 连 awk 都没有就"判不了"→ 当相等（保守：不动生效层）
+    awk -v A="$1" -v B="$2" 'BEGIN{
+        ia=index(A,"-"); ah=(ia>0); acore=(ah?substr(A,1,ia-1):A); apre=(ah?substr(A,ia+1):"");
+        ib=index(B,"-"); bh=(ib>0); bcore=(bh?substr(B,1,ib-1):B); bpre=(bh?substr(B,ib+1):"");
+        ax=split(acore,ap,"."); bx=split(bcore,bp,".");
+        n=(ax>bx?ax:bx);
+        for(i=1;i<=n;i++){ x=ap[i]+0; y=bp[i]+0; if(x!=y){ print(x>y?1:2); exit } }
+        if(!ah && !bh){ print 0; exit }
+        if(!ah){ print 1; exit }          # A 是正式版 → A 更新
+        if(!bh){ print 2; exit }
+        ax=split(apre,ap,"."); bx=split(bpre,bp,".");
+        n=(ax>bx?ax:bx);
+        for(i=1;i<=n;i++){
+            x=ap[i]; y=bp[i];
+            if(x=="" || y==""){ print(x==""?2:1); exit }   # 段多的一方更新（alpha < alpha.1）
+            xn=(x ~ /^[0-9]+$/); yn=(y ~ /^[0-9]+$/);
+            if(xn && yn){ if(x+0!=y+0){ print(x+0>y+0?1:2); exit } }
+            else if(xn!=yn){ print(xn?2:1); exit }         # 数字段 < 非数字段
+            else if(x!=y){ print(x>y?1:2); exit }
+        }
+        print 0
+    }'
+}
+
 cmd_dsh_info() {
     local mod_dir="" payload=false variant="none" pver="" pfile=""
     local bver="" bfile="" bsha="" bsrc="" bfilepath=""
-    local aver="" afile="" afmt=""
+    local aver="" afile="" afmt="" bnewer="null"
 
     # 可选 --module-dir：从别处调用时（例如 /data/sunsetlinux/bin/linuxctl）也能指定模块目录
     while [ $# -gt 0 ]; do
@@ -1665,7 +1705,16 @@ cmd_dsh_info() {
     afile="$(find_layer dsh 2>/dev/null || true)"
     [ -n "$afile" ] && afmt="$(layer_format "$afile" 2>/dev/null || echo unknown)"
 
-    emit "{\"ok\":true,\"module\":{\"dir\":$(_jstr "$mod_dir"),\"variant\":$(_jstr "$variant"),\"has_payload\":$payload,\"payload_version\":$(_jstr "$pver"),\"payload_file\":$(_jstr "$pfile")},\"builtin\":$( [ -n "$bver" ] && printf '{"version":%s,"file":%s,"sha256_raw":%s,"source":%s,"path":%s,"present":%s}' "$(_jstr "$bver")" "$(_jstr "$bfile")" "$(_jstr "$bsha")" "$(_jstr "$bsrc")" "$(_jstr "$bfilepath")" "$( [ -n "$bfilepath" ] && printf 'true' || printf 'false' )" || printf 'null' ),\"active\":$( [ -n "$aver" ] && printf '{"version":%s,"file":%s,"format":%s}' "$(_jstr "$aver")" "$(_jstr "$afile")" "$(_jstr "$afmt")" || printf 'null' )}"
+    # 内置是不是比生效层新（三方共用的版本语义，见 dsh_ver_cmp）：
+    #   true/false 两个版本都知道时才有意义；缺一个就是 null（**不编造**）。
+    #   为什么要暴露它：① `dsh builtin` 的切换判据就是这一条，行为要可观测；
+    #   ② App / doctor 以后可以直接说"内置 DSH 比当前新，建议切换"，不用各自再写一套比较。
+    bnewer="null"
+    if [ -n "$bver" ] && [ -n "$aver" ]; then
+        if [ "$(dsh_ver_cmp "$bver" "$aver")" = "1" ]; then bnewer="true"; else bnewer="false"; fi
+    fi
+
+    emit "{\"ok\":true,\"module\":{\"dir\":$(_jstr "$mod_dir"),\"variant\":$(_jstr "$variant"),\"has_payload\":$payload,\"payload_version\":$(_jstr "$pver"),\"payload_file\":$(_jstr "$pfile")},\"builtin\":$( [ -n "$bver" ] && printf '{"version":%s,"file":%s,"sha256_raw":%s,"source":%s,"path":%s,"present":%s,"newer_than_active":%s}' "$(_jstr "$bver")" "$(_jstr "$bfile")" "$(_jstr "$bsha")" "$(_jstr "$bsrc")" "$(_jstr "$bfilepath")" "$( [ -n "$bfilepath" ] && printf 'true' || printf 'false' )" "$bnewer" || printf 'null' ),\"active\":$( [ -n "$aver" ] && printf '{"version":%s,"file":%s,"format":%s}' "$(_jstr "$aver")" "$(_jstr "$afile")" "$(_jstr "$afmt")" || printf 'null' )}"
     return 0
 }
 
@@ -1788,7 +1837,8 @@ cmd_dsh_builtin() {
     # 第二步（**两条路径都要走**）：决定要不要把生效层切到内置这份
     #   ① 没有 dsh 记录            → 切（全新环境，start.sh 要能立刻定位到它）
     #   ② 生效层**确定**缺 web profile → 切（这份层起不来：supervise.sh 必退 78）
-    #   ③ 生效层是好的             → **不动**（用户可能已经从频道更新过 dsh，
+    #   ③ **内置版本比生效层新**   → 切（模块带来的内置 DSH 更新要能落地）
+    #   ④ 其余（生效层健康且不比内置旧）→ **不动**（用户可能已经从频道更新过 dsh，
     #                                模块升级不该把好意变成回退）
     #
     # ② 是真机事故补上的（2026-09-17）：装 full 模块后内置 rc.2 已经落到 layers/ 了，
@@ -1796,6 +1846,11 @@ cmd_dsh_builtin() {
     # 于是每次 start 都用坏层 → 永远 rc=78；而 doctor 里"内置 DSH 0.1.5-rc.2 已就位"
     # 与"dsh 层内没有 profile"两行同时出现，用户完全无法理解。
     # layer_has_path 三态：0 有 / 1 没有 / 2 判不了 —— 只有**确定的 1** 才切（保守）。
+    #
+    # ③ 是 2026-09-18 真机暴露的：模块 1.0.42 自带内置 dsh **0.1.6-alpha.2**，而生效层是
+    # **健康**的 0.1.5-rc.2 —— 旧逻辑只看"有没有 profile"⇒ 不切，于是用户"覆盖更新模块 +
+    # 重启"之后环境照旧跑 rc.2（service.log 里那行"内置 DSH 就位 …（启用更新=false）"就是它），
+    # 看起来像什么都没发生。注意**方向**：只有内置**更新**才切，内置更旧或相同一律不动。
     # ------------------------------------------------------------------
     local fmt="" cur="" cur_file="" profile_rc=2 why="" activated=false
     fmt="$(layer_format "$dst" 2>/dev/null || echo erofs)"
@@ -1816,6 +1871,11 @@ cmd_dsh_builtin() {
         fi
         if [ "$profile_rc" = "1" ]; then
             why="当前生效层 $cur 里没有 $LAYER_DSH_PROFILE_PATH（这份层起不来：supervise.sh 会退 78）"
+        elif [ -n "$cur" ] && [ -n "$ver" ]; then
+            # 生效层是健康的：内置**更新**才切（见上面 ③）
+            if [ "$(dsh_ver_cmp "$ver" "$cur")" = "1" ]; then
+                why="内置版本 $ver 比生效层 $cur 新"
+            fi
         fi
     fi
     if [ -n "$why" ]; then
