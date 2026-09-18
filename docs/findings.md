@@ -291,17 +291,25 @@ RPATH: $ORIGIN/../../sharp-libvips-linux-arm64/lib : ... : $ORIGIN/.../node_modu
 
 ### 6.4 体积预算（**已全部实测**，三层产物都已真实产出）
 
-| 层 | 内容 | 源体积 | 裸 erofs | 分发 `.zst` | 分发 `.gz` |
-|---|---|---|---|---|---|
-| `base-24.04.3-l1` | ubuntu-base + CA 证书 + 时区，已裁剪 | 109 MB | **95.3 MB** | **18.6 MB** | 26.5 MB |
-| `runtime-1.0.0` | Node v24.21.0 + pnpm 12.4.2 + `/opt/sunsetlinux` 入口脚本 | 246 MB | **229.7 MB** | **46.5 MB** | 73.5 MB |
-| `dsh-0.1.5-rc.2` | `@deepseek-ai/dsh` + 191 依赖 + profile 工作区 | 270 MB | **201.5 MB** | **31.2 MB** | 47.8 MB |
+**当前线上版本**（数字直接取自线上频道清单 `channel.json` 的 `size_raw` / `size` / `size_gz`，
+换算按 ÷1048576，2026-09-18 核对）：
 
-- **全量下载（zstd）= 18.6 + 46.5 + 31.2 = 96.3 MB**；gzip 路径 = 147.8 MB。
-- **DSH 自身升级只下 31.2 MB**（gzip 47.8 MB），不重下系统 —— 这是"更新又拖又慢"的正解。
+| 层 | 内容 | 裸 erofs | 分发 `.zst` | 分发 `.gz` |
+|---|---|---|---|---|
+| `base-24.04.3-l1` | ubuntu-base + CA 证书 + 时区，已裁剪 | **95.3 MB** | **18.6 MB** | 26.5 MB |
+| `runtime-1.0.1` | Node v24.21.0 + pnpm + `/opt/sunsetlinux` 入口脚本 | **233.9 MB** | **47.6 MB** | 74.9 MB |
+| `dsh-0.1.6-alpha.2` | `@deepseek-ai/dsh` + 依赖 + profile 工作区（含 186 MB 的 `libreoffice-kit-wasm`，**按用户裁定不裁**） | **423.1 MB** | **75.4 MB** | 109.5 MB |
+
+- **全量下载（zstd）= 18.6 + 47.6 + 75.4 = 141.6 MB**；gzip 路径 = 210.9 MB。
+- **DSH 自身升级只下 75.4 MB**（gzip 109.5 MB），不重下系统 —— 这是"更新又拖又慢"的正解；
+  App 侧本来就走 `.zst`，CLI/WebUI 侧从 0.3.17 起也能走 `.zst`（见 `docs/STATUS.md` §3.10.54/§3.10.55）。
+- 历史对照（**为什么涨**）：`dsh-0.1.5-rc.2` = 裸 201.5 / `.zst` 31.2 / `.gz` 47.8 MB。
+  0.1.6 涨到 423.1 / 75.4 / 109.5 的原因单一：上游多带 `@deepseek-ai/libreoffice-kit-wasm`
+  （**一个包 186 MB**）——见 `docs/STATUS.md` §3.10.53；那一版也因此撞上 GitHub 单文件
+  100 MB 硬限（`.gz` = 109.5 MB），细节见 §3.10.55 ②。
 - 对比 DSHA：**16 GB 且在 App 私有目录、卸载即毁**。
 - 体积关系不是线性的：erofs 用 4096 字节块，比原目录更省（base 109→95.3 MB）；
-  而 zstd 对文本类内容（node_modules）压缩率极高（dsh 201.5→31.2 MB）。
+  而 zstd 对文本类内容（node_modules）压缩率极高（dsh 423.1→75.4 MB）。
 - 产物与哈希：`dist/*.erofs.{zst,gz}`、`dist/SHA256SUMS.layers.txt`（含**压缩产物**与**解压后裸镜像**两组哈希）。
 - 已知的实测数据（用于交叉验证）：
   - `mkfs.erofs -z lz4` 对 node 二进制 = 69.0 MB；**不压缩** = 116.4 MB；再 `zstd -19` = 31.1 MB
