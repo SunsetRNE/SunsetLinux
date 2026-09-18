@@ -1381,3 +1381,10 @@ tail -20 /data/sunsetlinux/run/sunsetd.log    # 找"控制面已就绪"+"回环�
 交付：`/sdcard/Download/sunsetlinux-module-1.0.39{,-bare}.zip` + 《本轮交付说明-模块1.0.39-控制面修复.md》
 （1.0.38 的文件已从手机上撤掉，避免装错那份没内核的）。**内核 dex 与 1.0.38 完全相同**（`99a7833b…`），
 所以已经装了 1.0.38 的话，直接按 §5 验即可。
+
+**闭环（同日，CI run 50 / `053dce8`）**：流水线全绿。Release `v0.3.14` 上
+`sunsetlinux-module-1.0.39-bare.zip` 从 **282,760 B → 1,062,099 B**，包内确认有
+`bin/sunsetd.dex`（2,527,684 B，含 `AndroidLocalTransport`/`android-local`/`control-selftest`）；
+**APK 内嵌的那份也修好了**（`assets/module/sunsetlinux-module.zip` 1,062,101 B，里面有 dex）。
+手机上的交付包已换成 **CI 原样字节**（sha256 `db8e085f…`，与频道清单一致）——
+所以用户验的就是"别人从频道装到的那一份"。模块自测 41 → 43/0。

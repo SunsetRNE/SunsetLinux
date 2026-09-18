@@ -546,8 +546,14 @@ su -c '/data/sunsetlinux/bin/linuxctl doctor'
    **同一个号码下两份不同字节**是本仓明确要避免的事（§3.10.47 的 C1 就是为此），所以换号。
 
 **验证**：`mkmodule.sh` 两条分支都实测过（缺 dex ⇒ die 且报错给出补救命令；
-`--allow-no-kernel` ⇒ 出声并继续）；本地 1.0.39 两个变体的 `bin/sunsetd.dex` 与构建产物
-sha256 一致（`99a7833b…`）。发布侧由 CI 的新断言盯着。
+`--allow-no-kernel` ⇒ 出声并继续）；模块自测 41 → **43/0**（新增"没给 dex 必须拒绝打包"、
+"`--allow-no-kernel` 才出声继续"，并把假 dex 夹具改成确定性、不随开发者本机漂移）。
+**CI 侧已实测闭环**（run 50，`053dce8`）：全绿；Release `v0.3.14` 上
+`sunsetlinux-module-1.0.39-bare.zip` 从 282,760 B → **1,062,099 B**，
+包内确认有 `bin/sunsetd.dex`（2,527,684 B，含 `AndroidLocalTransport`/`android-local`/`control-selftest`）；
+**APK 内嵌的那份也修好了**：下 `SunsetLinux-0.3.14-root-minimal-debug.apk` 解出
+`assets/module/sunsetlinux-module.zip`（1,062,101 B），里面同样有 `bin/sunsetd.dex`
++ `version=v1.0.39 / variant=bare`。手机上的交付包已换成 CI 原样字节（sha256 与频道一致）。
 
 ### 3.10.48 内核 v2 · P1 首次真机验证：**风险点排除，但控制面撞上"ART 运行时与 SDK 桩不一致"**（模块 1.0.38）
 
