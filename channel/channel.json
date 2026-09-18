@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "name": "SunsetLinux 官方",
-  "generated_at": "2026-09-15T22:57:52Z",
+  "generated_at": "2026-09-18T13:12:34Z",
   "layers": [
     {
       "id": "base",
@@ -19,35 +19,35 @@
     },
     {
       "id": "runtime",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "transport": "zstd",
-      "url": "https://github.com/SunsetRNE/SunsetLinux/releases/download/layers-20260916/runtime-1.0.0.erofs.zst",
-      "sha256": "a336d278a8abd9b26e9252ab1e3bbf16ecf2b57d5e0e08e80fafbbc64c8825a5",
-      "size": 48736940,
-      "sha256_raw": "e6571af1585fed7e6f95b73fe00ca910a10e914f44e5bf2aa3f89292350e4cfe",
-      "size_raw": 240828416,
+      "url": "https://github.com/SunsetRNE/SunsetLinux/releases/download/layers-20260916/runtime-1.0.1.erofs.zst",
+      "sha256": "10cf830997d0853d5fe37b9d2e9012038841fae6ce66eebea521c492b52ebdef",
+      "size": 49952344,
+      "sha256_raw": "d0977ce647c4d463e806fa39482016de238c87d4644c95bc574fddc685d1c6d3",
+      "size_raw": 245313536,
       "transport_gz": "gzip",
-      "url_gz": "https://github.com/SunsetRNE/SunsetLinux/releases/download/layers-20260916/runtime-1.0.0.erofs.gz",
-      "sha256_gz": "a22ff26aa5a2aa3ebee9d2fe94148327172826a56ccd9c73a51a960a100934df",
-      "size_gz": 77067997
+      "url_gz": "https://github.com/SunsetRNE/SunsetLinux/releases/download/layers-20260916/runtime-1.0.1.erofs.gz",
+      "sha256_gz": "c76b98126ddf6e4447236e283f8156cd39b7afc75cb89638c46e90bd4615804b",
+      "size_gz": 78570744
     },
     {
       "id": "dsh",
-      "version": "0.1.5-rc.2",
+      "version": "0.1.6-alpha.2",
       "transport": "zstd",
-      "url": "https://github.com/SunsetRNE/SunsetLinux/releases/download/layers-20260916/dsh-0.1.5-rc.2.erofs.zst",
-      "sha256": "04ddce5f5edee710fc7466d46db40c70b06b11cbdc3d4bad0e2b9d8b9e25e820",
-      "size": 32753059,
-      "sha256_raw": "d9674df77923341e39759750c36f57bb53e481296129dd4e1cb80864faa60c29",
-      "size_raw": 211259392,
+      "url": "https://github.com/SunsetRNE/SunsetLinux/releases/download/layers-20260916/dsh-0.1.6-alpha.2.erofs.zst",
+      "sha256": "00e004e549898c9f14bc34f01ece2c9ece1183e0a3c28acf869e1a07a1296dac",
+      "size": 79078686,
+      "sha256_raw": "1f1e5dd51333b1e1047ee64532bef1fd2931a38a44c59d3f0f124cd6b6dccc64",
+      "size_raw": 443654144,
       "transport_gz": "gzip",
-      "url_gz": "https://github.com/SunsetRNE/SunsetLinux/releases/download/layers-20260916/dsh-0.1.5-rc.2.erofs.gz",
-      "sha256_gz": "30333242466252e5b0099bf1e14a34003b1d58fb93c8541b20fd18e4c247c1d9",
-      "size_gz": 50146411
+      "url_gz": "https://github.com/SunsetRNE/SunsetLinux/releases/download/layers-20260916/dsh-0.1.6-alpha.2.erofs.gz",
+      "sha256_gz": "6d6452bd00791770192947d3260edae1b1731016b26444a0e7dd26b92f9a919b",
+      "size_gz": 114833160
     }
   ],
   "dsh_npm": {
-    "dist_tag": "next",
+    "dist_tag": "alpha",
     "package": "@deepseek-ai/dsh"
   }
 }
