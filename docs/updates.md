@@ -52,7 +52,11 @@ runtime-1.0.1.erofs.zst / .gz
 dsh-0.1.6-alpha.2.erofs.zst / .gz
 ```
 
-* **为什么两种都要发**：设备侧实测**没有 zstd，也没有 xz**，只有 toybox 的 `gzip`
+* **两种都发，但设备侧现在也能吃 `.zst`**（2026-09-18 起）：设备侧实测**没有 zstd 命令**，
+  只有 toybox 的 `gzip`；不过 `runtime` 层自带 **node**，`update.sh` 的 `.zst` 分支会退回
+  "node + `zstd-filter.mjs`"解压（优先级：系统 zstd → 环境里的 node → 明确拒绝并给三条出路）。
+  所以：**base/runtime 仍只发 `.gz`**（自举时还没有 node），**dsh 这类层可以只走 `.zst`**。
+  以下三条历史说明仍然成立 ——
   （`/system/bin/zstd`、`/system/bin/xz` 都不存在）。所以：
   * **App 路径**下载 `.zst`（比 `.gz` 小约 35%），用 App 内的 zstd 解压；
   * **纯 CLI / 无 App 路径**（root 终端手工装层、KernelSU 模块自举）只能用 `.gz` + gzip。

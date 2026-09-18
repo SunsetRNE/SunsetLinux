@@ -1539,6 +1539,42 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# CLI 侧解 .zst：update.sh 必须有 node 兜底，且过滤器随包分发
+# ---------------------------------------------------------------------------
+# 背景（2026-09-18，用户选定路线 (b)）：设备侧没有 zstd 命令，而 dsh 层的
+# .gz 产物已经涨到 109.5 MB（还撞上 GitHub 单文件 100 MB 硬限）。
+# 所以让 CLI 也能吃 .zst：系统 zstd → 环境里的 node（Node 24 的 node:zlib 自带 zstd）
+# → 都没有就**明确拒绝**（不许"下载完才发现解不开"）。
+head_ "单元：CLI 侧解 .zst（node 兜底 + 过滤器随包）"
+if grep -q 'zstd-filter.mjs' "$SELF_DIR/update.sh"; then
+    ok "update.sh 引用了 zstd-filter.mjs"
+else
+    bad "update.sh 里找不到 zstd-filter.mjs 的引用（CLI 解不了 .zst）"
+fi
+if grep -q 'find_node' "$SELF_DIR/update.sh" && grep -q -- '--no-warnings' "$SELF_DIR/update.sh"; then
+    ok "update.sh 的 .zst 分支走 node 兜底（find_node + --no-warnings）"
+else
+    bad "update.sh 的 .zst 分支没有 node 兜底"
+fi
+zf=""
+for cand in "$SELF_DIR/zstd-filter.mjs" "$SELF_DIR/../tools/seed/zstd-filter.mjs" \
+            "$REPO_DIR/tools/seed/zstd-filter.mjs"; do
+    [ -f "$cand" ] && { zf="$cand"; break; }
+done
+if [ -n "$zf" ]; then
+    ok "过滤器就位：$zf"
+    if have node && printf 'sunsetlinux-zstd-roundtrip' | node --no-warnings "$zf" -l 3 2>/dev/null \
+            | node --no-warnings "$zf" -d 2>/dev/null | grep -q 'sunsetlinux-zstd-roundtrip'; then
+        ok "过滤器往返一致（node 实跑 zstd 压缩→解压）"
+    else
+        skip_ "本机没有可用的 node（或 node 无 zstd 支持）→ 跳过过滤器实跑"
+    fi
+else
+    bad "找不到 zstd-filter.mjs（CLI 侧将无法解 .zst）"
+fi
+
+
+# ---------------------------------------------------------------------------
 # 启动器契约：`supervise.sh` 必须用 `node --expose-internals <dsh> web` 起 DSH
 # ---------------------------------------------------------------------------
 # 为什么值得一条**静态**断言（别的都是行为测试）：

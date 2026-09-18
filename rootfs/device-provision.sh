@@ -1088,6 +1088,17 @@ build_runtime() {
     [ "$found" = "2" ] || die "运行时入口脚本不全（找到 $found/2 个：entry.sh supervise.sh）"
     in_chroot /bin/sh -c "test -x $LAYER_RUNTIME_ENTRY && test -x $LAYER_RUNTIME_SUPERVISE" \
         || die "复制后 $LAYER_RUNTIME_ENTRY / $LAYER_RUNTIME_SUPERVISE 不可执行"
+    # zstd-filter.mjs（唯一实现在 tools/seed/）：没有 zstd 命令时，update.sh 用它 +
+    # 环境里的 node 解 .zst。少一个就不铺（**明确告警**，不假装成功）。
+    local zf="" zf_ok=0
+    for zf in "$REPO_DIR/tools/seed/zstd-filter.mjs" "$SELF_DIR/zstd-filter.mjs" "$BIN_DIR/zstd-filter.mjs"; do
+        [ -f "$zf" ] || continue
+        copy_into_chroot "$zf" "$LAYER_RUNTIME_ENTRY_DIR/zstd-filter.mjs" 0644
+        zf_ok=1
+        break
+    done
+    [ "$zf_ok" = "1" ] && log "zstd-filter.mjs 已就位（CLI 侧解 .zst 用）" \
+        || warn "找不到 zstd-filter.mjs：设备侧只能靠系统 zstd 或 .gz 产物"
     log "入口脚本就绪：$LAYER_RUNTIME_ENTRY、$LAYER_RUNTIME_SUPERVISE（随 runtime 层发布）"
 
     build_layer runtime "$MANIFEST_BEFORE"

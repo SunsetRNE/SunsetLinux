@@ -1694,3 +1694,18 @@ App 的 `ModuleUpdate` 拼的是 `releases/download/<tag>/<name>`（退 `release
 > 这与用户选的 **(b) 让 CLI 侧能解 `.zst`** 是两件事，但方向一致：
 > (b) 做完之后模块可以内嵌 **`.zst`（79 MB）** 而不是 `.gz`（109.5 MB），
 > zip 自然回落到 ~79 MB，连"排除"都不再必要 —— 那一步留到 (b) 落地时一起做。
+
+### 补（同轮）：选项 (b) 已落地 —— 设备侧能解 `.zst`
+
+用户 2026-09-18 明确选择 **(b) 让 CLI 侧能解 `.zst`**。已实现并自测：
+
+- `runtime/root/update.sh`：`.zst` 解压优先级 = ①系统 `zstd` → ②**环境里的 node**
+  （`find_node` + 同目录 `zstd-filter.mjs`；Node 24 的 `node:zlib` 自带 zstd；用前先 `node -e '1'` 探活，
+  Android 宿主上跑不了层里那个 glibc node 就走 ③，绝不"下完才发现解不开"）→ ③明确拒绝 + 三条出路。
+- 过滤器**唯一一份**在 `tools/seed/zstd-filter.mjs`，三条交付路径都铺它：
+  `rootfs/build-layers.sh`（→ runtime 层 `/opt/sunsetlinux/`）、`module/mkmodule.sh`（→ 模块 `bin/`）、
+  `rootfs/device-provision.sh`（设备侧自建层）。
+- `runtime/root/selftest.sh` 新增 4 条断言（含 **node 实跑一次 zstd 往返**）：**122 通过 / 0 失败**。
+
+边界：base/runtime 仍只发 `.gz`（自举期没有 node ⇒ "两种都发"不变）；
+dsh 这类"装它时 node 一定在"的层，CLI 现在可以走 `.zst`（79.1 MB 而不是 109.5 MB）。

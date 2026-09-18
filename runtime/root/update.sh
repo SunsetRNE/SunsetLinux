@@ -570,14 +570,39 @@ cmd_apply() {
             fi
             ;;
         *.zst|*.zstd)
+            # 解压优先级：① 系统 `zstd` ② **环境里的 node**（Node 24 的 node:zlib 自带 zstd）
+            #   ② 是 2026-09-18 新增的能力（用户选定的路线：让 CLI 侧也能吃 .zst）：
+            #     设备侧没有 zstd 命令，但 runtime 层自带 node（同目录的 zstd-filter.mjs
+            #     就是 tools/seed 那份，构建期随层/随模块铺进来）。
+            #   ★ node 必须**先探活**：Android 宿主上直接跑层里的 glibc node 会 ENOENT
+            #     （缺 /lib/ld-linux-aarch64.so.1），探活失败就走"明确拒绝"，
+            #     不能让用户以为"下载完了却莫名其妙失败"。
             if have zstd; then
                 zstd -dc "$fname" > "$raw" || { rm -f "$raw"; emit '{"ok":false,"error":"zstd 解压失败"}'; return 1; }
             else
-                # ★ 明确拒绝：本机（设备侧）**没有 zstd**。
-                #   这里在**解压前**就报错，并把该用哪个产物说清楚，
-                #   避免"下载 200MB 之后才发现解不开"。
-                emit "{\"ok\":false,\"error\":\"本机没有 zstd，无法解压 .zst 产物\",\"url\":\"$(jesc "$url")\",\"hint\":\"WebUI / 纯 CLI 路径请改用该频道的 .gz 产物（channel.json 的 url_gz/sha256_gz）；App 侧内置 zstd，可用 .zst（体积小约 35%）\",\"suggest\":\"gzip\"}"
-                return 1
+                local znode="" zfilter=""
+                znode="$(find_node 2>/dev/null || true)"
+                for cand in "$SELF_DIR/zstd-filter.mjs" "$SELF_DIR/tools/seed/zstd-filter.mjs" \
+                            "$LH/bin/zstd-filter.mjs"; do
+                    [ -f "$cand" ] && { zfilter="$cand"; break; }
+                done
+                if [ -n "$znode" ] && [ -n "$zfilter" ] && "$znode" -e '1' >/dev/null 2>&1; then
+                    log "本机没有 zstd，改用环境里的 node 解压（$znode + $(basename "$zfilter")）"
+                    if ! "$znode" --no-warnings "$zfilter" -d < "$fname" > "$raw" 2>/dev/null; then
+                        rm -f "$raw"
+                        emit "{\"ok\":false,\"error\":\"node 解压 .zst 失败\",\"url\":\"$(jesc "$url")\",\"hint\":\"产物可能损坏：重试一次；仍失败就换频道或用该频道的 .gz 产物（url_gz/sha256_gz）\"}"
+                        return 1
+                    fi
+                else
+                    # ★ 明确拒绝：既没有 zstd、也拿不到**能跑起来**的 node。
+                    #   这里在**解压前**就报错，并把该用哪个产物说清楚，
+                    #   避免"下载 200MB 之后才发现解不开"。
+                    local why="本机没有 zstd"
+                    [ -n "$znode" ] || why="$why，也没有 node（runtime 层没装或环境未起）"
+                    [ -n "$zfilter" ] || why="$why，且找不到 zstd-filter.mjs（模块/层版本太旧？）"
+                    emit "{\"ok\":false,\"error\":\"无法解压 .zst 产物（$why）\",\"url\":\"$(jesc "$url")\",\"hint\":\"三条路：① 先装/更新 runtime 层（它自带 node，之后 CLI 就能解 .zst）；② 用该频道的 .gz 产物（channel.json 的 url_gz/sha256_gz）；③ App 侧内置 zstd，可直接用 .zst（体积小约 35%）\",\"suggest\":\"gzip\"}"
+                    return 1
+                fi
             fi
             ;;
         *)

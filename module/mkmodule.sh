@@ -206,6 +206,15 @@ for src in "$BIN_SRC_DIR"/*.sh; do
 done
 [ "$bin_count" -gt 0 ] || die "$BIN_SRC_DIR 里没有 .sh 脚本（路径不对？）"
 
+# ①.5 zstd-filter.mjs（**唯一一份实现在 tools/seed/**）：
+#     update.sh 的 .zst 分支在没有 zstd 命令时会用它 + 环境里的 node 解压。
+#     同目录放一份，模块装到设备上后 `$SELF_DIR/zstd-filter.mjs` 就能命中。
+if [ -f "$REPO_DIR/tools/seed/zstd-filter.mjs" ]; then
+    install -m 0644 "$REPO_DIR/tools/seed/zstd-filter.mjs" "$STAGE/bin/zstd-filter.mjs"
+else
+    die "找不到 tools/seed/zstd-filter.mjs（CLI 侧解 .zst 依赖它）"
+fi
+
 # ② 有几个脚本住在 rootfs/（不是 runtime/root/），单独铺。
 #    它们同样是"运行时"的一部分（linuxctl 会 source layer-spec.sh；
 #    device-provision.sh 是设备侧首次部署入口），所以照样进 bin/。

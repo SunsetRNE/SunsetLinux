@@ -1142,6 +1142,18 @@ if [ -n "$RUNTIME_DIR" ]; then
   chmod 0755 "$RUNTIME_ROOT$LAYER_RUNTIME_ENTRY_DIR"/*.sh 2>/dev/null || true
   sub "已复制 $(find "$RUNTIME_ROOT$LAYER_RUNTIME_ENTRY_DIR" -type f | wc -l | tr -d ' ') 个文件到 runtime 层"
   [ -f "$RUNTIME_ROOT$LAYER_RUNTIME_ENTRY" ] || warn "runtime 层里没有 $LAYER_RUNTIME_ENTRY（环境入口缺失）"
+
+  # zstd-filter.mjs（**唯一一份实现在 tools/seed/**，这里只是把它铺进层）：
+  #   设备侧没有 zstd 命令，update.sh 的 .zst 分支会退回"用环境里的 node + 这个过滤器"解压。
+  #   放 runtime 层（不是 dsh 层）：它属于"运行时工具"，且 dsh 层更新时不必重复带它。
+  ZSTD_FILTER_SRC="$REPO_ROOT/tools/seed/zstd-filter.mjs"
+  if [ -f "$ZSTD_FILTER_SRC" ]; then
+    install -m 0644 "$ZSTD_FILTER_SRC" "$RUNTIME_ROOT$LAYER_RUNTIME_ENTRY_DIR/zstd-filter.mjs"
+    install -m 0644 "$ZSTD_FILTER_SRC" "$DSH_ROOT$LAYER_RUNTIME_ENTRY_DIR/zstd-filter.mjs"
+    sub "已并入 zstd-filter.mjs（CLI 侧解 .zst 用）"
+  else
+    warn "找不到 tools/seed/zstd-filter.mjs —— 设备侧将只能靠系统 zstd 或 .gz 产物"
+  fi
 else
   warn "未找到环境入口脚本目录（runtime/root 为空且未给 --runtime-dir）"
   warn "→ runtime 层里不会有 $LAYER_RUNTIME_ENTRY_DIR/{entry.sh,supervise.sh}（layer-spec.sh §6 要求有）"

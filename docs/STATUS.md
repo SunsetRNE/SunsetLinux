@@ -519,6 +519,27 @@ su -c '/data/sunsetlinux/bin/linuxctl doctor'
 | 已装状态读不到时 | —— | **不给刷入按钮**，先让用户修 root 授权（与"读不到 ≠ 没装"一致） |
 | 重启 | —— | 只报告"重启后生效"（KernelSU 落 `modules_update/`），**App 不替用户重启**，脚本里有单测断言不许出现 `reboot` |
 
+### 3.10.54 设备侧也能解 `.zst`：CLI 不再被 `.gz` 绑死（选项 b，2026-09-18）
+
+**为什么做**：0.1.6 的 dsh 层 `.gz` 产物 **109.5 MB**，同时撞上三件事 ——
+GitHub 的 git 单文件 100 MB 硬限（`layers` 分支与 `gh-pages` 都推不上去）、
+模块 full 变体内嵌它之后 zip 涨到 115 MB（同上）、以及纯 CLI 用户每次更新白下 34 MB。
+
+**改法（用户选定路线 b：让 CLI 侧能解 `.zst`）**：
+
+| 位置 | 改动 |
+|---|---|
+| `runtime/root/update.sh` | `.zst` 分支的解压优先级：① 系统 `zstd` → ② **环境里的 node**（`find_node` 找到的 node + 同目录 `zstd-filter.mjs`；Node 24 的 `node:zlib` 自带 zstd）→ ③ 都没有就**明确拒绝**并说清三条出路。② 之前先 `node -e '1'` **探活**：Android 宿主上直接跑层里的 glibc node 会 ENOENT（缺 /lib/ld-linux-aarch64.so.1），探活失败就走 ③，不会出现"下完才发现解不开" |
+| `tools/seed/zstd-filter.mjs` | **保持唯一一份实现**；构建期由 `rootfs/build-layers.sh` 铺进 runtime 层 `/opt/sunsetlinux/`、由 `module/mkmodule.sh` 铺进模块 `bin/`、`rootfs/device-provision.sh`（设备侧自建层）同样铺 |
+| `runtime/root/selftest.sh` | 新增 4 条断言：update.sh 引用过滤器、走 node 兜底、过滤器就位、**node 实跑一次 zstd 往返**（122 通过 / 0 失败） |
+
+**边界（写清楚，别过度承诺）**：base/runtime 两层仍**只发 `.gz`**（新设备自举时还没有 node），
+所以"两种都发"的规矩**不变**；变的只是**dsh 这类"装它时 node 一定已经在了"的层**：
+CLI 现在可以走 `.zst`（79.1 MB 而不是 109.5 MB）。App 侧本来就走 `.zst`，不受影响。
+
+> 后续（等模块 1.0.41+ 铺开）：dsh 的 `.gz` 可以从清单里摘掉、模块也可以改内嵌 `.zst`（zip 回落到 ~79 MB），
+> `layers-release.yml` 里那个"分片过 git 再拼回"的权宜之计就能退休。
+
 ### 3.10.53 移植目标版本推进到 DSH **0.1.6-alpha.2**：两处"启动即失败"的坑 + 层重打 + 频道（2026-09-18）
 
 **用户原话**：「移植性推进：内置目标版本 `0.1.6-alpha.2`，频道同步更新。继续推进相关项目进度。」
