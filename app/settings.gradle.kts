@@ -24,3 +24,6 @@ dependencyResolutionManagement {
 
 rootProject.name = "sunsetlinux-launcher"
 include(":app")
+
+// 内核 v2：sunsetd（纯 JVM，跑在 app_process 上；见 docs/core-v2-design.md §6 D1 定案）
+include(":sunsetd")

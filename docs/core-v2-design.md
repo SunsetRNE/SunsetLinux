@@ -151,7 +151,24 @@ capabilities`），两种模式是它的两个实现。今天的 root 路径之�
 
 ---
 
-## 6. 需要你拍板的五件事（带我的推荐与代价）
+## 6. 已定案的决策（2026-09-18，用户拍板）
+
+| # | 决策 | 定案 | 备注 |
+|---|---|---|---|
+| D1 | 内核用什么写 | **Kotlin，跑在 `app_process` 上**（模块带一个小 dex） | 原推荐是 Node，**核设备后发现不成立**：宿主侧没有 Node（唯一的 node 是环境内那份 122 MB 的 glibc 构建，bionic 宿主跑不了）；要么带 bionic Node（模块 +60~80 MB、还要背书第三方二进制），要么换宿主一定能跑的运行时。已实测：`/system/bin/app_process64` 存在、容器里有 `d8` 8.6.2、Kotlin 2.3.10 的 Gradle 插件在缓存里、`kotlin → jar → classes.dex` 全通（2.4 MB，含 stdlib）。附带最大好处：**内核与 App 可以共用同一份 Kotlin 契约模型**（今晚第 2、3 条那种"两边各自推导"从结构上消失） |
+| D2 | 内核常驻范围 | root 常驻（模块 `service.sh` 起）+ 免 root 用**前台服务**保活 | 代价：免 root 多一条常驻通知 |
+| D3 | 控制面 | **unix socket + 行分隔 JSON**，保留"命令 + 文件"作为降级 | 内核不在时行为与 v1 完全一致 |
+| D4 | 兼容策略 | **v2 内核 + v1 契约兼容**（App/模块可落后一版） | §3.1 的 `status` JSON 由内核生成，键不变 |
+| D5 | 换代节奏 | **先 P1**（sunsetd 唯一状态机 + status 由内核出），再谈 P2 | P1 就能把"在不在跑"的四份判据删到一份 |
+
+### 6.1 待拍板的（D1 之外的遗留选项，不阻塞 P1）
+
+- 内核与 App 的代码共享范围：只共享契约模型（推荐先这样），还是把 `StartControls` 一类判定也搬进共享模块。
+- 免 root 的前台服务形态：常驻通知 + 保活（P3 再定）。
+
+---
+
+## 6.9 原提案（留档）：五件事的推荐与代价
 
 | # | 决策 | 选项 | 我的建议 |
 |---|---|---|---|
@@ -170,3 +187,25 @@ capabilities`），两种模式是它的两个实现。今天的 root 路径之�
 - 不引入 netns（会断网）、不依赖 `CONFIG_PID_NS`（本机没有）、不要求 bash（设备只有 mksh）。
 - 不为了"优雅"放弃已证明可行的设备事实：loop+erofs、`/mnt/pass_through`、`env-procs.sh` 的
   `/proc/<pid>/root` 判据、`nsenter -- …` 的 `--` 规则 —— 这些都要**原样继承**成后端的实现细节。
+
+---
+
+## 8. P1 工作项与验收（已开工）
+
+| 项 | 内容 | 状态 |
+|---|---|---|
+| P1-a | 状态模型 + 契约 JSON + 单测 + 构建管道 | ✅ 已落地：`app/sunsetd/`（`:sunsetd` 子项目）· `KernelModel.kt`（[Phase]/[Backend]/[SessionState]，含迁移表与 I1/I5 不变量）· `Json.kt`（零依赖小 JSON，**能力边界写在文件头**）· `KernelModelTest` **11 条全过**；`kotlin → jar → d8 → classes.dex` 实测通过 |
+| P1-b | `sunsetd` 主循环：控制 socket（行分隔 JSON）+ `state.json` 原子写 + 心跳/看护 | 待做 |
+| P1-c | 相位驱动：内核 spawn 现有 `start.sh`/`stop.sh`，读标记 + 进程退出码推相位，写世代 | 待做 |
+| P1-d | `linuxctl status` 变瘦客户端：**socket 优先，文件降级**（App 无感） | 待做 |
+| P1-e | 模块打包：dex 进模块 + `service.sh` 用 `app_process` 起内核 + **真机验 SELinux 域** | 待做（唯一未验证的风险点；失败可回退 v1） |
+| P1-f | 契约回归：内核生成的 `status` 必须过 `tools/contract-check.mjs`；内核单测进 CI | 待做 |
+
+**P1 完成判据**（都要求真机证据）：
+
+1. "在不在跑"只剩**一份**实现（`sunsetd` 的状态）；`start.sh:running_ns_pid`、`linuxctl:ns_pid_alive/env_ready`、
+   App 的推导全部改成读内核状态；
+2. 建树 30~50 秒期间 `status.phase ∈ {mounting, starting}`，App 的启动卡自动置灰（不再依赖 `start.lock` 这种补丁）；
+3. `linuxctl status` 走 socket 时与 v1 JSON **逐键一致**（`contract-check.mjs` 两种路径都跑）；
+4. 内核不在（模块被停用 / 免 root 未起前台服务）时，命令行为与今天完全一致（降级路径）；
+5. `app_process` 起内核在真机 root 域下可用（或给出可回退的替代启动方式）。
