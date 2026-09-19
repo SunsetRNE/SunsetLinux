@@ -482,17 +482,27 @@ su -c '/data/sunsetlinux/bin/linuxctl doctor'
 
 ## 七、下一步（按优先级）
 
-1. **你在真机跑 `doctor`** → 我据此修真机问题（最可能是 toybox mount 的降级分支）。
+> ★ **2026-09-19 维护决策变更（已落地，0.3.27 / 模块 1.0.52）**：内置矩阵
+> **6 个组合 → 2 个** —— `root-minimal`（极简 Root + 模块挂载 Ubuntu）与
+> `proot-full`（完整 proot + Ubuntu）。决策记录在 `tools/offline-bundle/variants.json`
+> 的 `_decision`；**「可变 DSH」**的定义与命令在 `docs/module-variants.md` §〇.1
+> （`linuxctl dsh remove|builtin|install` + `rollback dsh <版本>`）。
+> 发布核验：run 74 绿，`stable/index.json` 里**恰好 2 个 APK**、离线包**只有
+> `SunsetLinux-0.3.27-proot-full.bin`**（root-minimal 按定义不内嵌）。
+> 下面几条是这次收敛**之后**仍然有效的下一步。
+
+1. **你在真机跑 `doctor`** → 我据此修真机问题（最可能是"两个环境同起互踩"那一类）。
    现在 root 侧脚本已经是 mksh 可解析的，这一步**第一次真的有可能跑出结果**（以前会直接语法错）。
-   顺带值得一起跑：`su -c '/data/sunsetlinux/bin/linuxctl provision --seed …'` 之后
-   `linuxctl start`，把 proot 模式也过一遍（§4.4 已 mksh 化，但这台真机上是第一次真跑）。
-2. **重打三层层镜像**：现有 `dist/*.erofs` 里还留着改名前的死文件 `/opt/dshroid/*.sh`
+2. **可变 DSH 的真机验收**：`dsh remove` → 环境仍能起（只是没有 DSH）→ `dsh builtin` 装回
+   → `rollback dsh <版本>` 回到指定版本。三条都有自测（selftest 的「可变 DSH」一节），
+   但**真机端到端还没走过**。
+3. **重打三层层镜像**：现有 `dist/*.erofs` 里还留着改名前的死文件 `/opt/dshroid/*.sh`
    （不影响功能：`start.sh` 启动时会把模块里的新版同步到 `/opt/sunsetlinux`）。
    重建必须在**有 CAP_SYS_ADMIN 的宿主 / CI** 上跑 `rootfs/build-layers.sh`（本工作容器
    没有该能力：实测 `CapEff=0`、`mount` 是假的（`/proc/mounts` 不变），只能跑到 mmdebstrap 报错为止）。
-3. App 侧「彻底卸载」入口（先备份 → 确认 → `purge --yes` → 展示 `footprint`）：
+4. App 侧「彻底卸载」入口（先备份 → 确认 → `purge --yes` → 展示 `footprint`）：
    **机制已就绪**（`linuxctl purge [--yes|--arm|--disarm]` + `footprint`），只差 UI。
-4. 真机通过后再考虑：局域网访问、脚本自更新、更多频道的实测。
+5. 真机通过后再考虑：局域网访问、脚本自更新、更多频道的实测。
 
 > ✔ 已完成（原第 2 项）：**proot 模式的宿主侧脚本 mksh 化**，见 §4.4。
 

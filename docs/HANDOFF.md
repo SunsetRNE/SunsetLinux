@@ -2123,10 +2123,16 @@ loop52 指向 `dsh-0.1.6-alpha.2.erofs`，挂载层版本 `0.1.6-alpha.2`。
 
 ## 你要做的（三件事，都有可自证的判据）
 
-1. **装 App 0.3.21**（覆盖安装，数据不丢）+ **刷模块 1.0.45** → **重启一次**。
-2. 更新页点「刷新」：应当报出 **runtime 1.0.0 → 1.0.1**（上一轮修好的验签）；
+> ★ 2026-09-19 维护决策变更：**内置矩阵从 6 个组合收敛到 2 个** ——
+> `root-minimal`（极简 Root + 模块挂载 Ubuntu）与 `proot-full`（完整 proot + Ubuntu）。
+> 下载页从此**只有两个 APK**；「可变 DSH」的定义与命令见 `docs/module-variants.md` §〇.1
+> 与 `tools/offline-bundle/variants.json` 的 `_decision.variable_dsh`。
+
+1. **装 App 0.3.27**（覆盖安装，数据不丢；**有 root 选 `-root-minimal-`，没有选 `-proot-full-`**）
+   + **刷模块 1.0.52** → **重启一次**。
+2. 更新页点「刷新」：应当报出 **runtime 1.0.0 → 1.0.1**（0.3.19 修好的验签）；
    「频道检查」卡里能看到 `验签实现：…`。
-3. 环境起来后，在 App 终端里跑这三条，把输出贴回来即可确认本轮：
+3. 环境起来后，在 App 终端里跑这几条，把输出贴回来即可确认本轮：
    ```sh
    linuxctl whereami                    # 我在哪个视角（应当是 env；并给出路径地图）
    ls -l /share /mnt/sdcard/Download    # 交换目录 + **手机上的 Download**（这条路径是实测过的）
@@ -2134,8 +2140,16 @@ loop52 指向 `dsh-0.1.6-alpha.2.erofs`，挂载层版本 `0.1.6-alpha.2`。
    ```
    ⚠️ 第三条是**改过的**：`echo $DSH_PERMISSION_MODE` 在终端里永远是空的 ——
    那个变量属于 **DSH 服务进程**（`/run/dsh.pid`），而终端 shell 不是它的子进程。
-   上一轮的三条命令里，第 1、3 条实测跑不通（`linuxctl: command not found` / 空值），
-   现在第 1 条靠 `/usr/local/bin/linuxctl` 软链（本轮新增）成立，第 3 条按上面的写法取值。
+   ⚠️ 第二条在 **0.3.26 之前**其实不成立（`/mnt/sdcard` 挂错层，0.3.26 才修好）。
+
+   **「可变 DSH」的自证（本轮新增能力）**：
+   ```sh
+   linuxctl dsh info                 # 当前生效版本
+   linuxctl dsh remove --dry-run     # 看会删什么（只删 dsh 层，base/runtime 不动）
+   linuxctl dsh remove               # 真删（需先 linuxctl stop）
+   linuxctl dsh builtin              # 装回模块内嵌那份（幂等）
+   linuxctl rollback dsh <版本>       # 回滚仍按版本
+   ```
    宿主侧（MT）看：`/data/sunsetlinux/README-地图.md` 应当在；`/data/sunsetlinux/share/` 里也有地图。
 
 ## 需要你拍板的一件事
