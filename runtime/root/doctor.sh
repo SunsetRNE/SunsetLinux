@@ -1337,8 +1337,11 @@ else
     printf '  \033[32m全部通过\033[0m（%d 项 warn）\n' "$WARNS"
 fi
 # 口径不同时说一句，省得下一个人把"warns 与 findings 条数不等"当成计数 bug
+# ★ 别写 `info "…%d…" "$WARNS" "$F_WARN"`：info() 是 `printf '…%s…' "$*"` ——
+#   它不替换 %d，还会把多出来的参数**原样追加**在行尾（真机上就显示成
+#   "…findings_summary.warn=%d 是… 2 1"）。数字要在调用前拼进字符串里。
 if [ "$F_WARN" != "$WARNS" ]; then
-    info "口径说明：上面的 %d 项 warn 是**检查项**计数；JSON 里 findings_summary.warn=%d 是**结论条目**计数（不是每条 warn 都写一条 finding）" "$WARNS" "$F_WARN"
+    info "口径说明：上面的 $WARNS 项 warn 是**检查项**计数；JSON 里 findings_summary.warn=$F_WARN 是**结论条目**计数（不是每条 warn 都写一条 finding）"
 fi
 
 # 结尾一行 JSON（App / 自动化解析用）

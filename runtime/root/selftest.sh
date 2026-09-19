@@ -1815,6 +1815,13 @@ if grep -q 'sdcard_not_user_root' "$SELF_DIR/doctor.sh"; then
 else
     bad "doctor 不检查共享存储可达性 —— \"挂上了但看不见\"会再次静默通过"
 fi
+# 回归：info()/warn()/ok()/bad() 都是 `printf '…%s…' "$*"` 的包装 —— 给它们传 %d
+# 不会被替换，多出来的参数还会原样追加在行尾（真机实测显示成 "…%d… 2 1"）。
+if grep -q 'findings_summary.warn=\$F_WARN' "$SELF_DIR/doctor.sh"; then
+    ok "口径说明把数字拼进字符串（不靠包装函数替 %d）"
+else
+    bad "口径说明又用了 %d 占位符 —— 真机上会漏成 \"…%d… 2 1\""
+fi
 # 动态：实跑一次最简 doctor，JSON 里确实带 findings_summary
 DSE="$TMP/doctor-summary-env"
 mkdir -p "$DSE"
