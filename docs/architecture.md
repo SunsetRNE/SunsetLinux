@@ -318,13 +318,19 @@ Node 服务）本来就是两层东西，但 `linuxctl start` 一直把它们绑
    ★ 理由：`dsh.pid` / `dsh.port` / `dsh.url` / `linux.log` 由环境内写入、但由
      **chroot 外的 `linuxctl`** 读取。tmpfs 会让宿主完全看不到里面的内容，契约无法实现。
      rbind 后两侧是同一批 inode，语义与 §2.1 一致，且不需要任何同步机制。
-10. sdcard（绕 FUSE，目标是**用户存储根**）：
-     mount --rbind /mnt/pass_through/0/emulated/0 rootfs/mnt/sdcard
-     ln -sfn /mnt/sdcard rootfs/storage/emulated/0
-   失败则回退 mount --rbind /storage/emulated/0
+10. sdcard（绕 FUSE，目标是**用户存储根**）：按顺序试**三个候选源**，每个都要"挂上后看得见
+    `Download` 或 `DCIM`"才算数，不合格就卸载换下一个：
+      ① mount --rbind /data/media/0             rootfs/mnt/sdcard   ← **DE 存储，开机即可用**
+      ② mount --rbind /mnt/pass_through/0/emulated/0 rootfs/mnt/sdcard  ← vold 直通（看时机）
+      ③ mount --rbind /storage/emulated/0       rootfs/mnt/sdcard   ← FUSE 兜底
+    ln -sfn /mnt/sdcard rootfs/storage/emulated/0
    ★ 必须挂到 `<user_id>` 那一层，**不是**它的父目录 `/mnt/pass_through/0/emulated`：
      父目录是 f2fs 的 `/media`，里面是 `0/ 997/ 998/ 999/ obb/` —— 挂父目录时
-     `/mnt/sdcard/Download` **不存在**（2026-09-19 真机实测修正；见 HANDOFF §1）。
+     `/mnt/sdcard/Download` **不存在**。
+   ★ 也不能"只看目录存在"：开机自启在 **boot 早期**（实测开机后 47 秒），那时 vold 还没挂
+     pass_through，`/mnt/pass_through/0/emulated/0` 是 **tmpfs 上的空占位目录** ⇒ 挂上却什么都没有。
+     `/data/media/0` 与它是**同一个 inode**（实测 `11058`）但**立即可用**，所以排第一。
+     （2026-09-19 两次真机实测修正；见 HANDOFF §1）
 11. chroot rootfs /opt/sunsetlinux/entry.sh
 ```
 

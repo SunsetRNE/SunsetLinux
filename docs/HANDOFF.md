@@ -2060,15 +2060,21 @@ loop52 指向 `dsh-0.1.6-alpha.2.erofs`，挂载层版本 `0.1.6-alpha.2`。
   **没有 `/data`** ⇒ `/data/...` 落进 rootfs 里的 `data/`。
 - 用户"候补记"**是对的**：`upperdir=$LH/upper/upper`（双 `upper` = 镜像挂载点 + upperdir 目录名），
   chroot `/root` = 宿主 `$LH/upper/upper/root`。
-- ~~Download **早就通了**：环境里 `/mnt/sdcard`，`/storage/emulated/0` 是它的软链 —— 按宿主路径找所以没找到。~~
-  **← 这句是错的，2026-09-19 实机核验推翻**：环境里 `/mnt/sdcard` 当时挂的是
-  `/mnt/pass_through/0/emulated` —— 那是 **f2fs 的 `/media`**，布局为 `<user_id>/…`
-  （`0/ 997/ 998/ 999/ obb/`），**不是用户存储根**。所以 `/mnt/sdcard/Download` 里
-  什么也没有（`ls` 直接 `No such file or directory`），软链 `/storage/emulated/0 -> /mnt/sdcard`
-  跟着一起指错 —— 日志写着"已挂载"、doctor 全绿，用户却一个文件都看不到。
-  现在 `start.sh` 挂的是 **`<pt>/0`**（用户存储根，inode 与 `/storage/emulated/0` 相同），
-  于是 `/mnt/sdcard/Download` 与那条软链同时成立；启动日志里多了一行**自证**
-  （"看得到 Download/DCIM"），doctor 也会在看不到时报 warn。
+- Download 的**真根因（两层，都已被实机抓到）**：
+  ① 环境里 `/mnt/sdcard` 挂的是 `/mnt/pass_through/0/emulated` —— 那是 **f2fs 的 `/media`**，
+     布局为 `<user_id>/…`（`0/ 997/ 998/ 999/ obb/`），**不是用户存储根** ⇒
+     `/mnt/sdcard/Download` 里什么也没有（`ls` 直接 `No such file or directory`），
+     软链 `/storage/emulated/0 -> /mnt/sdcard` 跟着一起指错；
+  ② 改挂 `<pt>/0` 之后**还是看不见**（模块 1.0.47 实测）：因为开机自启发生在 **boot 早期** ——
+     实测 `13:19:17` 开机、`13:20:04` 起环境（**开机后 47 秒**），那时 vold 还没把
+     pass_through 挂上，`[ -d … ]` 看到的是 **tmpfs 上的空占位目录**（`stat -f` 报 `tmpfs`）。
+     这次是**新加的启动自证**当场报出来的：`WARN: /mnt/sdcard 下既没有 Download 也没有 DCIM`。
+  ⇒ 现在 `start.sh` 的做法是"**候选源 + 内容校验**"：
+  `/data/media/0`（**DE 存储，开机即可用**；实测与 `/mnt/pass_through/0/emulated/0`
+  是同一个 inode `11058`）→ `/mnt/pass_through/0/emulated/0`（vold 直通，看时机）→
+  `/storage/emulated/0`（FUSE 兜底）；每个都要求"挂上后能看到 `Download` 或 `DCIM`"才算数，
+  不合格就卸载换下一个，三个都不合格才保留最后一个并明确 WARN。
+  这条**只有重刷模块（1.0.48+）+ 重启**才会生效。
 - 顺带发现：那条 proot 命令行里**带着 API key**（已提醒壳侧改成环境文件注入；我们自己的脚本一直避免这件事）。
 
 ## 2. 「环境里默认非 root」= 一条环境变量，不是权限

@@ -1732,22 +1732,31 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-head_ "单元：共享存储挂载目标 = 用户存储根（2026-09-19 真机修正）"
+head_ "单元：共享存储挂载（候选源顺序 + 内容校验，2026-09-19 真机修正）"
 #
-# 现场：环境里 `/mnt/sdcard/Download` 报 No such file or directory，而启动日志写着"已挂载"。
-# 根因：rbind 挂的是 /mnt/pass_through/0/emulated（f2fs 的 /media，布局 <user_id>/…）——
-# 那是"所有用户的父目录"，不是用户存储根 ⇒ Download 在它下面一层（0/）。
-# 这一节把"必须挂哪一层"钉死，免得下次又滑回父目录。
-if grep -q 'local pt="/mnt/pass_through/0/emulated/0"' "$SELF_DIR/start.sh"; then
-    ok "sdcard 首选路径是用户存储根（…/emulated/0）"
+# 两次现场（同一台机器，两次修复）：
+#   ① 环境里 `/mnt/sdcard/Download` 报 No such file —— 挂的是**父目录**
+#      /mnt/pass_through/0/emulated（f2fs 的 /media，布局 <user_id>/…），Download 在它下一层；
+#   ② 改挂 `<pt>/0` 之后**还是看不见** —— 因为开机自启发生在 **boot 早期**（实测开机后 47 秒），
+#      那时 vold 还没挂 pass_through，`[ -d ]` 看到的是 **tmpfs 上的空占位目录**
+#      （启动自证当场报出，fstype=tmpfs）。
+# ⇒ 结论：既不能挂错层，也不能只看"目录存在"，必须**挂上后校验内容**并**按可用性排序候选源**。
+if grep -q 'for src in "/data/media/\$u" "/mnt/pass_through/\$u/emulated/\$u" "/storage/emulated/\$u"' "$SELF_DIR/start.sh"; then
+    ok "sdcard 候选源按开机可用性排序（/data/media → pass_through → FUSE）"
 else
-    bad "sdcard 首选路径不是 …/emulated/0 —— 环境内 /mnt/sdcard/Download 会不存在"
+    bad "候选源顺序不对 —— 开机早期会先挂到还没就绪的 pass_through 上（环境内看不到手机文件）"
 fi
-# 反向断言：pt 的赋值绝不能又变回父目录（ptp= 那行只是给日志提示用的，允许存在）
-if grep -qE '^[[:space:]]*local pt="/mnt/pass_through/0/emulated"' "$SELF_DIR/start.sh"; then
-    bad "pt 又指回多用户父目录 /mnt/pass_through/0/emulated —— Download 会再次看不见"
+# 内容校验：每个候选源都要"看得到 Download/DCIM"才算数
+if grep -q 'mnt/sdcard/Download" \] || \[ -d "\$ROOTFS_DIR/mnt/sdcard/DCIM"' "$SELF_DIR/start.sh"; then
+    ok "每个候选源都要通过内容校验（Download/DCIM 看得到才算数）"
 else
-    ok "没有把多用户父目录当作 /mnt/sdcard"
+    bad "缺少挂载后的内容校验 —— 又会把「挂上了」当成「看得见」"
+fi
+# 反向断言：不许再回到"只挂 pass_through"的老写法
+if grep -qE '^[[:space:]]*local pt="/mnt/pass_through/0/emulated' "$SELF_DIR/start.sh"; then
+    bad "又回到只挂 pass_through 的老写法（开机早期会拿到空 tmpfs）"
+else
+    ok "没有只挂 pass_through 的老写法"
 fi
 # "挂载成功"必须再自证一句"看得见文件"：日志里要有 Download/DCIM 检查
 if grep -q 'sdcard 自证' "$SELF_DIR/start.sh"; then

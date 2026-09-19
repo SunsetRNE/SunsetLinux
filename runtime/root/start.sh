@@ -1452,58 +1452,65 @@ install_runtime_entry() {
 }
 
 # ---------------------------------------------------------------------------
-# sdcard 挂载：优先 /mnt/pass_through/0/emulated/0（**用户存储根**，绕过 FUSE），
-# 失败回退 /storage/emulated/0。两处结果都写日志（architecture.md §1/§2）。
+# sdcard 挂载：在多个候选源里挑**第一个"挂上且真有用户文件"**的。
 #
-# ★ 为什么是 `…/emulated/0` 而不是 `…/emulated`（2026-09-19 真机实测修正）：
-#   /mnt/pass_through/0/emulated 是 f2fs 的 /media，布局为 <user_id>/…：
-#       emulated/
-#         ├── 0/     ← 用户 0 的存储根（inode 与 /storage/emulated/0 相同）
-#         ├── 997/ 998/ 999/
-#         └── obb/
-#   旧实现 rbind 父目录 ⇒ 环境内 `/mnt/sdcard/Download` **不存在**（用户按文档走必然扑空），
-#   而 `ln -sfn /mnt/sdcard /storage/emulated/0` 也一起指错 —— 日志说"已挂载"、
-#   doctor 全绿，用户却一个文件都看不到。挂存储根之后两条路径同时成立。
+# ★ 候选源按"开机即可用"排序（2026-09-19 真机实测修正 v2）：
+#
+#   1) /data/media/<u>                    ← **DE 存储**（/data 分区上的目录）
+#        实测与 /mnt/pass_through/0/emulated/0 是**同一个 inode**（11058），
+#        但它在**开机后立刻**可用：不依赖 vold 挂 pass_through，也不等用户解锁。
+#   2) /mnt/pass_through/<u>/emulated/<u> ← vold 直通（绕 FUSE 的首选，但**看时机**）
+#   3) /storage/emulated/<u>              ← FUSE 兜底
+#
+#   为什么必须换（v1 只挂 pass_through/0 的那个版本为什么还是看不见文件）：
+#   开机自启发生在 **boot 早期** —— 实测 13:19:17 开机、13:20:04 起环境，也就是开机后
+#   **47 秒**；那时 vold 还没把 pass_through 挂上，`[ -d /mnt/pass_through/0/emulated/0 ]`
+#   看到的是 **tmpfs 上的空占位目录**（`stat -f` 报 `tmpfs`），于是"挂载成功"却什么也没有
+#   （启动自证当场报出：`/mnt/sdcard 下既没有 Download 也没有 DCIM`）。
+#   现在每挂一个源都**校验内容**（能看到 Download 或 DCIM 才算数），不合格就卸载换下一个；
+#   三个都不合格才保留最后一个并明确 WARN（至少不让 /mnt/sdcard 变成空目录）。
 # ---------------------------------------------------------------------------
 mount_sdcard() {
-    local pt="/mnt/pass_through/0/emulated/0"
-    local ptp="/mnt/pass_through/0/emulated"      # 父目录（多用户视图）：仅用于日志提示
-    local fb="/storage/emulated/0"
-    local chosen="" fs=""
+    local u=0
+    local chosen="" chosen_fs="" last_src="" last_fs=""
+    local src fs
 
-    if [ -d "$pt" ]; then
-        log "sdcard 首选路径 $pt 存在（用户存储根），尝试 rbind（绕开 FUSE）"
-        if do_rbind_op "$pt" "$ROOTFS_DIR/mnt/sdcard"; then
-            chosen="$pt"
-            record_mount "mnt/sdcard"
-            fs="$(fstype_of "$ROOTFS_DIR/mnt/sdcard")"
-            log "sdcard 已挂载：$pt -> /mnt/sdcard（fstype=$fs）"
-            if [ "$fs" = "fuse" ] || [ "$fs" = "fuseblk" ]; then
-                log "WARN: 结果仍是 $fs，说明 pass_through 本身被 FUSE 包着；回退到 $fb 再试一次"
-                "$UMOUNT" -l "$ROOTFS_DIR/mnt/sdcard" 2>/dev/null || true
-                chosen=""
-            fi
-        else
-            log "WARN: rbind $pt 失败，回退 $fb"
+    for src in "/data/media/$u" "/mnt/pass_through/$u/emulated/$u" "/storage/emulated/$u"; do
+        if [ ! -d "$src" ]; then
+            log "sdcard 候选 $src 不存在，试下一个"
+            continue
         fi
-    else
-        if [ -d "$ptp" ]; then
-            log "WARN: $pt 不存在（pass_through 在，但没有用户 0 的存储根）—— 回退 $fb"
-        else
-            log "sdcard 首选路径 $pt 不存在（非 Oplus 或 pass_through 未开），回退 $fb"
+        if ! do_rbind_op "$src" "$ROOTFS_DIR/mnt/sdcard"; then
+            log "WARN: rbind $src 失败，试下一个"
+            continue
         fi
-    fi
-
-    if [ -z "$chosen" ]; then
-        [ -d "$fb" ] || die "sdcard 回退路径 $fb 也不存在"
-        if ! do_rbind_op "$fb" "$ROOTFS_DIR/mnt/sdcard"; then
-            die "sdcard 两种路径都挂载失败（$pt / $fb）"
-        fi
-        record_mount "mnt/sdcard"
-        chosen="$fb"
         fs="$(fstype_of "$ROOTFS_DIR/mnt/sdcard")"
-        log "sdcard 已挂载（回退）：$fb -> /mnt/sdcard（fstype=$fs）"
+        if [ -d "$ROOTFS_DIR/mnt/sdcard/Download" ] || [ -d "$ROOTFS_DIR/mnt/sdcard/DCIM" ]; then
+            chosen="$src"
+            chosen_fs="$fs"
+            log "sdcard 已挂载（内容已校验）：$src -> /mnt/sdcard（fstype=$fs）"
+            break
+        fi
+        log "WARN: $src 挂上了但看不到 Download/DCIM（存储还没就绪？fstype=$fs）—— 卸载，试下一个"
+        last_src="$src"
+        last_fs="$fs"
+        "$UMOUNT" -l "$ROOTFS_DIR/mnt/sdcard" 2>/dev/null || true
+    done
+
+    # 三个源都拿不到用户文件：把最后那个能挂的放回去 —— 环境照常可用，
+    # 但日志里必须留下"环境里 /mnt/sdcard 会是空的"，别让用户自己去猜。
+    if [ -z "$chosen" ] && [ -n "$last_src" ]; then
+        if do_rbind_op "$last_src" "$ROOTFS_DIR/mnt/sdcard"; then
+            chosen="$last_src"
+            chosen_fs="$last_fs"
+            log "WARN: 三个候选源都拿不到用户文件，最后用 $last_src —— 环境内 /mnt/sdcard 会是空的"
+        fi
     fi
+    if [ -z "$chosen" ]; then
+        die "sdcard 全部候选都挂载失败（/data/media/$u、/mnt/pass_through/$u/emulated/$u、/storage/emulated/$u）"
+    fi
+    record_mount "mnt/sdcard"
+    fs="$chosen_fs"
 
     # /storage/emulated/0 -> /mnt/sdcard 的软链（契约要求，供 App 与用户习惯路径）。
     # 只有在 /mnt/sdcard 真是**用户存储根**时这条软链才成立 —— 见上面 mount 目标的选择。
@@ -1513,8 +1520,9 @@ mount_sdcard() {
     if [ -d "$ROOTFS_DIR/storage/emulated/0" ] && [ ! -L "$ROOTFS_DIR/storage/emulated/0" ]; then
         log "WARN: /storage/emulated/0 是目录而非软链，跳过（用户数据优先）"
     fi
-    # ★ 自证：挂载"成功"不等于用户能看见文件。这里直接问一句
-    #   "Download 在不在" —— 上一版正是在这一步无声地错了（挂上了父目录）。
+    # ★ 自证：挂载"成功"不等于用户能看见文件。这里直接问一句"Download 在不在" ——
+    #   前两版都是在这一步无声地错的（先挂到父目录，后又挂到"还没就绪的 pass_through"）。
+    #   现在**校验前移**：上面循环里已经把不合格的源筛掉了，这里是最后一道确认。
     if [ -d "$ROOTFS_DIR/mnt/sdcard/Download" ] || [ -d "$ROOTFS_DIR/mnt/sdcard/DCIM" ]; then
         log "sdcard 自证：/mnt/sdcard 下能看到 Download/DCIM（用户存储根判定正确）"
     else
