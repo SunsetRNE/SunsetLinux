@@ -40,7 +40,7 @@ mount -t overlay overlay -o lowerdir=…/layers-mnt/dsh:…/layers-mnt/runtime:�
 |---|---|---|
 | `/` | `$LINUX_HOME/rootfs` | overlay 合成（三层只读 + 可写层） |
 | 写入的任何文件 | `$LINUX_HOME/upper/upper/…` | 可写层（`upper.img` 里的 `upper/`）。双 `upper` = 挂载点 + upperdir 目录名 |
-| `/mnt/sdcard` | `/storage/emulated/0` | 共享存储（`/storage/emulated/0` 是指向它的软链） |
+| `/mnt/sdcard` | `/storage/emulated/0` | 共享存储的**用户存储根**（`/storage/emulated/0` 是指向它的软链）。Download = `/mnt/sdcard/Download` |
 | `/share` | `$LINUX_HOME/share` | **交换目录**（见 §3） |
 | `/run` | `$LINUX_HOME/run` | 状态与日志（同一批 inode） |
 

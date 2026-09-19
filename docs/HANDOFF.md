@@ -2060,7 +2060,15 @@ loop52 指向 `dsh-0.1.6-alpha.2.erofs`，挂载层版本 `0.1.6-alpha.2`。
   **没有 `/data`** ⇒ `/data/...` 落进 rootfs 里的 `data/`。
 - 用户"候补记"**是对的**：`upperdir=$LH/upper/upper`（双 `upper` = 镜像挂载点 + upperdir 目录名），
   chroot `/root` = 宿主 `$LH/upper/upper/root`。
-- Download **早就通了**：环境里 `/mnt/sdcard`，`/storage/emulated/0` 是它的软链 —— 按宿主路径找所以没找到。
+- ~~Download **早就通了**：环境里 `/mnt/sdcard`，`/storage/emulated/0` 是它的软链 —— 按宿主路径找所以没找到。~~
+  **← 这句是错的，2026-09-19 实机核验推翻**：环境里 `/mnt/sdcard` 当时挂的是
+  `/mnt/pass_through/0/emulated` —— 那是 **f2fs 的 `/media`**，布局为 `<user_id>/…`
+  （`0/ 997/ 998/ 999/ obb/`），**不是用户存储根**。所以 `/mnt/sdcard/Download` 里
+  什么也没有（`ls` 直接 `No such file or directory`），软链 `/storage/emulated/0 -> /mnt/sdcard`
+  跟着一起指错 —— 日志写着"已挂载"、doctor 全绿，用户却一个文件都看不到。
+  现在 `start.sh` 挂的是 **`<pt>/0`**（用户存储根，inode 与 `/storage/emulated/0` 相同），
+  于是 `/mnt/sdcard/Download` 与那条软链同时成立；启动日志里多了一行**自证**
+  （"看得到 Download/DCIM"），doctor 也会在看不到时报 warn。
 - 顺带发现：那条 proot 命令行里**带着 API key**（已提醒壳侧改成环境文件注入；我们自己的脚本一直避免这件事）。
 
 ## 2. 「环境里默认非 root」= 一条环境变量，不是权限
@@ -2114,10 +2122,14 @@ loop52 指向 `dsh-0.1.6-alpha.2.erofs`，挂载层版本 `0.1.6-alpha.2`。
    「频道检查」卡里能看到 `验签实现：…`。
 3. 环境起来后，在 App 终端里跑这三条，把输出贴回来即可确认本轮：
    ```sh
-   linuxctl whereami            # 我在哪个视角（应当是 env；并给出路径地图）
-   ls -l /share /mnt/sdcard     # 交换目录与共享存储都在
-   echo $DSH_PERMISSION_MODE    # danger-full-access（环境内默认全权）
+   linuxctl whereami                    # 我在哪个视角（应当是 env；并给出路径地图）
+   ls -l /share /mnt/sdcard/Download    # 交换目录 + **手机上的 Download**（这条路径是实测过的）
+   tr '\0' '\n' < /proc/$(cat /run/dsh.pid)/environ | grep DSH_PERMISSION_MODE
    ```
+   ⚠️ 第三条是**改过的**：`echo $DSH_PERMISSION_MODE` 在终端里永远是空的 ——
+   那个变量属于 **DSH 服务进程**（`/run/dsh.pid`），而终端 shell 不是它的子进程。
+   上一轮的三条命令里，第 1、3 条实测跑不通（`linuxctl: command not found` / 空值），
+   现在第 1 条靠 `/usr/local/bin/linuxctl` 软链（本轮新增）成立，第 3 条按上面的写法取值。
    宿主侧（MT）看：`/data/sunsetlinux/README-地图.md` 应当在；`/data/sunsetlinux/share/` 里也有地图。
 
 ## 需要你拍板的一件事

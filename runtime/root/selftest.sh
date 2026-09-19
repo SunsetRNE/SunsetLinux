@@ -1731,6 +1731,82 @@ else
     bad "supervise.sh 里没有 DSH_PERMISSION_MODE —— 环境里仍会逐条提权"
 fi
 
+# ---------------------------------------------------------------------------
+head_ "单元：共享存储挂载目标 = 用户存储根（2026-09-19 真机修正）"
+#
+# 现场：环境里 `/mnt/sdcard/Download` 报 No such file or directory，而启动日志写着"已挂载"。
+# 根因：rbind 挂的是 /mnt/pass_through/0/emulated（f2fs 的 /media，布局 <user_id>/…）——
+# 那是"所有用户的父目录"，不是用户存储根 ⇒ Download 在它下面一层（0/）。
+# 这一节把"必须挂哪一层"钉死，免得下次又滑回父目录。
+if grep -q 'local pt="/mnt/pass_through/0/emulated/0"' "$SELF_DIR/start.sh"; then
+    ok "sdcard 首选路径是用户存储根（…/emulated/0）"
+else
+    bad "sdcard 首选路径不是 …/emulated/0 —— 环境内 /mnt/sdcard/Download 会不存在"
+fi
+# 反向断言：pt 的赋值绝不能又变回父目录（ptp= 那行只是给日志提示用的，允许存在）
+if grep -qE '^[[:space:]]*local pt="/mnt/pass_through/0/emulated"' "$SELF_DIR/start.sh"; then
+    bad "pt 又指回多用户父目录 /mnt/pass_through/0/emulated —— Download 会再次看不见"
+else
+    ok "没有把多用户父目录当作 /mnt/sdcard"
+fi
+# "挂载成功"必须再自证一句"看得见文件"：日志里要有 Download/DCIM 检查
+if grep -q 'sdcard 自证' "$SELF_DIR/start.sh"; then
+    ok "启动日志里有 sdcard 自证（Download/DCIM 在不在）"
+else
+    bad "start.sh 没有 sdcard 自证 —— \"挂上了\"与\"看得见\"又会分家"
+fi
+# 环境内 `linuxctl` 必须能直接敲（上一轮交付说明让用户跑它，实测 command not found）
+if grep -q 'usr/local/bin/linuxctl' "$SELF_DIR/start.sh"; then
+    ok "start.sh 会在环境内建 /usr/local/bin/linuxctl 软链"
+else
+    bad "没有建 linuxctl 软链 —— 环境内敲 linuxctl 仍是 command not found"
+fi
+# whereami 的路径地图要把 Download 的位置写清楚（用户就是照着它找文件的）
+if grep -q 'Download 就是 /mnt/sdcard/Download' "$SELF_DIR/linuxctl.sh"; then
+    ok "whereami 的路径地图点明了 Download 在哪"
+else
+    bad "whereami 的 sdcard 文案没写清 Download 的位置"
+fi
+
+# ---------------------------------------------------------------------------
+head_ "单元：doctor 的三处误报修正（2026-09-19 真机）"
+#
+# 现场（同一台机器、同一个环境）：doctor 报 share-not-mounted（实际双向可写）、
+# mount-leak（detail 自称"命中 0 0 处"）、port_busy 3080（占用者就是本环境的 DSH）。
+if grep -q 'mountinfo 2>/dev/null || printf' "$SELF_DIR/doctor.sh"; then
+    bad "回流计数又写成 grep -c + || printf 0 —— 无匹配时会拼出双值，隔离正常却报 mount-leak"
+else
+    ok "回流计数不会拼出双值（不再误报 mount-leak）"
+fi
+if grep -q 'grep -qF " $ROOTFS_DIR/share "' "$SELF_DIR/doctor.sh"; then
+    ok "交换目录判定走**环境 ns** 的 mountinfo（宿主 ns 看不见那层 bind）"
+else
+    bad "交换目录判定还在看宿主 ns —— 隔离生效后会误报 share-not-mounted"
+fi
+if grep -q 'port_in_use_by_env' "$SELF_DIR/doctor.sh"; then
+    ok "端口被本环境 DSH 占用时判为正常（port_in_use_by_env），不再误报 port_busy"
+else
+    bad "端口占用仍一律 warn —— 一键启动后会稳定误报 port_busy"
+fi
+if grep -q 'findings_summary' "$SELF_DIR/doctor.sh"; then
+    ok "JSON 带 findings_summary（结论条目口径与检查项口径分开）"
+else
+    bad "JSON 没有 findings_summary —— warns 与 findings 条数不等又会被当成算错"
+fi
+if grep -q 'sdcard_not_user_root' "$SELF_DIR/doctor.sh"; then
+    ok "doctor 会检查环境内 /mnt/sdcard 是不是用户存储根"
+else
+    bad "doctor 不检查共享存储可达性 —— \"挂上了但看不见\"会再次静默通过"
+fi
+# 动态：实跑一次最简 doctor，JSON 里确实带 findings_summary
+DSE="$TMP/doctor-summary-env"
+mkdir -p "$DSE"
+dsum="$(LINUX_HOME="$DSE" MODDIR="$SELF_DIR/../.." "$SH_BIN" "$SELF_DIR/doctor.sh" 2>/dev/null | tail -n1 || true)"
+case "$dsum" in
+    *'"findings_summary"'*) ok "doctor 实跑输出里带 findings_summary" ;;
+    *) bad "doctor 输出里没有 findings_summary：$(printf '%s' "$dsum" | head -c 100)" ;;
+esac
+
 head_ "单元：宿主通道（默认关 + 白名单 + 审计）"
 
 HC="$SELF_DIR/host-channel.sh"

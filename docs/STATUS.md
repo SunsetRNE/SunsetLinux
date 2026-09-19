@@ -541,8 +541,11 @@ su -c '/data/sunsetlinux/bin/linuxctl doctor'
 - **用户"候补记"是对的**：overlay 的真实入参就在启动日志里 ——
   `upperdir=/data/sunsetlinux/upper/upper`（双 `upper` = `upper.img` 的挂载点 + 它里面的 upperdir 目录名），
   所以 chroot 的 `/root` = 宿主 `/data/sunsetlinux/upper/upper/root`。
-- **Download 其实早就映射进去了**：环境里是 `/mnt/sdcard`（rbind `/mnt/pass_through/0/emulated`），
-  且 `/storage/emulated/0` 是指向它的**软链**——用户按宿主习惯的绝对路径去找，所以没找到。
+- ~~**Download 其实早就映射进去了**：环境里是 `/mnt/sdcard`（rbind `/mnt/pass_through/0/emulated`），
+  且 `/storage/emulated/0` 是指向它的**软链**——用户按宿主习惯的绝对路径去找，所以没找到。~~
+  **← 2026-09-19 实机核验推翻**：挂的父目录是 f2fs 的 `/media`（布局 `0/ 997/ 998/ 999/ obb/`），
+  **不是**用户存储根 ⇒ `/mnt/sdcard/Download` 根本不存在（实测 `No such file or directory`），
+  软链也跟着指错。已改成挂 `<pt>/0`，并加了启动自证与 doctor 判据（见 HANDOFF §1）。
 - **挂载回流**（新发现，倾向成立）：`start.sh` 只 `unshare -m -u`，而 toybox 的 `unshare` 不认 `--propagation`
   （启动日志里那句"未能设为 rslave（toybox 不支持该选项）"），`/` 又是 shared ⇒ 环境的挂载**可能回流到全局 ns**，
   这正好解释"MT 能看见 `upper/upper`、设备 shell 看不见"。判据已做成自检（§1f）。

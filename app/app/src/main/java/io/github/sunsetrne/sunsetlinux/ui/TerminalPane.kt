@@ -103,9 +103,17 @@ class TerminalPaneState internal constructor(
     /** 原生库不可用的原因（会显示给用户，说明为什么能力受限）。 */
     val ptyUnavailable: String? get() = PtyNative.loadError
 
-    /** 当前窗口行列（由界面按控件尺寸算出来，用于 TIOCSWINSZ 与 emulator.resize）。 */
-    private var rows = 24
-    private var cols = 80
+    /**
+     * 当前窗口行列（由界面按控件尺寸算出来，用于 TIOCSWINSZ 与 emulator.resize）。
+     *
+     * 用 mutableStateOf 暴露出来，给状态条显示 `列×行`：真机上遇到过"输出区明明很大、
+     * 却只显示两三行"的情形，而唯一能看见真相的是连上之后敲 `stty size` —— 把它摆在
+     * 状态条上，行列算没算错一眼可见（也方便用户回报这类问题）。
+     */
+    var rows by mutableStateOf(24)
+        private set
+    var cols by mutableStateOf(80)
+        private set
     private var lastRender = 0L
     private var renderScheduled = false
 
@@ -237,34 +245,48 @@ class TerminalPaneState internal constructor(
         exitCode = null
         askedStop = false
         scope.launch {
-            val err = withContext(Dispatchers.IO) {
-                val ctl = LinuxCtl(context, mode)
-                if (!ctl.exists()) {
-                    return@withContext "找不到 linuxctl —— 环境还没部署。先到「部署」跑一次部署向导。"
-                }
-                val st = try {
-                    ctl.status()
-                } catch (e: Exception) {
-                    null
-                }
-                if (st == null || st.state != EnvState.RUNNING) {
-                    // 点名「仅启动环境」而不是笼统的"启动环境"：只想用终端的人不该被迫
-                    // 把 DSH 一起拉起来（那正是这次拆开启动要解决的问题）。
-                    val next = if (Edition.showsSplitStartUi) {
-                        "先到「启动」页点「仅启动环境」（不必启动 DSH）。"
-                    } else {
-                        "先到「启动」页点「启动环境」。"
+            // ★ 复位 `starting` 必须**无论如何**都走到。
+            //
+            //   原来 `starting = false` 写在 withContext **之后**：只要 ctl.status() 或
+            //   pty.start() 抛异常（或在启动途中协程被取消），它就永远停在 true ——
+            //   而 connect() 开头是 `if (running || starting) return`，于是「连接」按钮
+            //   **彻底失灵**（点下去毫无反应），只能切 tab 重建界面。
+            //   真机实测 2026-09-19：连接后界面卡在「连接中…」、「停止」也是灰的。
+            val err = try {
+                withContext(Dispatchers.IO) {
+                    val ctl = LinuxCtl(context, mode)
+                    if (!ctl.exists()) {
+                        return@withContext "找不到 linuxctl —— 环境还没部署。先到「部署」跑一次部署向导。"
                     }
-                    return@withContext "环境未运行（当前：${st?.state?.label ?: "未知"}）。" +
-                        "终端是连进正在运行的环境的 —— $next"
+                    val st = try {
+                        ctl.status()
+                    } catch (e: Exception) {
+                        null
+                    }
+                    if (st == null || st.state != EnvState.RUNNING) {
+                        // 点名「仅启动环境」而不是笼统的"启动环境"：只想用终端的人不该被迫
+                        // 把 DSH 一起拉起来（那正是这次拆开启动要解决的问题）。
+                        val next = if (Edition.showsSplitStartUi) {
+                            "先到「启动」页点「仅启动环境」（不必启动 DSH）。"
+                        } else {
+                            "先到「启动」页点「启动环境」。"
+                        }
+                        return@withContext "环境未运行（当前：${st?.state?.label ?: "未知"}）。" +
+                            "终端是连进正在运行的环境的 —— $next"
+                    }
+                    if (PtyNative.available) {
+                        ptyActive = true
+                        pty.start(ctl.ptySpec(rows, cols), rows, cols)
+                    } else {
+                        ptyActive = false
+                        session.start(ctl.terminalCommand())
+                    }
                 }
-                if (PtyNative.available) {
-                    ptyActive = true
-                    pty.start(ctl.ptySpec(rows, cols), rows, cols)
-                } else {
-                    ptyActive = false
-                    session.start(ctl.terminalCommand())
-                }
+            } catch (c: kotlinx.coroutines.CancellationException) {
+                starting = false      // 界面被销毁也要把状态收干净，再按规矩继续抛
+                throw c
+            } catch (t: Throwable) {
+                "连接失败：${t.message ?: t.javaClass.simpleName}"
             }
             starting = false
             if (err == null) {
@@ -399,6 +421,17 @@ fun TerminalPane(
                     text = identity,
                     style = MaterialTheme.typography.labelSmall.copy(fontFamily = MonoFamily),
                     color = TextSecondary,
+                    maxLines = 1,
+                )
+            }
+            // 实时窗口行列（= 已通过 TIOCSWINSZ 告诉内核的那个值）。
+            // 它同时是"输出区只显示几行"这类问题的现场证据：数字小 ⇒ 是算错了，不是渲染问题。
+            if (state.running) {
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    text = "${state.cols}×${state.rows}",
+                    style = MaterialTheme.typography.labelSmall.copy(fontFamily = MonoFamily),
+                    color = TextMuted,
                     maxLines = 1,
                 )
             }

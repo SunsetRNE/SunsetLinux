@@ -2303,13 +2303,13 @@ cmd_whereami() {
         env)
             p_root="/  →  $LH/rootfs（overlay 合成：base+runtime+dsh 三层只读 + 可写层）"
             p_write="你写的任何文件  →  $LH/upper/upper/…（可写层；宿主侧看就是这个路径）"
-            p_sd="/mnt/sdcard  →  Android 共享存储（/storage/emulated/0 是它的软链，同一份）"
+            p_sd="/mnt/sdcard  →  Android 共享存储的**用户存储根**（/storage/emulated/0 是它的软链，同一份）。Download 就是 /mnt/sdcard/Download"
             p_share="/share  →  $LH/share（交换目录：两侧同一批 inode）"
             p_run="/run  →  $LH/run（状态/日志；宿主侧同一批文件）" ;;
         host)
             p_root="$LH/rootfs（overlay 合成视图；环境内部看到的就是它）"
             p_write="$LH/upper/upper/…（可写层；环境内写的文件都落在这里）"
-            p_sd="/storage/emulated/0（共享存储；环境内是 /mnt/sdcard）"
+            p_sd="/storage/emulated/0（= 用户存储根；环境内是 /mnt/sdcard，Download 在 /mnt/sdcard/Download）"
             p_share="$LH/share（交换目录；环境内是 /share）"
             p_run="$LH/run（状态/日志；环境内是 /run）" ;;
         shadow)

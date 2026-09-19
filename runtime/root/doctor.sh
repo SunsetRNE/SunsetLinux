@@ -142,7 +142,22 @@ jesc() {
 #    `declare -a` 在 mksh 里是**语法错误** → 整个脚本一行都跑不了（真机上实测过）。
 #    逗号就地拼好（`${FINDINGS:+,}`），省掉输出端的 first 标志。
 FINDINGS=""
-add_finding() { FINDINGS="${FINDINGS}${FINDINGS:+,}{\"level\":\"$1\",\"id\":\"$(jesc "$2")\",\"detail\":\"$(jesc "$3")\"}"; }
+# ★ 两个计数口径**故意分开**（真机实测踩过：JSON 里 warns:5 而 findings 里只有 4 条 warn，
+#   解析方以为计数错了）。语义不同：
+#     · WARNS（屏幕上的"N 项 warn"）= **检查项**口径，由 warn() 累加；
+#     · F_*（findings_summary）= **结论条目**口径，只有 add_finding 记下的才算。
+#   不是每一条 warn 都值得进 JSON（有些只是人读的补充说明），所以两者本来就不该相等。
+F_OK=0
+F_WARN=0
+F_FAIL=0
+add_finding() {
+    case "$1" in
+        ok)   F_OK=$((F_OK + 1)) ;;
+        warn) F_WARN=$((F_WARN + 1)) ;;
+        fail) F_FAIL=$((F_FAIL + 1)) ;;
+    esac
+    FINDINGS="${FINDINGS}${FINDINGS:+,}{\"level\":\"$1\",\"id\":\"$(jesc "$2")\",\"detail\":\"$(jesc "$3")\"}"
+}
 
 # ===========================================================================
 head_ "0. 运行环境"
@@ -657,7 +672,14 @@ head_ "1f. 视图与挂载隔离（我在哪个命名空间 / 有没有回流）
     if env_running; then
         _leak=0
         if [ -r /proc/1/mountinfo ]; then
-            _leak="$(grep -c 'sunsetlinux/rootfs' /proc/1/mountinfo 2>/dev/null || printf '0')"
+            # ★ 不要写成 `grep -c … || printf '0'`：grep -c 在**无匹配**时也会打印 `0`，
+            #   只是退出码为 1 —— 于是 `|| printf '0'` 又补一个 `0`，变量变成 "0\n0"。
+            #   真机实测（2026-09-19）：detail 里出现"命中 0 0 处"，而 case 的 `0)` 分支
+            #   匹配不上这个双值，**隔离本来是好的却报 mount-leak warn**。
+            #   grep -c 自己就会输出 0，这里只需要一个"读不到文件"的兜底。
+            _leak="$(grep -c 'sunsetlinux/rootfs' /proc/1/mountinfo 2>/dev/null)"
+            [ -n "$_leak" ] || _leak="?"
+            case "$_leak" in *[!0-9]*) _leak="?" ;; esac
         else
             _leak="?"
         fi
@@ -672,17 +694,51 @@ head_ "1f. 视图与挂载隔离（我在哪个命名空间 / 有没有回流）
     fi
 
     # ③ 交换目录
+    # ★ 判定必须问**环境的 mount ns**。上一版问的是宿主 ns 里的 `$ROOTFS_DIR/share`
+    #   是不是挂载点 —— 而隔离生效后（`mount --make-rprivate /`）宿主根本看不见
+    #   overlay 里的那次 bind，于是"明明挂上了"被报成 share-not-mounted。
+    #   真机实测 2026-09-19：环境内 /share 双向可写，doctor 却报 warn。
     if [ -d "$LH/share" ]; then
-        if env_running && [ -d "$ROOTFS_DIR/share" ] && mountpoint -q "$ROOTFS_DIR/share" 2>/dev/null; then
+        _share_ok=0
+        if env_running; then
+            _nspid="$(head -n1 "$RUN_DIR/supervisor.pid" 2>/dev/null | tr -dc '0-9' || true)"
+            if [ -n "$_nspid" ] && grep -qF " $ROOTFS_DIR/share " "/proc/$_nspid/mountinfo" 2>/dev/null; then
+                _share_ok=1
+            fi
+        fi
+        if [ "$_share_ok" = "1" ]; then
             ok "交换目录已挂载：$LH/share <-> 环境 /share"
+            add_finding ok share "mounted"
         elif env_running; then
-            warn "交换目录没挂上（$LH/share 在，但 $ROOTFS_DIR/share 不是挂载点）—— 环境里看不到 /share"
+            warn "交换目录没挂上（环境 ns 的 mountinfo 里没有 $ROOTFS_DIR/share）—— 环境里看不到 /share"
             add_finding warn "share-not-mounted" "环境内的 /share 没挂上：看 run/linux.log 里那行『交换目录』；不影响环境本身可用"
         else
             info "交换目录 $LH/share 已创建（环境未运行，看不到 /share）"
         fi
     else
         info "还没有交换目录 $LH/share（下次启动环境会自动建）"
+    fi
+
+    # ④ 共享存储：环境里**真的能看到手机文件**吗？
+    #   "挂载成功" ≠ "用户看得见" —— 上一版把多用户父目录
+    #   (/mnt/pass_through/0/emulated) 挂成 /mnt/sdcard，日志写着"已挂载"、doctor 全绿，
+    #   而环境内 `/mnt/sdcard/Download` 根本不存在（用户是按文档去找的）。
+    #   判据走 /proc/<ns_pid>/root（该进程的根 = overlay 合成视图）——
+    #   这是宿主侧唯一能"看进"环境文件系统的窗口。
+    if env_running; then
+        _nspid2="$(head -n1 "$RUN_DIR/supervisor.pid" 2>/dev/null | tr -dc '0-9' || true)"
+        if [ -n "$_nspid2" ] && [ -d "/proc/$_nspid2/root/mnt/sdcard" ]; then
+            if [ -d "/proc/$_nspid2/root/mnt/sdcard/Download" ] || [ -d "/proc/$_nspid2/root/mnt/sdcard/DCIM" ]; then
+                ok "共享存储可达：环境内 /mnt/sdcard 下能看到 Download/DCIM（挂的是用户存储根）"
+                add_finding ok sdcard_root "环境内 /mnt/sdcard = 用户存储根（run/sdcard.source=$(cat "$RUN_DIR/sdcard.source" 2>/dev/null || printf '?'))"
+            else
+                warn "环境内 /mnt/sdcard 下既没有 Download 也没有 DCIM —— 挂上的多半不是**用户存储根**（用户会找不到手机文件）"
+                add_finding warn sdcard_not_user_root "环境内 /mnt/sdcard 看不到 Download/DCIM（run/sdcard.source=$(cat "$RUN_DIR/sdcard.source" 2>/dev/null || printf '?'))"
+                info "修法：确认 run/sdcard.source 是 /mnt/pass_through/0/emulated/0（用户存储根），然后 linuxctl stop && linuxctl start"
+            fi
+        else
+            info "读不到环境内 /mnt/sdcard（/proc/<ns_pid>/root 不可达），跳过共享存储检查"
+        fi
     fi
 }
 
@@ -955,18 +1011,32 @@ if [ -f "$RUN_DIR/dsh.port" ]; then
     ap="$(head -n1 "$RUN_DIR/dsh.port" 2>/dev/null | tr -dc '0-9')"
     [ -n "$ap" ] && info "运行中的实际端口（run/dsh.port）：$ap"
 fi
+# ★ 端口被占用 ≠ 故障：一键启动之后，占用者通常就是**本环境的 DSH 自己**
+#   （run/dsh.port 记着它）。上一版对"自己占自己"也报 warn，用户照提示去"换端口"
+#   反而会把好好的环境拆了。真机实测 2026-09-19：doctor 报 `port_busy 3080 被占用`，
+#   而占它的正是环境内那个 dsh（run/dsh.port=3080）。
+PORT_IS_SELF=0
+if env_running && [ -n "${ap:-}" ] && [ "$ap" = "$PORT" ]; then PORT_IS_SELF=1; fi
+# 占用结论只写一处：三种探测手段下语义相同，免得改一处漏两处
+port_taken_finding() { # $1 = 探测手段（写进结论，便于排障）
+    if [ "$PORT_IS_SELF" = "1" ]; then
+        ok "端口 $PORT 正被**本环境的 DSH** 使用（$1；run/dsh.port=$PORT）—— 符合预期，不必换端口"
+        add_finding ok port_in_use_by_env "$PORT 由本环境 DSH 监听（$1）"
+    else
+        warn "端口 $PORT 已被占用（$1）—— 若不是本环境的 DSH，启动时会让路换端口"
+        add_finding warn port_busy "$PORT 被占用（$1）"
+    fi
+}
 if have ss; then
     if ss -ltn 2>/dev/null | grep -q ":$PORT "; then
-        warn "端口 $PORT 已被占用（ss）"
-        add_finding warn port_busy "$PORT 被占用"
+        port_taken_finding "ss"
     else
         ok "端口 $PORT 空闲（ss）"
         add_finding ok port_free "$PORT 空闲"
     fi
 elif have netstat; then
     if netstat -ltn 2>/dev/null | grep -q ":$PORT "; then
-        warn "端口 $PORT 已被占用（netstat）"
-        add_finding warn port_busy "$PORT 被占用"
+        port_taken_finding "netstat"
     else
         ok "端口 $PORT 空闲（netstat）"
         add_finding ok port_free "$PORT 空闲"
@@ -975,8 +1045,7 @@ else
     # Android/toybox 常常两者都没有 → 退化为 /proc/net/tcp 解析
     hexport="$(printf '%04X' "$PORT")"
     if [ -r /proc/net/tcp ] && awk 'NR>1 {print $2}' /proc/net/tcp 2>/dev/null | grep -qi ":$hexport$"; then
-        warn "端口 $PORT 已被占用（/proc/net/tcp）"
-        add_finding warn port_busy "$PORT 被占用"
+        port_taken_finding "/proc/net/tcp"
     else
         ok "端口 $PORT 未在 /proc/net/tcp 中监听"
         add_finding ok port_free "$PORT 空闲"
@@ -1267,10 +1336,16 @@ if [ "$FAILS" -gt 0 ]; then
 else
     printf '  \033[32m全部通过\033[0m（%d 项 warn）\n' "$WARNS"
 fi
+# 口径不同时说一句，省得下一个人把"warns 与 findings 条数不等"当成计数 bug
+if [ "$F_WARN" != "$WARNS" ]; then
+    info "口径说明：上面的 %d 项 warn 是**检查项**计数；JSON 里 findings_summary.warn=%d 是**结论条目**计数（不是每条 warn 都写一条 finding）" "$WARNS" "$F_WARN"
+fi
 
 # 结尾一行 JSON（App / 自动化解析用）
 # findings 已由 add_finding 拼成逗号分隔的完整数组体，这里直接嵌进去
-printf '{"schema":1,"ok":%s,"fails":%d,"warns":%d,"linux_home":"%s","findings":[%s]}\n' \
-    "$([ "$FAILS" -eq 0 ] && echo true || echo false)" "$FAILS" "$WARNS" "$(jesc "$LH")" "$FINDINGS"
+# findings_summary 是**结论条目**口径（与屏幕上的检查项计数不同源，见 add_finding 处注释）
+printf '{"schema":1,"ok":%s,"fails":%d,"warns":%d,"findings_summary":{"ok":%d,"warn":%d,"fail":%d},"linux_home":"%s","findings":[%s]}\n' \
+    "$([ "$FAILS" -eq 0 ] && echo true || echo false)" "$FAILS" "$WARNS" \
+    "$F_OK" "$F_WARN" "$F_FAIL" "$(jesc "$LH")" "$FINDINGS"
 
 [ "$FAILS" -eq 0 ] && exit 0 || exit 1

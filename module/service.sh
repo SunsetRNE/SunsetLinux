@@ -287,6 +287,11 @@ if [ -f "$MODDIR/bin/sunsetd.dex" ] && [ -x /system/bin/app_process ] && [ -x /s
   # 客户端能不能连上内核"必须每台机器开机就被证明一次，而不是等 App 上线才发现。
   # 异步 + 只等 15 秒（内核 bind 通常不到 1 秒）：绝不阻塞 boot。
   # 结果：$RUN/ctl-status.json（一行 JSON）+ service.log 里一行 rc。
+  #
+  # ⚠️ 语义：这是**开机那一刻的状态快照**，不是"当前状态"（环境随后还会从 mounting 走到
+  #    running，本文件不会再被刷新）。要看实时状态请读 kernel 自己写的 $RUN/state.json，
+  #    或用 App 的「诊断」页（doctor）。真机实测 2026-09-19：该文件里 phase 停在 mounting，
+  #    被人当成"状态不对"——其实只是快照。
   (
     sleep 2
     CLASSPATH="$MODDIR/bin/sunsetd.dex" LINUX_HOME="$LINUX_HOME" /system/bin/app_process \

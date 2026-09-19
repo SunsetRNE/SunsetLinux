@@ -39,7 +39,18 @@ internal class PtySession {
     private val lock = Any()
     private var fd: Int = -1
     private var pid: Int = -1
-    private var pfd: java.io.FileDescriptor? = null
+
+    /**
+     * ★ 必须持有 **ParcelFileDescriptor 对象本身**（而不是它的 `.fileDescriptor`）。
+     *
+     * 真机事故（2026-09-19）：原来这里存的是 `java.io.FileDescriptor`，而
+     * `ParcelFileDescriptor.adoptFd(master)` 造出来的那个 PFD 对象**没有任何强引用** ——
+     * PFD 一旦被 GC 回收，它的 finalizer 就会 `close()` 掉底层 master fd。
+     * 表现为：终端连上后能敲几条命令，然后**随机**某一次 GC 之后会话自己退出
+     * （`— 会话已结束（退出码 0）—`：master 关了 → 子进程读到 EOF → 正常退出，
+     * 所以退出码是 0、logcat 里也没有任何异常）。用户侧看到的就是"终端老是掉线"。
+     */
+    private var pfd: android.os.ParcelFileDescriptor? = null
     private var input: java.io.FileInputStream? = null
     private var output: java.io.FileOutputStream? = null
 
@@ -77,11 +88,14 @@ internal class PtySession {
         }
         if (master < 0) return "无法分配 PTY（fd=$master）"
 
-        val descriptor = android.os.ParcelFileDescriptor.adoptFd(master).fileDescriptor
+        // ★ adoptFd 之后**必须留住这个对象**（见字段注释）：只取 `.fileDescriptor`
+        //   会让 PFD 在下次 GC 时被回收并 close 掉 master ⇒ 会话"随机掉线"。
+        val pfdObj = android.os.ParcelFileDescriptor.adoptFd(master)
+        val descriptor = pfdObj.fileDescriptor
         synchronized(lock) {
             fd = master
             pid = pidOut[0]
-            pfd = descriptor
+            pfd = pfdObj
             input = java.io.FileInputStream(descriptor)
             output = java.io.FileOutputStream(descriptor)
         }
@@ -160,8 +174,11 @@ internal class PtySession {
 
     private fun closeQuietly() {
         synchronized(lock) {
+            // 关流（它们包着同一个 fd）之后**还要关 PFD 本身** —— 它才是 master 的
+            // 所有权持有者；只清引用不 close，fd 会一直挂着（每次重连泄漏一个）。
             runCatching { input?.close() }
             runCatching { output?.close() }
+            runCatching { pfd?.close() }
             input = null
             output = null
             pfd = null

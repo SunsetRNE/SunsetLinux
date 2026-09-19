@@ -1418,20 +1418,43 @@ install_runtime_entry() {
         chmod 0755 "$dst/host-channel.sh" 2>/dev/null || true
     fi
     chmod 0755 "$dst/entry.sh" "$dst/supervise.sh" 2>/dev/null || true
+    # ★ 让 `linuxctl` 在**环境内**也能直接敲（2026-09-19 真机修正）。
+    #   上一轮交付说明让用户在 App 终端里跑 `linuxctl whereami`，实测直接
+    #   `bash: linuxctl: command not found` —— 环境内 PATH 是
+    #   `/opt/node/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`，
+    #   不含 /opt/sunsetlinux，而那里只有带后缀的 `linuxctl.sh`。
+    #   修法：在 /usr/local/bin 放软链（不改 PATH、不复制脚本 —— 层更新后自动跟着变）。
+    if [ -f "$dst/linuxctl.sh" ]; then
+        chmod 0755 "$dst/linuxctl.sh" 2>/dev/null || true
+        mkdir -p "$ROOTFS_DIR/usr/local/bin" 2>/dev/null || true
+        ln -sfn /opt/sunsetlinux/linuxctl.sh "$ROOTFS_DIR/usr/local/bin/linuxctl" 2>/dev/null \
+            || log "WARN: 环境内 linuxctl 软链创建失败（终端里请用 /opt/sunsetlinux/linuxctl.sh）"
+    fi
     log "已同步启动器脚本：$src -> $dst"
 }
 
 # ---------------------------------------------------------------------------
-# sdcard 挂载：优先 /mnt/pass_through/0/emulated（绕过 FUSE），失败回退
-# /storage/emulated/0。两处结果都写日志（architecture.md §1/§2）。
+# sdcard 挂载：优先 /mnt/pass_through/0/emulated/0（**用户存储根**，绕过 FUSE），
+# 失败回退 /storage/emulated/0。两处结果都写日志（architecture.md §1/§2）。
+#
+# ★ 为什么是 `…/emulated/0` 而不是 `…/emulated`（2026-09-19 真机实测修正）：
+#   /mnt/pass_through/0/emulated 是 f2fs 的 /media，布局为 <user_id>/…：
+#       emulated/
+#         ├── 0/     ← 用户 0 的存储根（inode 与 /storage/emulated/0 相同）
+#         ├── 997/ 998/ 999/
+#         └── obb/
+#   旧实现 rbind 父目录 ⇒ 环境内 `/mnt/sdcard/Download` **不存在**（用户按文档走必然扑空），
+#   而 `ln -sfn /mnt/sdcard /storage/emulated/0` 也一起指错 —— 日志说"已挂载"、
+#   doctor 全绿，用户却一个文件都看不到。挂存储根之后两条路径同时成立。
 # ---------------------------------------------------------------------------
 mount_sdcard() {
-    local pt="/mnt/pass_through/0/emulated"
+    local pt="/mnt/pass_through/0/emulated/0"
+    local ptp="/mnt/pass_through/0/emulated"      # 父目录（多用户视图）：仅用于日志提示
     local fb="/storage/emulated/0"
     local chosen="" fs=""
 
     if [ -d "$pt" ]; then
-        log "sdcard 首选路径 $pt 存在，尝试 rbind（绕开 FUSE）"
+        log "sdcard 首选路径 $pt 存在（用户存储根），尝试 rbind（绕开 FUSE）"
         if do_rbind_op "$pt" "$ROOTFS_DIR/mnt/sdcard"; then
             chosen="$pt"
             record_mount "mnt/sdcard"
@@ -1446,7 +1469,11 @@ mount_sdcard() {
             log "WARN: rbind $pt 失败，回退 $fb"
         fi
     else
-        log "sdcard 首选路径 $pt 不存在（非 Oplus 或 pass_through 未开），回退 $fb"
+        if [ -d "$ptp" ]; then
+            log "WARN: $pt 不存在（pass_through 在，但没有用户 0 的存储根）—— 回退 $fb"
+        else
+            log "sdcard 首选路径 $pt 不存在（非 Oplus 或 pass_through 未开），回退 $fb"
+        fi
     fi
 
     if [ -z "$chosen" ]; then
@@ -1460,12 +1487,20 @@ mount_sdcard() {
         log "sdcard 已挂载（回退）：$fb -> /mnt/sdcard（fstype=$fs）"
     fi
 
-    # /storage/emulated/0 -> /mnt/sdcard 的软链（契约要求，供 App 与用户习惯路径）
+    # /storage/emulated/0 -> /mnt/sdcard 的软链（契约要求，供 App 与用户习惯路径）。
+    # 只有在 /mnt/sdcard 真是**用户存储根**时这条软链才成立 —— 见上面 mount 目标的选择。
     mkdir -p "$ROOTFS_DIR/storage/emulated"
     ln -sfn /mnt/sdcard "$ROOTFS_DIR/storage/emulated/0" || log "WARN: 创建 /storage/emulated/0 软链失败"
     # 幂等：删掉可能已存在的真目录占位（目录会遮住软链）
     if [ -d "$ROOTFS_DIR/storage/emulated/0" ] && [ ! -L "$ROOTFS_DIR/storage/emulated/0" ]; then
         log "WARN: /storage/emulated/0 是目录而非软链，跳过（用户数据优先）"
+    fi
+    # ★ 自证：挂载"成功"不等于用户能看见文件。这里直接问一句
+    #   "Download 在不在" —— 上一版正是在这一步无声地错了（挂上了父目录）。
+    if [ -d "$ROOTFS_DIR/mnt/sdcard/Download" ] || [ -d "$ROOTFS_DIR/mnt/sdcard/DCIM" ]; then
+        log "sdcard 自证：/mnt/sdcard 下能看到 Download/DCIM（用户存储根判定正确）"
+    else
+        log "WARN: /mnt/sdcard 下既没有 Download 也没有 DCIM —— 挂上的可能不是用户存储根（环境内会看不到手机文件）"
     fi
     printf '%s' "$chosen" > "$RUN_DIR/sdcard.source" 2>/dev/null || true
 }

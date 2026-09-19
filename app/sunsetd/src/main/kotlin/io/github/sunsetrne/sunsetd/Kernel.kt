@@ -363,7 +363,27 @@ object Protocol {
         return Request(op = op, params = params)
     }
 
-    fun ok(payloadJson: String): String = "{\"ok\":true,$payloadJson}"
+    /**
+     * 成功响应：`{"ok":true,<payload 的字段…>}`。
+     *
+     * ★ 参数是 [Json.obj] 的产物（**一个完整对象**），这里要把它的外层花括号剥掉再展开，
+     *   否则会拼出 `{"ok":true,{"state":…}}` —— 缺键名的**非法 JSON**。
+     *   真机实测（2026-09-19）：`run/ctl-status.json` 就是这么坏的，四个 op
+     *   （status/ping/version/job）的响应全部不可解析，`jq` 直接报错。
+     *   为什么不在调用方改成传字段片段：那会让 `Json.obj(...)` 这个唯一的安全构造器
+     *   在四个调用点各被手工拆一次（更容易漂移）。在这里剥一次，语义只有一处。
+     */
+    fun ok(payloadJson: String): String {
+        val body = payloadJson.trim().let {
+            if (it.length >= 2 && it.startsWith("{") && it.endsWith("}")) {
+                it.substring(1, it.length - 1).trim()
+            } else {
+                it   // 兜底：不是对象（正常路径不会走到），按原样拼，至少不吞内容
+            }
+        }
+        return if (body.isEmpty()) "{\"ok\":true}" else "{\"ok\":true,$body}"
+    }
+
     fun error(code: String, message: String): String =
         Json.obj("ok" to false, "code" to code, "message" to message)
 

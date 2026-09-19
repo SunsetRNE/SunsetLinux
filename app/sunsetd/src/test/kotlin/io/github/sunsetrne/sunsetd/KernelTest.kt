@@ -267,4 +267,25 @@ class KernelTest {
         assertTrue(k.handle("""{"op":"nope"}""").contains("unknown-op"))
         assertTrue(k.handle("""{"action":"start"}""").contains("bad-request"))
     }
+
+    /**
+     * 回归：`ok` 响应必须是**合法 JSON 对象**。
+     *
+     * 真机事故（2026-09-19）：`Protocol.ok()` 把 `Json.obj(...)` 的完整对象原样拼在后面，
+     * 得到 `{"ok":true,{"state":…}}` —— 缺键名，`run/ctl-status.json` 无法被任何解析器读。
+     * 旧断言只 contains 字段名，所以四个 op 全坏也没有一条测试变红。
+     */
+    @Test
+    fun `协议：ok 响应是合法对象（payload 展开，不嵌套）`() {
+        val (k, _, _) = kernel()
+        k.start()
+        for (req in listOf("""{"op":"ping"}""", """{"op":"version"}""", """{"op":"status"}""", """{"op":"job"}""")) {
+            val r = k.handle(req)
+            assertTrue("必须以 ok:true 开头：$r", r.startsWith("{\"ok\":true"))
+            assertFalse("payload 不能被原样嵌套（缺键名 = 非法 JSON）：$r", r.contains("{\"ok\":true,{"))
+            assertEquals("对象不配平：$r", r.count { it == '{' }, r.count { it == '}' })
+        }
+        // 具体形状：字段与 ok 平级
+        assertTrue("ping 的形状应当稳定", k.handle("""{"op":"ping"}""") == """{"ok":true,"pong":true}""")
+    }
 }
