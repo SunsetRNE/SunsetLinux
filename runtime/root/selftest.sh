@@ -1767,6 +1767,14 @@ if grep -q 'Download 就是 /mnt/sdcard/Download' "$SELF_DIR/linuxctl.sh"; then
 else
     bad "whereami 的 sdcard 文案没写清 Download 的位置"
 fi
+# 环境内的脚本必须**以模块为准**同步过去。
+# 现场：模块 1.0.46 已经修好 whereami 文案，环境里敲出来还是旧的 —— 因为
+# /opt/sunsetlinux/*.sh 来自 runtime 层（只读），而宿主执行的是模块 bin/ 那一份。
+if grep -q 'for _f in entry.sh supervise.sh host-channel.sh linuxctl.sh doctor.sh' "$SELF_DIR/start.sh"; then
+    ok "启动器脚本按模块为准整体同步（环境内不再用层里的旧副本）"
+else
+    bad "只同步了部分脚本 —— 环境内 /opt/sunsetlinux/*.sh 会继续被 runtime 层的旧版本遮蔽"
+fi
 
 # ---------------------------------------------------------------------------
 head_ "单元：doctor 的三处误报修正（2026-09-19 真机）"

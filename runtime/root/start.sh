@@ -1409,13 +1409,31 @@ install_runtime_entry() {
         return 0
     fi
     mkdir -p "$dst" || { log "WARN: 无法创建 $dst"; return 0; }
-    cp -f "$src/entry.sh" "$dst/entry.sh" 2>/dev/null || true
-    cp -f "$src/supervise.sh" "$dst/supervise.sh" 2>/dev/null || true
-    # 宿主通道包装脚本（默认关；见 docs/host-channel.md）。
-    # 它必须**在环境内部可调用**，所以跟着启动器一起同步进 /opt/sunsetlinux。
-    if [ -f "$src/host-channel.sh" ]; then
-        cp -f "$src/host-channel.sh" "$dst/host-channel.sh" 2>/dev/null || true
-        chmod 0755 "$dst/host-channel.sh" 2>/dev/null || true
+    # ★ 把模块 bin/ 里的**全部启动器脚本**同步进环境（模块为准），不只是 entry/supervise。
+    #
+    #   为什么（2026-09-19 真机实测）：环境内 `/opt/sunsetlinux/*.sh` 原先来自 **runtime 层**
+    #   （erofs 只读镜像），而宿主侧执行的是**模块 bin/** 里那一份 —— 同一个脚本两份副本。
+    #   后果：模块更新后环境内还是旧的。现场证据：模块 1.0.46 明明改好了 `whereami` 的文案，
+    #   环境里敲 `linuxctl whereami` 打出来的仍是旧文案
+    #   （`grep -c "Download 就是 /mnt/sdcard/Download" /proc/<dsh_pid>/root/opt/sunsetlinux/linuxctl.sh` = 0）。
+    #   这正是 HANDOFF 里那笔"多个重复入口脚本副本会静默吞掉改动"的老账 —— 现在**只留一个来源**。
+    #   安全性：这些脚本本来就是**双视角**写的（`linuxctl.sh` 的 whereami 自己判 env/host），
+    #   所以把宿主那份原样同步进去是对的；失败只 WARN，不影响启动。
+    for _f in entry.sh supervise.sh host-channel.sh linuxctl.sh doctor.sh status.sh stop.sh \
+              start.sh update.sh oneshot-setup.sh selftest.sh device-provision.sh layer-spec.sh; do
+        [ -f "$src/$_f" ] || continue
+        cp -f "$src/$_f" "$dst/$_f" 2>/dev/null || true
+        chmod 0755 "$dst/$_f" 2>/dev/null || true
+    done
+    # fixtures 也要跟着走：环境内跑 `selftest.sh` 时按 <脚本目录>/fixtures 找夹具
+    if [ -d "$src/fixtures" ]; then
+        mkdir -p "$dst/fixtures" 2>/dev/null || true
+        cp -f "$src/fixtures/." "$dst/fixtures/" 2>/dev/null || true
+    fi
+    # common/（layer-inspect.sh、port-probe.sh 等）同理：doctor 在环境内也要能找到它们
+    if [ -d "$src/common" ]; then
+        mkdir -p "$dst/common" 2>/dev/null || true
+        cp -f "$src/common/." "$dst/common/" 2>/dev/null || true
     fi
     chmod 0755 "$dst/entry.sh" "$dst/supervise.sh" 2>/dev/null || true
     # ★ 让 `linuxctl` 在**环境内**也能直接敲（2026-09-19 真机修正）。
