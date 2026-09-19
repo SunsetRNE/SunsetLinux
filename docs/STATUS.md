@@ -529,6 +529,151 @@ su -c '/data/sunsetlinux/bin/linuxctl doctor'
 | 已装状态读不到时 | —— | **不给刷入按钮**，先让用户修 root 授权（与"读不到 ≠ 没装"一致） |
 | 重启 | —— | 只报告"重启后生效"（KernelSU 落 `modules_update/`），**App 不替用户重启**，脚本里有单测断言不许出现 `reboot` |
 
+### 3.10.59 免 root 引导的六处拦路虎（一处修完露出下一处）（2026-09-19，App 0.3.33）
+
+0.3.28 把内嵌包从 zstd 换成 gzip 之后，用户在同一屏（引导页第 3 步）**连着**撞出六处失败。
+五处都是"改完一处立刻露出下一处"，所以合并成一版发。前两处见下；③（rootfs 死锁）、④（proot 执行位）、⑤（mksh 下锁没建立）是同一轮排查里定位并一并修掉的，④ 与 ⑤ 都是"不修就必挡下一步"。
+
+**① `error=13, Permission denied`**
+
+```
+✗ [linuxctl update] base 失败: 无法执行
+  /data/user/0/io.github.sunsetrne.sunsetlinux.proot/files/sunsetlinux/bin/linuxctl:
+  Cannot run program "…" (in directory "/data/user/0/io.github.sunsetrne.sunsetlinux.proot/files"):
+  error=13, Permission denied
+```
+
+**根因不是"文件不对"，是判据不对。** `bin/linuxctl` 是 `ProotRuntime.ensure()` 从 assets 铺下去的
+宿主脚本（`runtime/proot/linuxctl.sh` 的副本），铺完就 `setExecutable(true)`；而 `LinuxCtl.prootCommand()`
+拿 `File.canExecute()` 当"能不能直接 exec"的判据 ⇒ 判为真 ⇒ 走 `ProcessBuilder(<脚本>)` 直接 exec。
+但 **执行位为真 ≠ 这次 `execve` 会成功**：脚本躺在 App 私有目录里，挂载选项、系统策略、
+ROM 差异任何一条都能让内核回 `EACCES`（而 `ProcessBuilder` 只把它转成 `IOException: error=13`）。
+这个坑与机器相关：同一份代码在 A 机上"恰好"能跑，换一台就必修。
+
+**修法：不再赌执行位，把契约收紧成一句** —— **私有目录里的脚本永远由 `sh` 跑**：
+
+| 改动 | 内容 |
+|---|---|
+| 唯一构造入口 | `DshPaths.hostCtlCommand(path)` → `["/system/bin/sh", path]`（**故意不判** `canExecute()`）；`hostCtlCommandLine()` 是给已包在 `sh -c` 里的调用点用的单行形式 |
+| 三条调用链 | `prootCommand`（所有 linuxctl 子命令）、`ptySpec`（原生 PTY）、`terminalCommand`（行缓冲终端）全部改走它 |
+| 两处就绪判据 | `ProotRuntime.isReady` / `ProotSetup.inspect` 从"存在且可执行"改成"**存在**"——"就绪"的语义是"`sh` 念得动它"，不是"内核肯 exec 它" |
+
+**为什么这不是"降级"**：这些脚本第一行本来就是 `#!/system/bin/sh`，`sh <path>` 与直接 exec 的
+**解释器、参数、退出码完全一致**，只是绕开了"内核对脚本文件本身做 exec 权限检查"这一步。
+
+**② `update: 未知参数 --version`（修完 ① 当场露出来的下一处）**
+
+```
+✗ [linuxctl update] base 失败：[linuxctl 错误] update: 未知参数 --version
+```
+
+App 的 `OfflineApplier` 对**两个 edition 用同一份命令构造**：`update <layer> <file> --version <ver>`。
+root 版接受 `--version <ver>` 与 `--version=<ver>` 两种写法，**proot 版一个都不认**
+（`-*) fail 2 "update: 未知参数 $1"`）⇒ 同一个按钮换个 edition 必然失败。
+属于**契约不一致**：App 没做错，是 proot runtime 少实现了一种写法。
+
+修法：`runtime/proot/linuxctl.sh` 的 `cmd_update` 接住两种写法（与 root 版逐字对齐），
+并明确"proot 侧**不从参数记版本**"——它的版本一直在 rootfs 元数据里
+（`/etc/sunsetlinux-base-version`、`/etc/sunsetlinux-runtime-version`、dsh 的 `package.json`），
+`status` 直接读那里（`read_base_version` 等）；root 版要 `state.json` 是因为它的层是**只读镜像**、
+没有一份可读的 rootfs。**这一条也是"两个 runtime 契约必须一致"的实例**，所以回归做成子进程级。
+
+**③ `rootfs 不存在：…（先 provision）` —— 引导第一次安装时的死锁**
+
+```
+✗ [linuxctl update] base 失败：rootfs 不存在：…/files/sunsetlinux/rootfs（先 provision）
+```
+
+`cmd_update` 里那句 `exists "$ROOTFS" || fail 1 "…（先 provision）"` 把 **`runtime`/`dsh` 的前提
+安到了 `base` 上**：`update_base` 的语义本就是"解包到 staging → 原子换掉 rootfs"，rootfs 不存在时
+照样成立（没有旧的就不用备份，`mv staging → rootfs` 即引导出第一棵 rootfs）。
+于是死锁 —— 引导要 `update base` 才有 rootfs，而 `update base` 要求先有 rootfs。
+
+修法两处：① 存在性判据只对 `runtime`/`dsh` 生效；② `update_base` 里那句无条件
+`mv "$ROOTFS" "$prev"` 在**首次引导时没有旧 rootfs 可备份**，`mv` 直接 `cannot stat …`
+把整条 update 打死 —— 改成"有旧的才备份，没有就直接 `mv staging → rootfs`"，
+并保持"要么没有 rootfs、要么是完整的 rootfs"（失败只清 staging，绝不留下半棵）；
+有旧 rootfs 时行为一字不变。
+
+**复现与验证**（都在容器里用真产物做过）：把内嵌包里的 base 部件解出来（99,893,248 字节，
+magic `e2e1f5e0` 在偏移 1024），用同一份 `linuxctl.sh` 跑
+`update base <base.erofs> --version 24.04.3-l1`：修前报 `rootfs 不存在`；修后日志打出
+`首次引导：rootfs 由本次 update base 建立`，`rootfs/bin/sh` 就位、目录树 17 项。
+
+**④ proot 启动器缺执行位：`exec …/ld-linux-aarch64.so.1: Permission denied`**
+
+`proot-bundle-arm64.tar.gz` 里的模式是**对的**（`bin/proot` 0755、`lib/ld-linux-*.so.1` 0700），
+但 App 用 **Android 的 tar（toybox），它不还原文件模式**，解出来一律 0600/0700；
+而 `proot-launch.sh` 走 `exec "$loader" --library-path "$lib" "$bin"` ——
+**`bin/proot` 它自己 chmod 了，loader 却漏了**，而 loader 才是那次 exec 的主体。
+"用 GNU tar 解包"的开发机上看不见这个坑（GNU tar 还原模式），只有真机复现；
+容器里按 App 的步骤复刻（`tar -xzf` → 把模式改回 0600 → `sh proot-launch.sh --version`）
+拿到的正是 `exec: …/ld-linux-aarch64.so.1: Permission denied`。
+
+修法：新增 `ProotRuntime.normalizeExecBits()`，解包后按 tar 的语义还原执行位
+（`bin/`、`lib/` 下的文件 + 所有目录；README/license/manifest 这类数据文件不动），
+`OfflineApplier` 每次装 proot 部件后调用并把**实际补了哪些文件**写进安装日志；
+`ProotRuntime.ensure()` 也顺带修一遍（幂等）—— 老版本已经装在盘上的环境不用卸载重装。
+
+**⑤ `{LOCK_FD}: inaccessible or not found` —— 互斥锁在 mksh 下根本没建立**
+
+日志 118 行只有一句（其余全被 App 的展示宽度截掉）：
+
+```
+/data/user/0/…/files/sunsetlinux/bin/linuxctl[2168]: {LOCK_FD}: inaccessible or not found
+```
+
+`acquire_lock` 用的是 bash 的**命名 fd** 语法 `exec {LOCK_FD}>"$RUN_DIR/.linuxctl.lock"` ——
+Android 的 `/system/bin/sh`（mksh）把它当**字面命令**执行，于是 `flock -w … "$LOCK_FD"`（空串）
+必然失败，`update` 连解包都进不去。而 `flock` 在 mksh 里**恰好存在**（`/system/bin/flock`），
+所以永远走这一支、下面 mkdir 型锁的兜底根本轮不到 —— 这就是它"真机必挂、开发机（bash）不挂"的原因。
+
+**这一处为什么最难查**：App 的错误面板显示的是"最后一条以 ✗ 开头的日志行"，而真正的原因
+（`{LOCK_FD}: inaccessible or not found`）在它**上一行**；只有把日志滚到底、逐行读原文才看得到。
+
+修法：判据从"有没有 flock"改成"**这个 shell 能不能真的锁上**" —— 当场探一次
+（实测 mksh 下 `exec 9>…` 本身不报错、报错的是 `flock 9`：`9: Bad file descriptor`），
+不成自动落到 shell 无关的 mkdir 型锁，并 warn 一行说明走了哪条路；`release_lock` 对称改成关 9 号 fd。
+顺带统一超时口径：mkdir 型锁原来写死 `i > 600`（≈120 s）**不认 `LOCK_TIMEOUT`**，
+而兜底那条恰恰是真机唯一会走的路 ⇒ 用户遇到别人持锁要干等两分钟且界面无提示。
+
+**⑥ `dsh 层里找不到 package.json` —— `update dsh` 只认"模块目录"形态**
+
+把 ③④⑤ 修完后，整条引导终于跑到**最后一个部件**才露出来：base 与 runtime 都装好了，dsh 报
+`✗ [linuxctl update] dsh 失败：dsh 层里找不到 package.json：…/dsh-0.1.6-alpha.2.erofs`。
+
+`update_dsh` 假定"层根就是 npm 包的根（含 package.json）"，而**当前官方 dsh 层的真实形态是 rootfs 覆盖** ——
+实测 `fsck.erofs` 解出来是 `usr/local/lib/node_modules/@deepseek-ai/dsh/…` 与
+`root/.dsh/profiles/web/…`。更坑的是它找 package.json 用的 `find -maxdepth 3` 会**误命中**
+`root/.dsh/profiles/web/node_modules/<pkg>/package.json`（深度正好在 3 以内），于是拿着一个
+不相干的依赖目录当"模块根"去 mv，最后仍然报"找不到 package.json" —— 第一版修法（放宽 find）就是这么判错的。
+
+修法：① 判定改成**按结构**（层根有 `package.json` 或 `package/package.json` = 模块目录，否则 = 覆盖层）；
+② 覆盖层走新增的 `copy_tree` 合并进 rootfs，**旧 DSH 目录仍备份成 `.prev`**（保留回滚路），失败回滚；
+③ 顺带把 `update_runtime` 里那句 `cp -R --preserve=mode,timestamps,links --no-preserve=ownership`
+也收进 `copy_tree` —— **Android 的 cp（toybox）不认 `--no-preserve`**，一旦报错整层合并就失败，
+现在不认就退到通用 `cp -R`（两条路都保留符号链接）。
+
+**验证**（容器里用**真层**跑完整序列，mksh = 设备上的 sh）：base → runtime → dsh 三层 `exit=0`；
+装完核对 `@deepseek-ai/dsh/package.json` = 0.1.6-alpha.2、`/usr/local/bin/dsh` 软链就位、
+`root/.dsh/profiles/web/` 已铺、`linuxctl provision` 通过、`start.sh` 走到"已后台启动"。
+（容器里 guest 程序跑不起来是容器自身的 ld.so 环境差异，与 App 侧无关；真机由用户实测确认。）
+
+**回归**：`runtime/proot/selftest.sh` **25 → 28 / 0**（bash 与 mksh 各一遍），新增 3 条：
+①「别人持锁时第二个进程会等锁并超时（退出码 3）」—— 用**确定性布景**（手工造锁目录 + 一个活着的 pid）。
+这条断言本身也返工过两次，两次都是"测试不可靠"而不是"锁坏了"：第一版赌"后台持锁者还在跑"，
+实测它已经结束、第二个进程顺利拿锁退出 0；第二版用 `update` 当探针，而它在抢锁**之前**
+就因为"层文件不存在"退出了。②持锁者退出后锁可再次获取。③源码级：不许再出现 `exec {VAR}>`
+（**跳过注释行** —— 修法本身就写了注释解释这个坑，第一版直接把解释判红了）。
+
+**回归**：App 单测 305 → **313 / 0**，新增 `HostCtlCommandTest` 7 条 —— 其中 2 条是**源码级**的
+（`canExecute()` 不许再出现在这三处判据里、宿主入口脚本的 shebang 必须仍是 `#!/system/bin/sh`），
+因为这类错误在 JVM 里永远跑不出来（桌面没有 noexec，直接 exec 一律成功），只能把结构本身钉住。
+`runtime/proot/selftest.sh` **23 → 25 / 0**（bash 与 mksh 各一遍）：新增 2 条**子进程级**断言，
+走真实脚本的真实解析路径，判据是错误停在"层文件不存在"而不是"未知参数"；并做了**变异验证**
+—— 把 `--version` 分支删掉，这两条立刻变红（23 通过 / 2 失败）。
+真机（OnePlus PJD110 / Android 16）覆盖安装 0.3.29 后重跑免 root 引导：层装成功、`provision` 通过、环境起得来。
+
 ### 3.10.58 「找不到工作区 / 壳读取慢 / 环境里要逐条提权」三件事的根因与修法（2026-09-19，App 0.3.20 + 模块 1.0.44）
 
 用户原话：「我找不到 Root 部署下『工作根』……也没有穿透 `/storage/emulated/0/Download` 镜像映射到容器内部……壳对 Root 环境的读取延迟比较重……会有闪烁（候补记：在

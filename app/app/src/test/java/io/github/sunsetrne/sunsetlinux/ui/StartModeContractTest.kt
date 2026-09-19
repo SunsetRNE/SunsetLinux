@@ -77,34 +77,48 @@ class StartModeContractTest {
     }
 
     @Test
-    fun `一键启动那组只有主按钮与停止环境，不摊开 DSH 按钮`() {
+    fun `决策变更后不再渲染任何环境与 DSH 启停按钮`() {
         val body = operationCardBody()
-        val oneShot = body.substringAfter("StartMode.ONE_SHOT ->", "")
-            .substringBefore("StartMode.STEPWISE ->")
-        assertTrue("一键启动这一档要有主按钮", oneShot.contains("PrimaryActionButton("))
-        assertTrue("主按钮文案要写明是「环境 + DSH」", oneShot.contains("一键启动（环境 + DSH）"))
-        assertTrue("一键启动这一档要有「停止环境」（唯一的退路）", oneShot.contains("label = \"停止环境\""))
+        // 用户原话：「移除所有环境相关的启动按钮，免 root 版本，点开应用即启动环境；
+        //            Root 版本默认环境一直运行。DSH 彻底和虚拟环境解绑」
+        for (label in listOf("一键启动（环境 + DSH）", "仅启动环境", "停止环境", "启动 DSH", "停止 DSH")) {
+            assertFalse("启停按钮「$label」必须已经移除", body.contains("label = \"$label\""))
+        }
         assertFalse(
-            "一键启动这一档**不许**出现 DSH 的启停按钮 —— 那正是「五个一起摊开」的老问题",
-            oneShot.contains("label = \"启动 DSH\"") || oneShot.contains("label = \"停止 DSH\""),
+            "主按钮形态的启动/停止也必须消失（PrimaryActionButton 不再用于启停）",
+            body.contains("PrimaryActionButton("),
+        )
+        assertFalse("不许再直接调启停动作", body.contains("vm.start()") || body.contains("vm.stop()"))
+    }
+
+    @Test
+    fun `移除按钮后留的是一条如实的状态说明`() {
+        val body = operationCardBody()
+        assertTrue("要有状态说明（NoticeBar）", body.contains("NoticeBar("))
+        assertTrue("未部署时要说清下一步是「部署」", body.contains("环境尚未部署"))
+        assertTrue("运行中要说明\"每次打开都会确保它在跑\"", body.contains("都会确保它在跑"))
+    }
+
+    @Test
+    fun `自动启动是默认值：默认 true 且进 App 即调用`() {
+        val prefs = read(File(srcDir, "core/Prefs.kt"))
+        assertTrue(
+            "autoStartEnv 的默认值必须是 true —— 「打开 App 即启动环境」是默认行为",
+            prefs.contains("sp.getBoolean(KEY_AUTO_START, true)"),
+        )
+        val vm = read(File(srcDir, "ui/LauncherViewModel.kt"))
+        assertTrue("环境没跑时要 start", vm.contains("EnvState.STOPPED -> start()"))
+        assertTrue(
+            "环境在跑但 DSH 没起时要补 DSH（\"进一步的启动只是启动 DSH\"）",
+            vm.contains("dshRunning != true -> dshStart()"),
         )
     }
 
     @Test
-    fun `分步启动那组是四个按钮的 2×2`() {
+    fun `运行方式切换保留，但档位分支里不再有启停按钮`() {
         val body = operationCardBody()
-        val stepwise = body.substringAfter("StartMode.STEPWISE ->", "")
-        for (label in listOf("仅启动环境", "停止环境", "启动 DSH", "停止 DSH")) {
-            assertTrue("分步启动这一档要有「$label」", stepwise.contains("label = \"$label\""))
-        }
-        assertTrue("沿用原来的 2×2：至少两个 Row", Regex("""Row\(""").findAll(stepwise).count() >= 2)
-    }
-
-    @Test
-    fun `每个启动按钮的启用都只来自 StartControls 纯函数`() {
-        val body = operationCardBody()
-        // 五类按钮的 enabled 必须直接引用 controls 上的字段 —— 出现第二份判定
-        // （例如 enabled = running、enabled = true）就说明有人在界面里另写了一套矩阵。
+        assertTrue("运行方式切换本身保留", body.contains("StartModeToggle("))
+        assertTrue("档位解析仍然走纯函数", body.contains("resolveStartMode("))
         for (field in listOf(
             "controls.oneShotEnabled",
             "controls.startEnvOnlyEnabled",
@@ -112,9 +126,8 @@ class StartModeContractTest {
             "controls.dshStartEnabled",
             "controls.dshStopEnabled",
         )) {
-            assertTrue("OperationCard 里必须用 $field 决定按钮亮/灰", body.contains(field))
+            assertFalse("启停按钮的启用判据 $field 不该再出现在操作卡里", body.contains(field))
         }
-        assertFalse("不许在界面里另写一份判定（enabled = true 这种）", body.contains("enabled = true"))
     }
 
     // ─────────────────────────── 批注一 · 运行中锁定
@@ -159,17 +172,12 @@ class StartModeContractTest {
     }
 
     @Test
-    fun `免 root 版不渲染切换与分步按钮`() {
+    fun `两个 edition 都不再渲染启停按钮`() {
         val body = operationCardBody()
-        assertTrue(
-            "切换控件与分步按钮必须在 `if (Edition.showsSplitStartUi)` 分支里",
-            body.contains("if (Edition.showsSplitStartUi) {"),
-        )
-        val gate = body.indexOf("if (Edition.showsSplitStartUi) {")
-        assertTrue("切换控件在 edition 门禁之后", body.indexOf("StartModeToggle(") > gate)
-        assertTrue("分步按钮组在 edition 门禁之后", body.indexOf("StartMode.STEPWISE ->") > gate)
-        // 免 root 分支仍然保留原来的启动/停止语义
-        assertTrue(body.contains("\"启动环境\"") && body.contains("\"停止环境\""))
+        assertFalse("Root 版分支不许再引用 DSH 启停", body.contains("controls.dshStartEnabled"))
+        assertFalse("Root 版分支不许再引用停止环境", body.contains("controls.envStopEnabled"))
+        assertFalse("免 root 版不许再引用一键启动", body.contains("controls.oneShotEnabled"))
+        assertTrue("状态说明在两个 edition 下都要有", body.contains("NoticeBar("))
     }
 
     // ─────────────────────────── 批注二 · 终端紧凑与胶囊避让

@@ -9,6 +9,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.io.RandomAccessFile
 import java.security.MessageDigest
 
 /**
@@ -158,16 +159,55 @@ class OfflineBundleTest {
             return
         }
         for (bin in bins) {
-            val bytes = bin.readBytes()
-            val b = OfflineBundle.parse(bytes)
+            // ★ 必须**流式**校验，不能 `readBytes()` 整个读进堆：真包有 **200 MB 量级**
+            //   （0.3.29 的 proot-full 实测 222 MB），而单测 JVM 的堆上限是 2 GB
+            //   （见 app/gradle.properties 的 -Xmx2048m）—— 一次 `readBytes()` + 每个部件
+            //   再 `copyOfRange` 一份，直接 OOM；症状还很误导：异常被当成"包有问题"。
+            //   改成"只把头读进内存 + 载荷分块算 sha256"，包再大也只是多读几秒。
+            val head = readBundleHeader(bin)
+            val b = OfflineBundle.parse(head.bytes, headerOnly = true)
             assertTrue("${bin.name} 应当至少有一个部件", b.parts.isNotEmpty())
+            assertEquals("${bin.name} 的头长度与 payloadStart 应当自洽", head.payloadStart, b.payloadStart)
             for (p in b.parts) {
-                val from = (b.payloadStart + p.off).toInt()
-                val got = bytes.copyOfRange(from, from + p.len.toInt())
-                assertTrue("${bin.name} 的 ${p.file} 内容与头里的 sha256 不符", OfflineBundle.verifyPart(p, got))
+                assertTrue(
+                    "${bin.name} 的 ${p.file} 越界（off=${p.off} len=${p.len}，文件 ${head.fileSize}）",
+                    b.payloadStart + p.off + p.len <= head.fileSize,
+                )
+                val got = sha256OfRange(bin, b.payloadStart + p.off, p.len)
+                assertEquals("${bin.name} 的 ${p.file} 内容与头里的 sha256 不符", p.sha256.lowercase(), got)
             }
-            println("✓ ${bin.name}：变体 ${b.variant}，${b.parts.size} 个部件，${bytes.size / 1048576} MiB")
+            println(
+                "✓ ${bin.name}：变体 ${b.variant}，${b.parts.size} 个部件，" +
+                    "${head.fileSize / 1048576} MiB（流式校验，全程只驻留头部）",
+            )
         }
+    }
+
+    /** 只读头部（`SLB1` + 头长度 + JSON）与文件大小；载荷不进内存。 */
+    private data class BundleHead(val bytes: ByteArray, val payloadStart: Long, val fileSize: Long)
+
+    private fun readBundleHeader(bin: File): BundleHead = RandomAccessFile(bin, "r").use { f ->
+        val fileSize = f.length()
+        val pre = ByteArray(8).also { f.readFully(it) }
+        val headerLen = (pre[4].toLong() and 0xFF) or ((pre[5].toLong() and 0xFF) shl 8) or
+            ((pre[6].toLong() and 0xFF) shl 16) or ((pre[7].toLong() and 0xFF) shl 24)
+        val rest = ByteArray(headerLen.toInt()).also { f.readFully(it) }
+        BundleHead(pre + rest, 8L + headerLen, fileSize)
+    }
+
+    /** 流式计算 `[from, from+len)` 的 sha256（分块，峰值内存 = 1 MiB）。 */
+    private fun sha256OfRange(bin: File, from: Long, len: Long): String = RandomAccessFile(bin, "r").use { f ->
+        f.seek(from)
+        val md = java.security.MessageDigest.getInstance("SHA-256")
+        val buf = ByteArray(1 shl 20)
+        var left = len
+        while (left > 0) {
+            val n = f.read(buf, 0, minOf(buf.size.toLong(), left).toInt())
+            if (n < 0) break
+            md.update(buf, 0, n)
+            left -= n
+        }
+        md.digest().joinToString("") { "%02x".format(it) }
     }
 
     @Test

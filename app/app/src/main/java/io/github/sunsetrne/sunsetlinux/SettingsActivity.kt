@@ -389,11 +389,13 @@ private fun SettingsScreen(
                             checked = bootStart,
                             onCheckedChange = onBootStart,
                         )
-                        SwitchRow(
+                        // 决策变更（2026-09-19）：自动启动**不再是开关**，它是默认行为
+                        // （「打开 App 即启动环境；进一步的启动只是启动 DSH」）。
+                        // 留一行说明而不是一个可以关掉的开关：关掉它就等于把环境变成"要手动按"，
+                        // 而那正是这次要去掉的东西。
+                        InfoRow(
                             title = "打开 App 时自动启动环境",
-                            subtitle = "仅在已部署且当前处于停止状态时生效",
-                            checked = autoStart,
-                            onCheckedChange = onAutoStart,
+                            subtitle = "默认行为（已部署时）：进 App 即确保环境在跑，DSH 在打开时补起",
                         )
                     }
                 }
@@ -493,6 +495,27 @@ private fun SwitchRow(
             Text(subtitle, style = MaterialTheme.typography.labelSmall, color = TextMuted)
         }
         Switch(checked = checked, onCheckedChange = onCheckedChange)
+    }
+}
+
+/**
+ * 只陈述事实的一行（没有开关）。
+ *
+ * 决策变更（2026-09-19）后「打开 App 自动启动环境」不再是可关的选项 —— 它是默认行为。
+ * 用一个"看起来能关但关了会破坏默认语义"的开关比直接说明更糟，所以这里只印说明。
+ */
+@Composable
+private fun InfoRow(title: String, subtitle: String) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(title, style = MaterialTheme.typography.bodyMedium)
+            Text(subtitle, style = MaterialTheme.typography.labelSmall, color = TextMuted)
+        }
     }
 }
 

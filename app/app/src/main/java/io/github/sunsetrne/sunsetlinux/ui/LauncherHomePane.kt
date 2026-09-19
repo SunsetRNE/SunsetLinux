@@ -265,7 +265,9 @@ fun LauncherHomePane(
                                     // 电池白名单那类建议现在归「冻结与省电」独立页（原来跟着进设置页）
                                     HintTarget.SETTINGS_POWER -> onOpenPower()
                                     HintTarget.UPDATES -> onOpenUpdates()
-                                    HintTarget.START -> vm.start()
+                                    // 决策变更（2026-09-19）：环境由 App 自动启动，界面上不再有
+                                    // "去启动"这个动作 —— 这类提示统一落到「诊断」看原因与证据。
+                                    HintTarget.START -> onOpenDiagnostics()
                                     HintTarget.LOGS -> onExportReport()
                                 }
                             },
@@ -471,114 +473,23 @@ private fun OperationCard(
                 }
 
                 Spacer(Modifier.height(12.dp))
-                when (shown) {
-                    // ── 一键启动：主按钮 + 停止环境 ──
-                    //
-                    // 为什么"一键启动"这个标签在运行中也不变形（不像免 root 版那样变成
-                    // 「停止环境」）：现在有两条起法，主按钮一变形用户就分不清当前生效的是
-                    // 哪条路。停止环境单独一张卡片，两个动作的语义才不会打架。
-                    StartMode.ONE_SHOT -> {
-                        PrimaryActionButton(
-                            text = if (notProvisioned) "尚未部署环境" else "一键启动（环境 + DSH）",
-                            stopping = false,
-                            brush = BrushStart,
-                            contentColor = OnAccent,
-                            enabled = controls.oneShotEnabled,
-                            busy = busy,
-                            onClick = { vm.start() },
-                        )
-
-                        Spacer(Modifier.height(12.dp))
-                        ActionTile(
-                            icon = Icons.Filled.Close,
-                            label = "停止环境",
-                            supporting = if (running) "连同 DSH 一起停" else "环境未运行",
-                            enabled = controls.envStopEnabled && !busy,
-                            onClick = { vm.stop() },
-                            modifier = Modifier.fillMaxWidth(),
-                        )
-                    }
-
-                    // ── 分步启动：沿用原来那套 2×2 卡片外观 ──
-                    StartMode.STEPWISE -> {
-                        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                            ActionTile(
-                                icon = Icons.Filled.PlayArrow,
-                                label = "仅启动环境",
-                                supporting = when {
-                                    running -> "环境已在运行"
-                                    else -> "不起 DSH，维护用"
-                                },
-                                enabled = controls.startEnvOnlyEnabled && !busy,
-                                onClick = { vm.startEnvOnly() },
-                                modifier = Modifier.weight(1f),
-                            )
-                            ActionTile(
-                                icon = Icons.Filled.Close,
-                                label = "停止环境",
-                                supporting = if (running) "连同 DSH 一起停" else "环境未运行",
-                                enabled = controls.envStopEnabled && !busy,
-                                onClick = { vm.stop() },
-                                modifier = Modifier.weight(1f),
-                            )
-                        }
-
-                        Spacer(Modifier.height(12.dp))
-                        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                            ActionTile(
-                                icon = Icons.Filled.PlayArrow,
-                                label = "启动 DSH",
-                                supporting = when {
-                                    ui.status?.dshRunning == true -> "DSH 已在运行"
-                                    !running -> "先起环境"
-                                    else -> "接上 DSH Web"
-                                },
-                                enabled = controls.dshStartEnabled && !busy,
-                                onClick = { vm.dshStart() },
-                                modifier = Modifier.weight(1f),
-                            )
-                            ActionTile(
-                                icon = Icons.Filled.Close,
-                                label = "停止 DSH",
-                                supporting = when {
-                                    ui.status?.isEnvOnly != true -> "需「仅环境」方式"
-                                    ui.status?.dshRunning == true -> "环境继续运行"
-                                    else -> "DSH 未在运行"
-                                },
-                                enabled = controls.dshStopEnabled && !busy,
-                                onClick = { vm.dshStop() },
-                                modifier = Modifier.weight(1f),
-                            )
-                        }
-                    }
-                }
-
-                // 互斥判定的理由（为什么有的按钮是灰的、下一步该点哪个）直接印在按钮下面。
-                // 只靠置灰，用户会以为是"还没加载好"而不是"这条路不能走"。
-                controls.note?.let { note ->
-                    Spacer(Modifier.height(12.dp))
-                    NoticeBar(
-                        text = note,
-                        tone = if (controls.noteIsWarning) WarnTone else MaterialTheme.colorScheme.primary,
-                    )
-                }
-            } else {
-                // ── 免 root（proot）版保持原样：环境与 DSH 一体，只有一键启动/停止 ──
-                Spacer(Modifier.height(12.dp))
-                val stopping = running || ui.state == EnvState.STOPPING
-                PrimaryActionButton(
+                // ── 决策变更（2026-09-19）：**不再有任何环境/DSH 启停按钮** ──
+                //
+                // 环境改由 App 自己保证（进 App 即启动；root 版由 KernelSU 模块开机自启），
+                // 所以界面上不需要"启动/仅启动环境/停止"这一排入口了：
+                //   · 用户要的是"打开就能用"，不是"先按一下再等"；
+                //   · 按钮一多就会出现"我到底该按哪个"（真机反馈原话：「启动应用默认启动相应的虚拟环境，
+                //     进一步的启动只是启动 DSH」）；
+                //   · 环境不再由界面控制之后，DSH 也就与环境的启动解绑（各一条命令、各一个生命周期）。
+                // 这里只留一条**如实**的状态说明；失灵时下一步是「诊断」或「部署」，不走这个开关。
+                NoticeBar(
                     text = when {
-                        notProvisioned -> "尚未部署环境"
-                        stopping -> "停止环境"
-                        else -> "启动环境"
+                        notProvisioned -> "环境尚未部署：走「部署」页铺一次，之后每次打开 App 都会自动启动。"
+                        ui.state == EnvState.RUNNING -> "环境运行中：每次打开 App 都会确保它在跑，DSH 在打开时按需启动。"
+                        ui.state == EnvState.STARTING -> "环境正在启动…（自动进行，不需要操作）"
+                        else -> "环境未运行：App 正在自动拉起（若长时间没起来，去「诊断」看原因）。"
                     },
-                    stopping = stopping,
-                    brush = if (stopping) BrushStop else BrushStart,
-                    // 启动＝白底黑字；停止＝深底白字
-                    contentColor = if (stopping) TextPrimary else OnAccent,
-                    enabled = !notProvisioned,
-                    busy = busy,
-                    onClick = { if (stopping) vm.stop() else vm.start() },
+                    tone = if (notProvisioned) WarnTone else MaterialTheme.colorScheme.primary,
                 )
             }
 

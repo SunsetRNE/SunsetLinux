@@ -180,36 +180,34 @@ class EditionSeparationTest {
     // ───────────────────────── 拆开的启动路径（仅 Root 版）
 
     @Test
-    fun `拆开的启动按钮只在 Root 版渲染`() {
+    fun `两个 edition 都不再有启停按钮（决策变更：默认自启）`() {
         val home = read("ui/LauncherHomePane.kt")
-        assertTrue(
-            "启动区必须按 Edition.showsSplitStartUi 分岔 —— 免 root 版保持原样（只有一键启动/停止）",
-            home.contains("if (Edition.showsSplitStartUi)"),
-        )
-        val gate = home.indexOf("if (Edition.showsSplitStartUi)")
-        for (call in listOf("vm.startEnvOnly()", "vm.dshStart()", "vm.dshStop()")) {
-            assertTrue(
-                "$call 必须出现在 showsSplitStartUi 分支里（否则免 root 版会渲染一条走不通的路）",
-                home.indexOf(call) > gate,
+        // 用户原话：「移除所有环境相关的启动按钮，免 root 版本，点开应用即启动环境；
+        //            Root 版本默认环境一直运行。DSH 彻底和虚拟环境解绑」
+        for (call in listOf("vm.start()", "vm.stop()", "vm.startEnvOnly()", "vm.dshStart()", "vm.dshStop()")) {
+            assertFalse(
+                "$call 不该再出现在主界面 —— 环境由 App 自动保证，界面不再提供启停",
+                home.contains(call),
             )
         }
-        // 反方向：proot 那条分支仍然只有原来的启动/停止（一键启动语义不变）
-        assertTrue(
-            "免 root 分支必须保留原来的启动/停止主按钮",
-            home.contains("\"启动环境\"") && home.contains("\"停止环境\""),
-        )
+        assertFalse("启停按钮组件不该再被主界面用", home.contains("PrimaryActionButton("))
+        assertTrue("留下的是一条如实的状态说明", home.contains("NoticeBar("))
     }
 
     @Test
-    fun `免 root 版也能渲染（终端页的仅启动环境入口是可空的）`() {
+    fun `终端页不再传"仅启动环境"入口（环境已由 App 自动启动）`() {
         val terminal = read("ui/TerminalPane.kt")
         assertTrue(
-            "TerminalPane 必须把「仅启动环境」做成可空入口 —— proot 版没有这条路",
+            "TerminalPane 仍要保留可空入口的形状（终端不该假设有启动入口）",
             terminal.contains("onStartEnvOnly: (() -> Unit)? = null"),
         )
         val shell = read("ui/AppShell.kt")
         assertTrue(
-            "AppShell 传这个回调时也要按 Edition.showsSplitStartUi 分岔",
+            "AppShell 传 null —— 那个动作已经不存在了（环境自动启动）",
+            shell.contains("onStartEnvOnly = null"),
+        )
+        assertFalse(
+            "不该再按 edition 分岔传这个回调",
             Regex("""onStartEnvOnly = if \(Edition\.showsSplitStartUi\)""").containsMatchIn(shell),
         )
     }

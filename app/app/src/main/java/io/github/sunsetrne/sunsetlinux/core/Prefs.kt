@@ -136,9 +136,16 @@ class Prefs(context: Context) {
         get() = sp.getBoolean(KEY_BOOT_SERVICE, false)
         set(value) = sp.edit { putBoolean(KEY_BOOT_SERVICE, value) }
 
-    /** 进入 App 时自动 start（仅在已部署且当前 stopped 时生效）。 */
+    /**
+     * 进入 App 时自动 start（仅在已部署且当前 stopped 时生效）。
+     *
+     * ★ 决策变更（2026-09-19）：**默认改为 true** —— 「打开 App 即启动环境」成为默认行为，
+     * 界面上不再有启动/停止按钮（用户原话：「启动应用默认启动相应的虚拟环境，进一步的启动
+     * 只是启动 DSH」）。root 版的环境另有 KernelSU 模块开机自启，这条对它同样无害
+     * （已运行时不动作）。
+     */
     var autoStartEnv: Boolean
-        get() = sp.getBoolean(KEY_AUTO_START, false)
+        get() = sp.getBoolean(KEY_AUTO_START, true)
         set(value) = sp.edit { putBoolean(KEY_AUTO_START, value) }
 
     /**

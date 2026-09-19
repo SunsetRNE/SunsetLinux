@@ -49,6 +49,37 @@ object DshPaths {
         return listOf("$home/bin/linuxctl", "$home/bin/linuxctl.sh")
     }
 
+    /** Android 上唯一保证存在的 shell：`/data` 是 noexec，脚本只能**喂给解释器**跑。 */
+    const val HOST_SH = "/system/bin/sh"
+
+    /**
+     * 执行**宿主侧脚本**（`bin/linuxctl` / `linuxctl.sh` …）的命令前缀。
+     *
+     * ## 为什么必须经 `sh`，而不是直接 exec 那个文件（真机实测 · 2026-09-19）
+     *
+     * 这些脚本躺在 App **私有目录**（`/data/user/0/<pkg>/files/sunsetlinux/bin/`）。
+     * 在真机上直接 `ProcessBuilder(path).start()` 会以
+     * `Cannot run program "…/bin/linuxctl": error=13, Permission denied` 收场
+     * ——免 root 版点「安装内嵌离线包」就是这样倒在 `[linuxctl update] base` 这一步的。
+     *
+     * 关键点：**执行位在不在都不该赌**。同一份文件在 A 机上能 exec、在 B 机上被
+     * noexec 挂载或系统策略挡掉，只差一个 ROM/内核；而"经解释器跑"在两种机器上
+     * **一律成立**（`sh <path>` 走的是读文件 + 解析，不是 `execve` 那个文件）。
+     * 所有脚本的第一行本来就是 `#!/system/bin/sh`，所以这不是降级，而是**等价且稳**的调用方式。
+     *
+     * 于是契约收敛成一句：**私有目录里的脚本永远由 `sh` 来跑**，App 侧不要再出现
+     * `ProcessBuilder(<私有目录脚本>)`。忘记这一条就会得到 `error=13`。
+     *
+     * ⚠️ 这里**故意不判** `File.canExecute()`：那正是上一版翻车的地方 —— "执行位为真"
+     * 只说明**模式位**允许，跟这次 `execve` 会不会被挂载选项/系统策略拒掉是两件事。
+     * 赌它一次 = 换一台 ROM 就可能再倒一次，而经 `sh` 的写法在任何机器上都成立。
+     */
+    fun hostCtlCommand(ctlPath: String): List<String> = listOf(HOST_SH, ctlPath)
+
+    /** [hostCtlCommand] 的单行形式，供已经包在 `sh -c` 里的调用点用。 */
+    fun hostCtlCommandLine(ctlPath: String): String =
+        hostCtlCommand(ctlPath).joinToString(" ") { shQuote(it) }
+
     /**
      * **设备侧原生构建脚本**（`device-provision.sh`）的候选位置。
      *
@@ -344,17 +375,14 @@ class LinuxCtl(private val context: Context, val mode: EnvMode) {
      *   2. 这样 PTY 在最外层，`su` 之后的整条链路（chroot/proot → bash）都继承同一个
      *      控制终端，Ctrl-C 才能落到真正的前台进程组。
      *
-     * proot 模式直接执行 `linuxctl attach`（它自己会 `start.sh --inner`）；丢了执行位就
-     * 退化 `/system/bin/sh <path> attach` —— 与 [prootCommand] 同一套判据。
+     * proot 模式跑 `linuxctl attach`（它自己会 `start.sh --inner`）；命令构造统一走
+     * [DshPaths.hostCtlCommand] —— 私有目录里的脚本一律经 `sh`，绝不直接 exec
+     * （直接 exec 在真机上就是 `error=13`，见那个函数的注释）。
      */
     fun ptySpec(rows: Int, cols: Int): PtySpec {
         val script = when (mode) {
             EnvMode.ROOT -> "exec su -c " + shQuote(shellCommand(listOf("attach")))
-            EnvMode.PROOT -> if (File(activeCtlPath).canExecute()) {
-                "exec " + shQuote(activeCtlPath) + " attach"
-            } else {
-                "exec /system/bin/sh " + shQuote(activeCtlPath) + " attach"
-            }
+            EnvMode.PROOT -> "exec " + DshPaths.hostCtlCommandLine(activeCtlPath) + " attach"
         }
         val env = baseEnv() + mapOf(
             // 终端相关：TERM 决定程序输出什么控制序列；LOCALE 决定 UTF-8 与消息语言
@@ -475,12 +503,16 @@ class LinuxCtl(private val context: Context, val mode: EnvMode) {
     }
 
     /**
-     * proot 模式直接执行 linuxctl（契约原文：直接执行 `$APP_FILES/sunsetlinux/bin/linuxctl status`）。
-     * 万一脚本丢了执行位，退化为 `sh <path>`，避免用户看到 EACCES 却无从下手。
+     * proot 模式跑 linuxctl：**经 `sh`**（契约原文：`$APP_FILES/sunsetlinux/bin/linuxctl status`）。
+     *
+     * 以前这里按 `canExecute()` 决定"直接执行还是退化 `sh <path>`"——那个判据在真机上不可靠：
+     * 执行位与实际能不能 exec 是两件事（noexec 挂载 / 系统策略），于是免 root 版的
+     * 「安装内嵌离线包」会以 `无法执行 …/bin/linuxctl: error=13, Permission denied` 失败。
+     * 现在**一律经 [DshPaths.hostCtlCommand]**：能在 A 机直接跑的这种"优化"不值得拿
+     * B 机的失败去换。
      */
     private fun prootCommand(args: List<String>): List<String> =
-        if (File(activeCtlPath).canExecute()) listOf(activeCtlPath) + args
-        else listOf("/system/bin/sh", activeCtlPath) + args
+        DshPaths.hostCtlCommand(activeCtlPath) + args
 
     private fun baseEnv(): Map<String, String> = buildMap {
         put("PATH", "/system/bin:/system/xbin:/data/sunsetlinux/bin")

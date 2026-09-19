@@ -188,6 +188,19 @@ object OfflineApplier {
                             "宿主脚本 ${scripts.written.size} 个 → $home/bin" +
                             "（契约路径 ${if (scripts.contractReady) "已就位" else "未就位"}）\n"
                     )
+                    // ★ Android 的 tar（toybox）**不还原文件模式**：proot 本体与它自带的 loader
+                    //   解出来都没有执行位 ⇒ `proot-launch.sh` 的 `exec "$loader" …` 会死在
+                    //   `Permission denied`（启动器自己只 chmod 了 bin/proot，漏了 loader）。
+                    //   `ensure()` 里已经统一点过一次，这里再核一遍，并把**实际**补了哪些文件写进
+                    //   日志 —— 静默修复等于下次排障还得重新推一遍。
+                    val fixed = ProotRuntime.normalizeExecBits(prootDir)
+                    if (fixed.isNotEmpty()) {
+                        log.append(
+                            "· [${Stage.PROOT.label}] 补执行位 ${fixed.size} 个" +
+                                "（Android 的 tar 不还原模式）：${fixed.take(4).joinToString(", ")}" +
+                                "${if (fixed.size > 4) " …" else ""}\n"
+                        )
+                    }
                     scripts.error?.let { log.append("  注意：$it\n") }
                     installed += "proot"
                     onStage("${Stage.PROOT.label}", 1, 1)

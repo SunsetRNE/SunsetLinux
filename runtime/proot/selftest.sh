@@ -162,5 +162,105 @@ if [ -f "$ENT" ]; then
     fi
 fi
 
+# ---------------------------------------------------------------------------
+# update 的参数契约：**必须认 `--version`**（真机 2026-09-19 的事故）
+#
+# 现场：免 root 版点「铺环境（内嵌离线包 + provision）」，倒在
+#   ✗ [linuxctl update] base 失败：[linuxctl 错误] update: 未知参数 --version
+#
+# 根因是**两个 runtime 的命令行不一致**：App 的 `OfflineApplier` 对两个 edition 用同一份
+# 命令构造（`update <layer> <file> --version <ver>`），root 版接受，proot 版把它当未知参数
+# 直接失败 ⇒ 同一个按钮在免 root 版上必然失败。
+#
+# 为什么用**子进程**测而不是抽函数：真正要对齐的是"命令行契约"，而这正是漂移掉的东西；
+# 抽函数测会连"脚本到底接不接受这个参数"一起绕过去。这两条走的是真实脚本的真实解析路径，
+# 且**不碰任何环境**（参数解析在任何副作用之前）。
+#
+# 判据刻意不看 `file 不存在` 之外的东西：那说明参数已经被接受、流程往下走了；
+# 反过来，如果哪天有人把 `--version` 又删了，这两条会同时红，报的就是真机上那句话。
+# ---------------------------------------------------------------------------
+head_() { printf '\n-- %s\n' "$1"; }
+head_ "update 的参数契约（App 发的 --version 必须被接住）"
+LINUXCTL="$SELF_DIR/linuxctl.sh"
+[ -f "$LINUXCTL" ] || { printf '找不到 %s\n' "$LINUXCTL" >&2; exit 1; }
+if [ -z "${SH_BIN:-}" ] || [ ! -x "${SH_BIN:-/nonexistent}" ]; then
+    if [ -x /system/bin/sh ]; then SH_BIN=/system/bin/sh; else SH_BIN=sh; fi
+fi
+NOPE="$TMP/definitely-missing-layer.erofs"
+
+up_out="$("$SH_BIN" "$LINUXCTL" update base "$NOPE" --version 24.04.3-l1 2>&1 || true)"
+case "$up_out" in
+    *"未知参数"*) bad "update 接受 '--version <ver>'（App 发的写法）" "参数被接受" "$(printf '%s' "$up_out" | tail -n1)" ;;
+    *"层文件不存在"*) ok "update 接受 '--version <ver>'（App 发的写法）" ;;
+    *) bad "update 接受 '--version <ver>'（App 发的写法）" "层文件不存在" "$(printf '%s' "$up_out" | tail -n1)" ;;
+esac
+
+up_out2="$("$SH_BIN" "$LINUXCTL" update base "$NOPE" --version=24.04.3-l1 2>&1 || true)"
+case "$up_out2" in
+    *"未知参数"*) bad "update 接受 '--version=<ver>'（等号写法）" "参数被接受" "$(printf '%s' "$up_out2" | tail -n1)" ;;
+    *"层文件不存在"*) ok "update 接受 '--version=<ver>'（等号写法）" ;;
+    *) bad "update 接受 '--version=<ver>'（等号写法）" "层文件不存在" "$(printf '%s' "$up_out2" | tail -n1)" ;;
+esac
+
+# ---------------------------------------------------------------------------
+# 互斥锁必须在这个 shell 下**真的能锁上**（真机 2026-09-19 的第五处拦路虎）
+#
+# 现场：`✗ [linuxctl update] base 失败`，日志里只有一行
+#   linuxctl[2168]: {LOCK_FD}: inaccessible or not found
+#
+# 根因：`acquire_lock` 用的是 bash 的**命名 fd** 语法 `exec {LOCK_FD}>"…"`；
+# Android 的 /system/bin/sh（mksh）把它当字面命令执行，`flock` 拿到空串必然失败。
+# 更要命的是 flock 在 mksh 里**恰好存在**（/system/bin/flock），所以永远走这一支、
+# 下面 mkdir 型锁的兜底根本轮不到 —— `update` 连解包都进不去。
+#
+# 修法：判据从"有没有 flock"改成"**这个 shell 能不能真的锁上**"—— 当场探一次，
+# 不成自动落到 shell 无关的 mkdir 型锁。
+#
+# 为什么断言"第二个进程必须等超时"：这是 bash 命名 fd 写法**做不到**的事（锁根本没建立），
+# 也是唯一能证明锁真的生效的判据。30s 太久，这里把超时压到 1s。
+# ---------------------------------------------------------------------------
+head_ "互斥锁真的锁得上（fd 型不可用时自动降级到 mkdir 型）"
+LH="$TMP/lock-probe/sunsetlinux"
+mkdir -p "$LH/etc" "$LH/run"
+# ★ 用**确定性**布景，不赌时序：手工造一个"别人正持锁"的状态（mkdir 型锁目录 + 一个活着的 pid），
+#   然后断言第二个进程**必须等锁超时**。第一版赌"持锁者还在跑"（后台跑一次真命令再探锁文件），
+#   实测太快、持锁者已经结束，第二个进程顺利拿锁退出 0 —— 那是测试不可靠，不是锁坏了。
+#   fd 型那条路（bash/dash）同理由实现自己探测；真机是 mksh，走的就是这套 mkdir 型锁。
+#
+# 为什么要断言"第二个进程被挡住"：这是唯一能证明互斥**真的建立**的判据 ——
+# bash 命名 fd 那个 bug（真机事故）的表现正是"锁根本没建立"，而它在开发机上完全看不见。
+LOCKD="$LH/run/.linuxctl.lockd"
+mkdir -p "$LOCKD"
+printf '%s\n' "$$" >"$LOCKD/pid"          # 持锁者 = 本测试进程（活着）
+lock_rc=0
+SUNSETLINUX_LOCK_TIMEOUT=1 LINUX_HOME="$LH" "$SH_BIN" "$LINUXCTL" \
+    status --refresh-sizes >/dev/null 2>&1 || lock_rc=$?
+if [ "$lock_rc" -eq 3 ]; then
+    ok "别人持锁时第二个进程会等锁并超时（退出码 3）—— 互斥真的生效"
+else
+    bad "别人持锁时第二个进程没有被挡住" "退出码 3" "退出码 $lock_rc（锁形同虚设）"
+fi
+
+# 持锁者消失后，陈旧锁必须能被自动认领（否则一次崩溃会把环境永久锁死）
+rm -rf -- "$LOCKD"
+after_rc=0
+SUNSETLINUX_LOCK_TIMEOUT=2 LINUX_HOME="$LH" "$SH_BIN" "$LINUXCTL" \
+    status --refresh-sizes >/dev/null 2>&1 || after_rc=$?
+if [ "$after_rc" -ne 3 ]; then
+    ok "持锁者退出后锁可再次获取（后续调用不再等锁）"
+else
+    bad "锁没有释放" "退出码 ≠ 3" "退出码 3（陈旧锁挡住了后续调用）"
+fi
+
+# 兜底（源码级）：不许再出现 bash 的命名 fd 写法 —— mksh 会把它当**字面命令**执行，
+# 现场症状就是那句 `linuxctl[2168]: {LOCK_FD}: inaccessible or not found`。
+# ⚠️ 判据必须**跳过注释行**：修法本身就写了注释解释这个坑，直接 grep 会把解释也算违例
+#    （第一版就是这么红的）。
+if grep -v '^[[:space:]]*#' "$LINUXCTL" 2>/dev/null | grep -q 'exec {[A-Za-z_][A-Za-z_0-9]*}>'; then
+    bad "linuxctl.sh 里又出现 bash 命名 fd 写法" "没有 exec {VAR}>" "有（mksh 下会当字面命令执行）"
+else
+    ok "没有 bash 命名 fd 写法（exec {VAR}>）"
+fi
+
 printf '\n== 结果：%d 通过 / %d 失败 ==\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

@@ -425,13 +425,24 @@ class LauncherViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** 首次进入时按设置自动启动（仅在「已部署 + 已停止」时动作）。 */
+    /**
+     * 进入 App 时保证"该跑的在跑"（仅在「已部署」时动作）。
+     *
+     * 决策变更（2026-09-19）后这里有两级语义：
+     *   · 环境没跑 → `start()`（把环境拉起来）；
+     *   · 环境在跑但 **DSH 没起** → `dshStart()` —— "进一步的启动只是启动 DSH"。
+     * 环境与 DSH 的生命周期从此各管各的：环境是默认常驻，DSH 按需补齐。
+     */
     fun autoStartIfNeeded() {
         if (autoStartTried || !prefs.autoStartEnv) return
         val snapshot = _ui.value
         if (snapshot.loading || snapshot.provisioned != true) return
         autoStartTried = true
-        if (snapshot.state == EnvState.STOPPED) start()
+        when {
+            snapshot.state == EnvState.STOPPED -> start()
+            // 环境已在跑、DSH 没起：补 DSH（免 root 版尤其常见：环境随上次 App 存活）
+            snapshot.state == EnvState.RUNNING && snapshot.status?.dshRunning != true -> dshStart()
+        }
     }
 
     // ------------------------------------------------------------ 诊断

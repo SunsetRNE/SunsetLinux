@@ -286,15 +286,22 @@ resolve_proot() {
 
   # 脚本型包装器：shebang 解释器在 Android 上可能不存在（典型：#!/bin/sh 但只有 /system/bin/sh），
   # 这时显式用找得到的 sh 去跑它，避免 ENOENT。
+  #
+  # ★ 判据是"**它是不是脚本**"，不是"宿主解释器在不在"（真机 doctor 实测 2026-09-19）：
+  #   原来判 `[[ ! -x "$interp" ]]`，而 Android 上 `/system/bin/sh` 必然可执行 ⇒ 总走 else
+  #   「直接 exec 包装器本身」。可 `proot-launch.sh` 是从 tar 解出来的，在真机上**没有执行位**
+  #   （toybox tar 不还原模式）⇒ start 当场失败，doctor 报
+  #   `proot_binary: proot 存在但无法执行 --version：…/proot-launch.sh`。
+  #   宿主侧跑脚本的正确姿势与 App 那边是同一条：`sh <path>`（对 noexec 挂载同样成立）。
   interp=$(script_interp "$cand")
   if [[ -n "$interp" ]]; then
+    sh="$(find_sh)" || fail_json 1 "proot 包装器 $cand 需要解释器 $interp，但本机找不到任何 sh 可执行文件"
     if [[ ! -x "$interp" ]]; then
-      sh=$(find_sh) || fail_json 1 "proot 包装器 $cand 需要 $interp，但本机找不到任何 sh 可执行文件"
       warn "包装器 shebang 解释器 $interp 不存在，改用 $sh 执行：$cand"
-      PROOT_CMD=("$sh" "$cand")
     else
-      PROOT_CMD=("$cand")
+      warn "包装器按脚本用 $sh 执行：$cand（不赌它自己的执行位）"
     fi
+    PROOT_CMD=("$sh" "$cand")
   else
     [[ -x "$cand" ]] || fail_json 1 "proot 二进制不可执行：$cand（/data 目录可能被挂载成 noexec；改用 bundle 里的 proot-launch.sh）"
     PROOT_CMD=("$cand")

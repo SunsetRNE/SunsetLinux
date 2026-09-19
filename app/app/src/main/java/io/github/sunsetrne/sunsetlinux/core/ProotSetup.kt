@@ -88,8 +88,10 @@ object ProotSetup {
     fun inspect(context: Context): Readiness {
         val home = File(DshPaths.prootLinuxHome(context))
 
+        // 判据是"脚本在不在"，不看执行位：App 调它时一律经 `/system/bin/sh`
+        // （[DshPaths.hostCtlCommand]）；拿执行位当就绪在部分机器上会把已铺好的判成没铺。
         val scripts = DshPaths.linuxctlCandidates(context, EnvMode.PROOT)
-            .any { File(it).isFile && File(it).canExecute() } ||
+            .any { File(it).isFile } ||
             File(home, BIN_LINUXCTL).isFile
 
         val proot = listOf(PROOT_LAUNCH, PROOT_BIN, "bin/proot-launch.sh")

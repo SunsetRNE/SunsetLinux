@@ -356,13 +356,10 @@ fun AppShell(
                             mode = ui.mode,
                             envRunning = ui.state == EnvState.RUNNING,
                             onGoStart = { tab = ShellTab.START },
-                            // 只有 Root 版能"只起环境"：免 root 版的环境与 DSH 一体，
-                            // 传 null 让终端退回"去启动页"这一条路（见 EditionPolicy）
-                            onStartEnvOnly = if (Edition.showsSplitStartUi) {
-                                { vm.startEnvOnly() }
-                            } else {
-                                null
-                            },
+                            // 决策变更（2026-09-19）：环境由 App 自动启动，终端里不再提供
+                            // "只起环境"这个动作（那个入口连同启动/停止按钮一起移除了）。
+                            // 终端未就绪时的下一步是「诊断」，不是去按一个已经不存在的按钮。
+                            onStartEnvOnly = null,
                             modifier = Modifier.fillMaxSize(),
                         )
 

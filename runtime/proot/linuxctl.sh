@@ -640,30 +640,70 @@ set_marker() { path_ok "$RUN_DIR" && printf '%s\n' "$1" >"$RUN_DIR/state" 2>/dev
 acquire_lock() {
   path_ok "$RUN_DIR" || return 0
   mkdir -p -- "$RUN_DIR" 2>/dev/null || fail 1 "无法创建 $RUN_DIR"
+  # ★ flock 这一支**必须能优雅退化**（真机 2026-09-19 的第五处拦路虎）：
+  #   原来这里写的是 bash 的命名 fd 语法 `exec {LOCK_FD}>"…"`，Android 的 /system/bin/sh（mksh）
+  #   把它当**字面命令**执行，每次都打印
+  #     linuxctl[2168]: {LOCK_FD}: inaccessible or not found
+  #   然后 `flock -w … "$LOCK_FD"`（空串）必然失败 ⇒ `update` 连解包都进不去。
+  #   而 flock 在 mksh 里**恰好存在**（`/system/bin/flock`），所以永远走这一支，
+  #   下面那个 mkdir 型锁的兜底根本轮不到 —— 这就是它在真机上必挂、在开发机（bash）上不挂的原因。
+  #
+  #   改成固定 9 号 fd 之后实测**还是不行**：mksh 根本不支持 `exec 9>file` 这种 fd 重定向
+  #   （bash / dash 支持；mksh 下 fd 不会真的打开，flock 报 `9: Bad file descriptor`）。
+  #   所以判据不是"有没有 flock"，而是"**这个 shell 能不能把 fd 打开并 flock 它**"——
+  #   探一次，成不成当场知道，不成自动落到 mkdir 型锁（那条路是 shell 无关的）。
   if command -v flock >/dev/null 2>&1; then
-    exec {LOCK_FD}>"$RUN_DIR/.linuxctl.lock"
-    if ! flock -w "$LOCK_TIMEOUT" "$LOCK_FD"; then
-      fail 3 "等待锁超时（${LOCK_TIMEOUT}s）：另一个 linuxctl 正在操作 $LINUX_HOME。
-  若确认没有别的 linuxctl 在跑，说明有进程继承了锁 fd（旧版本 start.sh 会这样）。
-  排查：ps -eo pid,args | grep -E 'proot|node'；释放：linuxctl stop，或结束那个进程。"
+    # 判据不是"有没有 flock"，而是"**这个 shell 能不能把 fd 打开并 flock 它**"：
+    #   · mksh（Android 的 /system/bin/sh）打了 `exec 9>file` 之后 `flock 9` 报
+    #     `9: Bad file descriptor` —— 它不支持这种 fd 型 flock（bash / dash 支持）。
+    #   所以先**当场探一次**（`exec 9>…` 本身在 mksh 下不报错，报错的是 flock），
+    #   不成自动落到下面那条 shell 无关的 mkdir 型锁，而不是把整条命令打死。
+    exec 9>"$RUN_DIR/.linuxctl.lock" 2>/dev/null
+    if flock -n 9 2>/dev/null; then
+      LOCK_FD=9
+      return 0
     fi
-    return 0
+    exec 9>&- 2>/dev/null || true
+    # 探测失败 = 本 shell 不支持 fd 型 flock（正常情况，不是错误）；不过要能看见走了哪条路
+    warn "本 shell 不支持 fd 型 flock（mksh 即如此）→ 改用 mkdir 型锁"
   fi
+  # mkdir 型兜底锁。★ 等待上限必须与 flock 那条路**同一个口径**（`LOCK_TIMEOUT`）：
+  #   这里原来写死 `i > 600`（≈120 s），于是同一个环境里"有 flock 时等 30 s、没有时等 120 s"，
+  #   而兜底那条恰恰是**真机（mksh）唯一会走**的路 —— 用户遇到别人持锁时要干等两分钟，
+  #   界面上却什么都不说。现在两边都按 $LOCK_TIMEOUT 秒算，且超时文案一致。
   local d="$RUN_DIR/.linuxctl.lockd" owner="" at="" i=0
+  local max_iter=$(( LOCK_TIMEOUT * 5 ))   # sleep 0.2 → 每秒 5 次
+  (( max_iter > 0 )) || max_iter=1
+  # 陈旧锁的硬上限：**不能**写死 120s（原来就是），也不能只看"pid 还活着"。
+  # 真机实测（2026-09-19）：一次被杀的 update 留下了 `.linuxctl.lockd`，之后每次 update 都卡在
+  # 「[1/5] 取锁…」之后；界面上表现为**无声失败**（原因那行还没打出来就被带走）。
+  # 两个判据都收紧：
+  #   · pid 死了（含 pid 文件缺失/为空）→ 直接认领；
+  #   · pid 活着也看**年龄**：`kill -0` 会被 PID 复用骗，锁目录超过 hard 秒
+  #     （2×LOCK_TIMEOUT + 10s，最少 30s）即按陈旧处理 —— 正常一次 update 不会占这么久。
+  local hard=$(( LOCK_TIMEOUT * 2 + 10 ))
+  (( hard < 30 )) && hard=30
   while ! mkdir "$d" 2>/dev/null; do
-    owner=$(cat "$d/pid" 2>/dev/null || true)
-    if [[ -n "$owner" ]] && ! kill -0 "$owner" 2>/dev/null; then
+    owner=$(cat "$d/pid" 2>/dev/null | tr -dc '0-9' || true)
+    at=$(stat -c %Y "$d" 2>/dev/null || printf '0')
+    if [[ -z "$owner" ]] || ! kill -0 "$owner" 2>/dev/null; then
+      warn "认领陈旧锁（持有者 ${owner:-未知} 已不在）：$d"
       rm -rf -- "$d" 2>/dev/null || true
       continue
     fi
-    at=$(stat -c %Y "$d" 2>/dev/null || printf '0')
-    if (( $(date +%s) - at > 120 )); then
-      warn "清理陈旧锁（$d 超过 120s 未释放）"
+    if (( $(date +%s) - at > hard )); then
+      warn "清理陈旧锁（$d 超过 ${hard}s 未释放，持有者 $owner 可能已僵死）"
       rm -rf -- "$d" 2>/dev/null || true
       continue
     fi
     i=$(( i + 1 ))
-    (( i > 600 )) && fail 3 "等待锁超时：另一个 linuxctl 正在操作 $LINUX_HOME"
+    if (( i > max_iter )); then
+      # 超时前把**证据**打到 stderr：下一次真机排障不该再看到"无声失败"
+      err "等待锁超时（${LOCK_TIMEOUT}s）：另一个 linuxctl 正在操作 $LINUX_HOME
+  持锁目录：$d（pid=${owner:-未知}，年龄 $(( $(date +%s) - at ))s）
+  排查：ps -eo pid,args | grep -E 'linuxctl|proot|node'；释放：linuxctl stop，或结束那个进程。"
+      fail 3 "等待锁超时（${LOCK_TIMEOUT}s）：另一个 linuxctl 正在操作 $LINUX_HOME"
+    fi
     sleep 0.2
   done
   LOCK_DIR="$d"
@@ -672,8 +712,10 @@ acquire_lock() {
 }
 
 release_lock() {
+  # 与 acquire_lock 对称：锁 fd 固定是 9 号（bash 的命名 fd 写法在 mksh 下是字面命令，
+  # 见 acquire_lock 里的注释）。用"拿到没拿到"的标志决定要不要关，避免对着没开的 fd 操作。
   if [[ -n "$LOCK_FD" ]]; then
-    eval "exec ${LOCK_FD}>&-" 2>/dev/null || true
+    exec 9>&- 2>/dev/null || true
     LOCK_FD=""
   fi
   if [[ -n "$LOCK_DIR" ]]; then
@@ -691,6 +733,25 @@ trap cleanup EXIT
 # =============================================================================
 # 6. 内部动作
 # =============================================================================
+
+copy_tree() { # copy_tree <src> <dst> —— 把 src 的内容合并进 dst（保留符号链接）
+  # ★ 为什么要这个包装：`update_runtime` 原来直接写
+  #   `cp -R --preserve=mode,timestamps,links --no-preserve=ownership`，
+  #   而 **Android 的 cp（toybox）不认 `--no-preserve`** —— 一旦它报错，runtime 层就整体合并失败。
+  #   这里先试宿主原写法（GNU cp 上行为最好：保留 mode/时间戳、只丢掉 ownership），
+  #   不认就退到通用的 `cp -R`（toybox 也支持；App 本来也 chown 不了，ownership 无意义）。
+  #   两条路都不动符号链接指向 —— runtime 层里 `node -> /opt/node/bin/node` 这类链接必须原样保留。
+  local src="${1-}" dst="${2-}"
+  [[ -d "$src" && -d "$dst" ]] || return 1
+  command -v cp >/dev/null 2>&1 || return 1
+  if cp -R --preserve=mode,timestamps,links --no-preserve=ownership "$src/." "$dst/" 2>/dev/null; then
+    return 0
+  fi
+  warn "本机 cp 不认 --preserve/--no-preserve（toybox 即如此）→ 退回 cp -R"
+  cp -R "$src/." "$dst/" 2>/dev/null || return 1
+  return 0
+}
+
 ensure_layout() { # 目录树 + 脚本就位（幂等）；失败返回非 0
   require_linux_home
   local d
@@ -1670,22 +1731,55 @@ cmd_reset() {
   return 0
 }
 
-cmd_update() { # update <base|runtime|dsh> <file>
-  local layer="" file=""
+cmd_update() { # update <base|runtime|dsh> <file> [--version <ver>]
+  local layer="" file="" version=""
+  # ★ `--version` 必须接（真机 2026-09-19 的事故）：App 的**两个 edition 共用同一份命令构造**，
+  #   root 版接受 `--version <ver>` 与 `--version=<ver>`，proot 版原来一个都不认 ⇒ 免 root 版点
+  #   「铺环境（内嵌离线包 + provision）」必然倒在
+  #   `✗ [linuxctl update] base 失败：[linuxctl 错误] update: 未知参数 --version`。
+  #   这是**契约不一致**，不是用户操作错：同一个 App 按钮，换个 edition 就失败。
+  #
+  # proot 侧**不从参数记版本**：它把层解成 rootfs，版本一直在层自己的元数据里
+  # （/etc/sunsetlinux-base-version、/etc/sunsetlinux-runtime-version、dsh 的 package.json），
+  # status 直接读那里（read_base_version / read_runtime_version / read_dsh_version）。
+  # 所以这里接住参数、回显一行日志即可 —— 目标是"两个 runtime 命令行一致"，
+  # 不是再造一份 state.json（root 版存 state.json 是因为它的层是**只读镜像**，没有可读的 rootfs）。
   while (( $# )); do
     case "$1" in
       -h|--help) usage; exit 0 ;;
+      --version) version="${2:-}"; shift 2 ;;
+      --version=*) version="${1#--version=}"; shift ;;
       -*) fail 2 "update: 未知参数 $1" ;;
       *) if [[ -z "$layer" ]]; then layer=$1; elif [[ -z "$file" ]]; then file=$1; else fail 2 "update: 参数过多"; fi; shift ;;
     esac
   done
-  [[ -n "$layer" && -n "$file" ]] || fail 2 "用法：linuxctl update <base|runtime|dsh> <file>"
+  [[ -n "$layer" && -n "$file" ]] || fail 2 "用法：linuxctl update <base|runtime|dsh> <file> [--version <ver>]"
   case "$layer" in base|runtime|dsh) ;; *) fail 2 "layer 只能是 base / runtime / dsh（收到：$layer）" ;; esac
   [[ -f "$file" ]] || fail 2 "层文件不存在：$file"
+  # 带版本号时说清楚"收到了但不用它"：免得有人以为这个参数把版本写坏了。
+  # 这一行同时是**第一个检查点**：真机排障时它出现过、而后面某一行没出现，就能直接定位卡在哪一步
+  # （0.3.33 那次真机失败只留下这一行 + 一条被截断的 ✗，看不出死在哪 —— 所以把每一步都变成可见的）。
+  if [[ -n "$version" ]]; then
+    log "update $layer：收到 --version $version（proot 模式的版本读自 rootfs 元数据，这里只作记录）"
+  fi
   require_linux_home
+  log "update $layer：[1/5] 取锁…"
   acquire_lock
-  exists "$ROOTFS" || fail 1 "rootfs 不存在：$ROOTFS（先 provision）"
+  log "update $layer：[2/5] 锁已取得"
+  # ★ rootfs 的存在性**只对 runtime / dsh 是前提**，对 base 不是（真机 2026-09-19 的第三处拦路虎）：
+  #   `update_base` 的语义就是"解包到 staging → 原子换掉 rootfs"，rootfs **不存在**时它照样成立
+  #   （没有旧的就不用备份，`mv staging → rootfs` 即引导出第一棵 rootfs）。
+  #   原来这里一律要求"先 provision"，于是免 root 版的第一次「铺环境」死锁：
+  #     引导页要 `update base` 才有 rootfs，而 update 又要求先有 rootfs
+  #     —— 用户看到的是 `✗ [linuxctl update] base 失败：rootfs 不存在：…（先 provision）`。
+  #   `provision` 走的是另一条路（它拿 `layers/` 里的 base 当种子，见 find_base_layer），
+  #   两条路本来都该通；错的是把 runtime/dsh 的前提安到了 base 上。
+  if [[ "$layer" != "base" ]]; then
+    exists "$ROOTFS" || fail 1 "rootfs 不存在：$ROOTFS（update $layer 需要先有环境：先 provision，或先 update base）"
+  fi
+  log "update $layer：[3/5] 校验层文件…"
   archive_test "$file" || fail 1 "层文件损坏：$file"
+  log "update $layer：[4/5] 开始落盘（$layer）…"
 
   local was_run=0
   was_running && was_run=1
@@ -1696,6 +1790,7 @@ cmd_update() { # update <base|runtime|dsh> <file>
     runtime) update_runtime "$file" ;;
     dsh)    update_dsh "$file" ;;
   esac
+  log "update $layer：[5/5] 落盘完成，刷新状态…"
   ensure_layout
   measure_sizes
   refresh_state_versions
@@ -1717,13 +1812,28 @@ update_base() { # 整根替换：解包到 staging 后原子换（旧 rootfs 存
     fail 1 "base 层内容不像 rootfs（解包后找不到 /bin/sh）：$file"
   fi
   rm -rf -- "$prev" 2>/dev/null || true
-  mv -f -- "$ROOTFS" "$prev" || { rm -rf -- "$staging"; fail 1 "无法移动旧 rootfs"; }
+  # ★ 首次引导时**没有旧 rootfs 可备份**（真机 2026-09-19 第三处拦路虎的根）：原来无条件
+  #   `mv "$ROOTFS" "$prev"`，rootfs 不存在时 `mv` 直接报 "cannot stat …" 并把整条 update 打死
+  #   —— 于是免 root 版的第一次「铺环境」永远过不了。语义上"整根替换"对"本来就没有"完全成立：
+  #   没有旧的就不用备份，直接 `mv staging → rootfs` 就是引导出第一棵 rootfs。
+  #   有旧 rootfs 时行为一字不变（照旧备份 + 失败回滚）。
+  if exists "$ROOTFS"; then
+    mv -f -- "$ROOTFS" "$prev" || { rm -rf -- "$staging"; fail 1 "无法移动旧 rootfs"; }
+  fi
   if ! mv -f -- "$staging" "$ROOTFS"; then
-    mv -f -- "$prev" "$ROOTFS" 2>/dev/null || true
+    # 回滚：有备份就放回去（首次引导时没有备份，那就只清理 staging —— 保持"要么没有 rootfs，
+    # 要么是完整的 rootfs"，绝不留下半棵）。
+    if exists "$prev"; then
+      mv -f -- "$prev" "$ROOTFS" 2>/dev/null || true
+    fi
     rm -rf -- "$staging" 2>/dev/null || true
     fail 1 "base 层替换失败，已回滚"
   fi
-  log "旧 rootfs 保留在 $prev（确认新版本可用后可自行删除）"
+  if exists "$prev"; then
+    log "旧 rootfs 保留在 $prev（确认新版本可用后可自行删除）"
+  else
+    log "首次引导：rootfs 由本次 update base 建立（$ROOTFS）"
+  fi
   return 0
 }
 
@@ -1732,10 +1842,9 @@ update_runtime() { # 合并式：解包到 staging 后覆盖 rootfs（Node/工�
   log "update runtime：合并覆盖 rootfs（Node 与基础工具；用户数据保留）"
   rm -rf -- "$staging" 2>/dev/null || true
   extract_archive "$file" "$staging" || { rm -rf -- "$staging"; fail 1 "解包 runtime 层失败：$file"; }
-  command -v cp >/dev/null 2>&1 || { rm -rf -- "$staging"; fail 1 "缺少 cp"; }
   # 合并式更新做不到原子，但 runtime 只影响 /usr/local 与少量系统路径，
   # 失败时不会删除已有文件，最坏情况是版本混杂（可用 base 层重装兜底）。
-  if ! cp -R --preserve=mode,timestamps,links --no-preserve=ownership "$staging/." "$ROOTFS/" 2>/dev/null; then
+  if ! copy_tree "$staging" "$ROOTFS"; then
     rm -rf -- "$staging" 2>/dev/null || true
     fail 1 "runtime 层合并失败：$file"
   fi
@@ -1743,35 +1852,67 @@ update_runtime() { # 合并式：解包到 staging 后覆盖 rootfs（Node/工�
   return 0
 }
 
-update_dsh() { # 原子替换 @deepseek-ai/dsh 目录（旧版本保留为 .prev 供回滚）
+update_dsh() { # dsh 层 → rootfs（两种形态都支持；旧 DSH 目录保留 .prev 供回滚）
   local file=$1
   local moddir="$ROOTFS/usr/local/lib/node_modules/@deepseek-ai/dsh"
-  local staging="$ROOTFS/usr/local/lib/node_modules/.dsh-stage.$$"
-  log "update dsh：原子替换 $moddir"
-  mkdir -p -- "$(dirname -- "$moddir")" 2>/dev/null || fail 1 "无法创建 node_modules 目录"
+  local prev="$moddir.prev"
+  local staging="$LINUX_HOME/.dsh-stage.$$"
   rm -rf -- "$staging" 2>/dev/null || true
   extract_archive "$file" "$staging" || { rm -rf -- "$staging"; fail 1 "解包 dsh 层失败：$file"; }
 
-  # 允许两种打包方式：直接是包的根，或者多一层（含 package/ 前缀）
-  local root="$staging"
-  if [[ ! -f "$root/package.json" ]]; then
-    local cand=""
-    cand=$(find "$staging" -maxdepth 3 -name package.json -type f 2>/dev/null | head -1 || true)
-    [[ -n "$cand" ]] && root=$(dirname -- "$cand")
+  # ★ 两种打包形态都要认（真机 2026-09-19 的第六处拦路虎）：
+  #   ① **模块目录**：层根就是 npm 包的根（`package.json` 就在层根，或只有一层 `package/` 前缀）
+  #      —— 原子换掉 moddir；
+  #   ② **覆盖层**：层是 `usr/local/…` + `root/.dsh/…` 的 rootfs 覆盖（**当前官方层就是这个形态**，
+  #      实测 `fsck.erofs` 解出来是 `usr/local/lib/node_modules/@deepseek-ai/dsh/…`
+  #      与 `root/.dsh/profiles/web/…`）—— 合并进 rootfs。
+  #
+  # ⚠️ 判定**必须按结构**，不能用 `find -maxdepth 3 -name package.json` 那种启发式：
+  #   覆盖层里 `root/.dsh/profiles/web/node_modules/<pkg>/package.json` 的深度正好在 3 以内，
+  #   启发式会把那个**依赖包**的目录当成"DSH 模块根"，然后去 mv 一棵不相干的子树 ——
+  #   第一版就是这么判错的，报出来还是那句 `dsh 层里找不到 package.json`。
+  #
+  #   原来只认 ①，于是免 root 的「铺环境」在最后一个部件上报
+  #   `✗ dsh 层里找不到 package.json：…/dsh-0.1.6-alpha.2.erofs`（前面 base/runtime 都已装好）。
+  local mode="overlay"
+  if [[ -f "$staging/package.json" || -f "$staging/package/package.json" ]]; then
+    mode="module"
   fi
-  [[ -f "$root/package.json" ]] || { rm -rf -- "$staging"; fail 1 "dsh 层里找不到 package.json：$file"; }
 
-  local prev="$moddir.prev"
-  rm -rf -- "$prev" 2>/dev/null || true
-  if [[ -e "$moddir" ]]; then
-    mv -f -- "$moddir" "$prev" || { rm -rf -- "$staging"; fail 1 "无法移动旧 DSH 目录"; }
-  fi
-  if ! mv -f -- "$root" "$moddir"; then
-    [[ -e "$prev" ]] && mv -f -- "$prev" "$moddir" 2>/dev/null || true
+  if [[ "$mode" = "module" ]]; then
+    local root="$staging"
+    [[ -f "$root/package.json" ]] || root="$staging/package"
+    log "update dsh：形态=模块目录 → 原子替换 $moddir"
+    mkdir -p -- "$(dirname -- "$moddir")" 2>/dev/null || fail 1 "无法创建 node_modules 目录"
+    [[ -f "$root/package.json" ]] || { rm -rf -- "$staging"; fail 1 "dsh 层里找不到 package.json：$file"; }
+    rm -rf -- "$prev" 2>/dev/null || true
+    if [[ -e "$moddir" ]]; then
+      mv -f -- "$moddir" "$prev" || { rm -rf -- "$staging"; fail 1 "无法移动旧 DSH 目录"; }
+    fi
+    if ! mv -f -- "$root" "$moddir"; then
+      [[ -e "$prev" ]] && mv -f -- "$prev" "$moddir" 2>/dev/null || true
+      rm -rf -- "$staging" 2>/dev/null || true
+      fail 1 "DSH 目录替换失败，已回滚"
+    fi
     rm -rf -- "$staging" 2>/dev/null || true
-    fail 1 "DSH 目录替换失败，已回滚"
+  else
+    log "update dsh：形态=覆盖层（usr/local + root/.dsh）→ 合并进 rootfs；旧 $moddir 备份为 .prev"
+    # 旧包目录先备份：合并式更新不会删文件，靠 .prev 留一条明确的回滚路
+    rm -rf -- "$prev" 2>/dev/null || true
+    if [[ -e "$moddir" ]]; then
+      mv -f -- "$moddir" "$prev" || warn "无法备份旧 DSH 目录（继续合并）"
+    fi
+    if ! copy_tree "$staging" "$ROOTFS"; then
+      # 回滚：旧包目录放回去，staging 清掉（合并到一半的其它文件由下一次重装覆盖）
+      if [[ -e "$prev" && ! -e "$moddir" ]]; then
+        mv -f -- "$prev" "$moddir" 2>/dev/null || true
+      fi
+      rm -rf -- "$staging" 2>/dev/null || true
+      fail 1 "dsh 覆盖层合并失败：$file"
+    fi
+    rm -rf -- "$staging" 2>/dev/null || true
   fi
-  rm -rf -- "$staging" 2>/dev/null || true
+
   # 保证 /usr/local/bin/dsh 存在（老层可能没带）
   if [[ ! -e "$ROOTFS/usr/local/bin/dsh" && -f "$moddir/lib/bin.js" ]]; then
     mkdir -p -- "$ROOTFS/usr/local/bin" 2>/dev/null || true
@@ -1779,7 +1920,7 @@ update_dsh() { # 原子替换 @deepseek-ai/dsh 目录（旧版本保留为 .prev
     chmod 0755 -- "$ROOTFS/usr/local/bin/dsh" 2>/dev/null || true
     log "补写 /usr/local/bin/dsh（指向 $moddir/lib/bin.js）"
   fi
-  log "旧 DSH 目录保留在 $prev（确认新版本可用后可自行删除）"
+  [[ -e "$prev" ]] && log "旧 DSH 目录保留在 $prev（确认新版本可用后可自行删除）"
   return 0
 }
 
@@ -1873,13 +2014,27 @@ cmd_doctor() {
   if [[ -z "$proot_bin" ]]; then
     add_check "proot_binary" false error "找不到可执行的 proot。请用 tools/proot-bundle/mkproot-bundle.sh 生成 dist/proot-bundle-arm64.tar.gz 并解包到 \$LINUX_HOME/proot/（App 应随包携带，不要依赖设备上已装 proot / Termux）。"
   else
-    proot_ver=$("$proot_bin" --version 2>&1 | tr '\n' ' ' | sed -n 's/.*\([0-9]\+\.[0-9]\+\.[0-9]\+\).*/\1/p' | head -1 || true)
+    # ★ 必须**经 `sh` 跑**、并加超时与 </dev/null（真机 2026-09-19）：
+    #   `proot-launch.sh` 是脚本；直接 exec 它在这两类机器上都失败 ——
+    #   Android 私有目录里没有执行位（toybox tar 不还原），ptrace 上下文里 proot 自己也会拒绝/挂住。
+    #   表现是 doctor 报「proot 存在但无法执行 --version：…/proot-launch.sh」，
+    #   把用户指向"检查 noexec 挂载"这条错路。与 App 侧同一条契约：宿主侧脚本一律 `sh <path>`。
+    local _sh="" _to="" _c
+    for _c in /system/bin/sh /bin/sh /usr/bin/sh; do
+      [[ -x "$_c" ]] && { _sh=$_c; break; }
+    done
+    [[ -n "$_sh" ]] || _sh=sh
+    command -v timeout >/dev/null 2>&1 && _to="timeout 20"
+    # shellcheck disable=SC2086
+    proot_ver=$($_to "$_sh" "$proot_bin" --version </dev/null 2>&1 | tr '\n' ' ' | sed -n 's/.*\([0-9]\+\.[0-9]\+\.[0-9]\+\)/\1/p' | head -1 || true)
     if [[ -z "$proot_ver" ]]; then
       add_check "proot_binary" false error "proot 存在但无法执行 --version：$proot_bin（设备上的 /data 目录可能被 noexec 挂载，或缺少动态库；用 bundle 里的 proot-launch.sh）"
     else
       local seccomp="未知"
-      "$proot_bin" --version 2>&1 | grep -q 'seccomp_filter = no' && seccomp="否"
-      "$proot_bin" --version 2>&1 | grep -q 'seccomp_filter = yes' && seccomp="是"
+      # shellcheck disable=SC2086
+      $_to "$_sh" "$proot_bin" --version </dev/null 2>&1 | grep -q 'seccomp_filter = no' && seccomp="否"
+      # shellcheck disable=SC2086
+      $_to "$_sh" "$proot_bin" --version </dev/null 2>&1 | grep -q 'seccomp_filter = yes' && seccomp="是"
       add_check "proot_binary" true info "proot $proot_ver（来源：$proot_src，路径：$proot_bin）；seccomp 加速：$seccomp。注意：seccomp 加速关闭时每个系统调用都要 ptrace 往返，小文件/进程创建会明显变慢。"
     fi
   fi

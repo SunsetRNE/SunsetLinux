@@ -29,6 +29,9 @@ object ProotRuntime {
     /** `$LINUX_HOME/bin/` 下必须存在的文件（缺任何一个，proot 模式都起不来）。 */
     val REQUIRED = listOf("linuxctl.sh", "start.sh", "entry.sh")
 
+    /** proot 部件的解包目录（相对 `$LINUX_HOME`）；[normalizeExecBits] 在这里生效。 */
+    const val PROOT_DIR = "proot"
+
     /** 契约路径：App 与文档都按 `bin/linuxctl` 找它（`linuxctl.sh` 是允许的变体）。 */
     const val CONTRACT_NAME = "linuxctl"
 
@@ -90,8 +93,14 @@ object ProotRuntime {
             }
         }
 
-        val ready = DshPaths.linuxctlCandidates(context, EnvMode.PROOT)
-            .any { File(it).isFile && File(it).canExecute() }
+        // proot 部件的执行位：老版本（≤0.3.30）用 Android 的 tar 解包时**不还原模式**，
+        // 已经装在盘上的环境会缺执行位；这里每次铺设都顺带修一遍（幂等，缺 [PROOT_DIR] 时是空操作）。
+        normalizeExecBits(File(home, PROOT_DIR))
+
+        // ⚠️ 判据是**文件在不在**，不是"有没有执行位"：App 调它时一律经 `/system/bin/sh`
+        //    （见 [DshPaths.hostCtlCommand]）。私有目录里 exec 脚本在真机上会 `error=13`，
+        //    拿执行位当"就绪"会在那种机器上把已铺好的环境误判成没铺。
+        val ready = DshPaths.linuxctlCandidates(context, EnvMode.PROOT).any { File(it).isFile }
         val missing = REQUIRED.filterNot { File(bin, it).isFile }
         return Result(
             ok = true,
@@ -101,10 +110,14 @@ object ProotRuntime {
         )
     }
 
-    /** 宿主脚本是否已经就位（`bin/linuxctl` 或 `bin/linuxctl.sh` 之一存在且可执行）。 */
+    /**
+     * 宿主脚本是否已经就位（`bin/linuxctl` 或 `bin/linuxctl.sh` 之一**存在**）。
+     *
+     * 判据是"在不在"而不是"可不可执行"：App 调它时一律经 `/system/bin/sh`
+     * （[DshPaths.hostCtlCommand]），所以在 noexec / 策略更严的机器上也算就位。
+     */
     fun isReady(context: Context, home: String): Boolean =
-        DshPaths.linuxctlCandidates(context, EnvMode.PROOT)
-            .any { File(it).isFile && File(it).canExecute() }
+        DshPaths.linuxctlCandidates(context, EnvMode.PROOT).any { File(it).isFile }
 
     /** 当前 `$home/bin/` 里这套脚本的状态（给"关于"/部署向导显示）。 */
     fun inspect(context: Context, home: String): String {
@@ -117,4 +130,62 @@ object ProotRuntime {
             else -> "不完整：缺 ${missing.joinToString(", ")}"
         }
     }
+
+    /**
+     * **把 proot 部件解出来的执行位补齐**（真机 2026-09-19 的第四处拦路虎）。
+     *
+     * ## 为什么必须补
+     *
+     * `proot-bundle-arm64.tar.gz` 里的模式是**对的**（`bin/proot` 与 `lib/ld-linux-*.so.1`
+     * 都是 0755），但 App 用的是 Android 的 `tar`（toybox），它**不还原文件模式** ——
+     * 解出来一律是 0600/0700。于是 `proot-launch.sh` 走到
+     * `exec "$loader" --library-path "$lib" "$bin"` 时死在
+     * `exec: …/lib/ld-linux-aarch64.so.1: Permission denied`
+     * （启动器自己只 chmod 了 `bin/proot`，**漏了 loader**，而 loader 才是那次 exec 的主体）。
+     *
+     * 这个坑在"用 GNU tar 解包"的开发机上看不见，只有真机（toybox tar）会复现 ——
+     * 实测复现：`tar -xzf` 后把模式改回 0600 再 `sh proot-launch.sh --version`，
+     * 得到的正是上面那句。
+     *
+     * ## 判据
+     *
+     * 按 tar 里的模式还原：`bin/`、`lib/` 下的**文件**都要可执行（`proot` 本体 + loader +
+     * 它要 dlopen 的 so），其余（README / license / manifest）保持普通文件；目录一律 `+x`
+     * （否则连进去都不行）。**幂等**：已可执行的不重复动。
+     *
+     * @return 本次补了执行位的文件（相对 [root] 的路径），便于在安装日志里如实播报。
+     */
+    fun normalizeExecBits(root: File): List<String> {
+        if (!root.isDirectory) return emptyList()
+        val fixed = mutableListOf<String>()
+        val queue = ArrayDeque<File>()
+        queue += root
+        while (queue.isNotEmpty()) {
+            val dir = queue.removeFirst()
+            for (c in dir.listFiles().orEmpty()) {
+                if (c.isDirectory) {
+                    queue += c
+                    if (!c.canExecute() && c.setExecutable(true, false)) fixed += rel(root, c)
+                    continue
+                }
+                if (!c.isFile || c.canExecute()) continue
+                val r = rel(root, c)
+                // 补哪几类：`bin/`、`lib/` 下的文件（proot 本体 + loader + 它 dlopen 的 so），
+                // **以及根目录的 `*.sh` 启动器**。
+                // ★ 后者是真机 doctor 抓到的（2026-09-19）：`proot/proot-launch.sh` 在打包里是
+                //   0755，但 Android 的 tar 不还原模式 ⇒ 解出来没有执行位，而 `start.sh` 的
+                //   `resolve_proot` 会把 `[[ -x "$interp" ]]` 判过（宿主的 /system/bin/sh 可执行），
+                //   于是走「直接 exec 那个包装器」⇒ `proot_binary` 检查报
+                //   "proot 存在但无法执行 --version"，`start` 失败。
+                val executable = r.startsWith("bin/") || r.startsWith("lib/") || r.endsWith(".sh")
+                if (executable && c.setExecutable(true, false)) {
+                    fixed += r
+                }
+            }
+        }
+        return fixed
+    }
+
+    private fun rel(root: File, f: File): String =
+        runCatching { root.toPath().relativize(f.toPath()).toString() }.getOrDefault(f.name)
 }
