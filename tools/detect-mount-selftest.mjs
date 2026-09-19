@@ -100,7 +100,9 @@ try {
   if (d.module_needs_mount === true) ok('.replace 目录仍判为需要挂载（语义未变）');
   else bad(`.replace 语义丢了：期望 true，得到 ${JSON.stringify(d.module_needs_mount)}`);
 
-  // ⑤ 报告文字也要跟着三态走（未知时不能写"是"）
+  // ⑤ 报告文字：用户 2026-09-19 要求**移除「是否需要挂载」那条提示**，改为陈述实机挂载行为。
+  //    所以这里反过来钉住：报告里不许再出现「是否需要挂载」，必须有"本模块的挂载"那一行。
+  //    （机器接口不受影响：`detect_mount_json()` 的 module_needs_mount 字段照旧，上面 ①②③④ 测的就是它。）
   const report = execFileSync('sh', ['-c', '. "$1"; detect_mount_report', '_', DETECT], {
     cwd: cwdWithSystem,
     env: {
@@ -111,8 +113,13 @@ try {
     },
     encoding: 'utf8',
   });
-  if (/本模块是否需要挂载: 未知/.test(report)) ok('报告在未知时写"未知"（不再硬断言"是"）');
-  else bad(`报告文案不对：\n${report.split('\n').filter((l) => l.includes('是否需要挂载')).join('\n')}`);
+  if (!/是否需要挂载/.test(report)) ok('报告不再输出「是否需要挂载」（按用户要求移除）');
+  else bad(`报告里还有「是否需要挂载」：\n${report.split('\n').filter((l) => l.includes('是否需要挂载')).join('\n')}`);
+  if (/本模块的挂载\s*:/.test(report) && /不向系统分区放文件/.test(report)) {
+    ok('报告改为陈述实机挂载行为（系统分区不动 + 环境自身在私有 ns 里挂）');
+  } else {
+    bad(`报告没有"实机挂载行为"的陈述：\n${report}`);
+  }
 
   // ⑥ 上下文不可信（看不到 /data/adb）：必须"不适用"，且不对是否需要挂载下结论
   const e = probe({ cwd: tmp, trusted: false });
