@@ -27,7 +27,13 @@
 #   - 层格式：内核不支持 squashfs，实际用 erofs（见 doctor.sh / start.sh 注释）。
 #     本脚本对两种扩展名都兼容。
 # =============================================================================
-set -uo pipefail
+# ★ pipefail 是 **bash/mksh** 的扩展，dash（Ubuntu 的 /bin/sh）没有它 ——
+#   在环境里用 `sh linuxctl.sh` 跑会直接死在 `set: Illegal option -o pipefail`。
+#   真机实测 2026-09-19 就是这么撞上的。宿主侧（mksh）行为不变，这里只是让"换个 shell
+#   解释同一份脚本"不再当场失败；真正的环境内入口见 start.sh 写的 /usr/local/bin/linuxctl
+#   （它用 bash 显式解释本脚本）。
+set -u
+set -o pipefail 2>/dev/null || true
 
 # --- 目录：脚本自身 + 公共库 ------------------------------------------------
 # 设备侧只用 `$0`：`${BASH_SOURCE[0]:-$0}` 在 busybox ash（模块自启的 PATH 里

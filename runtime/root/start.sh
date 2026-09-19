@@ -1426,27 +1426,43 @@ install_runtime_entry() {
         chmod 0755 "$dst/$_f" 2>/dev/null || true
     done
     # fixtures 也要跟着走：环境内跑 `selftest.sh` 时按 <脚本目录>/fixtures 找夹具
-    if [ -d "$src/fixtures" ]; then
-        mkdir -p "$dst/fixtures" 2>/dev/null || true
-        cp -f "$src/fixtures/." "$dst/fixtures/" 2>/dev/null || true
-    fi
-    # common/（layer-inspect.sh、port-probe.sh 等）同理：doctor 在环境内也要能找到它们
-    if [ -d "$src/common" ]; then
-        mkdir -p "$dst/common" 2>/dev/null || true
-        cp -f "$src/common/." "$dst/common/" 2>/dev/null || true
-    fi
+    #
+    # ★ 逐文件复制，**不要**写 `cp -f "$src/fixtures/." "$dst/fixtures/"`：
+    #   Android 的 toybox cp 不认 `dir/.` 这种写法，它会**静默失败**；而句尾再挂一个
+    #   `|| true` 就连失败都看不见了。真机实测（2026-09-19）：`common/` 因此是**空目录**，
+    #   环境里敲 `linuxctl` 直接报「找不到 status_json.sh」——而日志上一个字都没提。
+    #   现在逐文件复制，失败的**每一个**都留一行 WARN。
+    for _d in fixtures common; do
+        [ -d "$src/$_d" ] || continue
+        mkdir -p "$dst/$_d" 2>/dev/null || { log "WARN: 无法创建 $dst/$_d"; continue; }
+        for _f in "$src/$_d"/*; do
+            [ -f "$_f" ] || continue
+            cp -f "$_f" "$dst/$_d/" 2>/dev/null \
+                || log "WARN: 同步 $_d/$(basename "$_f") 失败（环境内可能缺这个文件）"
+        done
+    done
     chmod 0755 "$dst/entry.sh" "$dst/supervise.sh" 2>/dev/null || true
-    # ★ 让 `linuxctl` 在**环境内**也能直接敲（2026-09-19 真机修正）。
-    #   上一轮交付说明让用户在 App 终端里跑 `linuxctl whereami`，实测直接
-    #   `bash: linuxctl: command not found` —— 环境内 PATH 是
-    #   `/opt/node/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`，
-    #   不含 /opt/sunsetlinux，而那里只有带后缀的 `linuxctl.sh`。
-    #   修法：在 /usr/local/bin 放软链（不改 PATH、不复制脚本 —— 层更新后自动跟着变）。
+    # ★ 让 `linuxctl` 在**环境内**也能直接敲（2026-09-19 真机两次修正）。
+    #
+    #   第一次（模块 1.0.47）只放了个软链，实测**跑不起来**：
+    #     · `bash: /usr/local/bin/linuxctl: cannot exec` —— 脚本 shebang 是 `#!/system/bin/sh`，
+    #       那是 **Android** 的路径，chroot 里没有它，execve 直接失败；
+    #     · 换成 `sh linuxctl.sh` 也不行：环境里的 `/bin/sh` 是 **dash**，第 30 行的
+    #       `set -o pipefail` 会报 `Illegal option`。
+    #   所以正确做法是放一个**包装脚本**：显式用环境内的 `/bin/bash`（Ubuntu base 自带）
+    #   去解释模块那份脚本 —— bash 既支持 pipefail，也绕过 shebang。
     if [ -f "$dst/linuxctl.sh" ]; then
         chmod 0755 "$dst/linuxctl.sh" 2>/dev/null || true
         mkdir -p "$ROOTFS_DIR/usr/local/bin" 2>/dev/null || true
-        ln -sfn /opt/sunsetlinux/linuxctl.sh "$ROOTFS_DIR/usr/local/bin/linuxctl" 2>/dev/null \
-            || log "WARN: 环境内 linuxctl 软链创建失败（终端里请用 /opt/sunsetlinux/linuxctl.sh）"
+        cat > "$ROOTFS_DIR/usr/local/bin/linuxctl" <<'WRAP' 2>/dev/null || \
+            log "WARN: 环境内 linuxctl 包装脚本写入失败（终端里请用 bash /opt/sunsetlinux/linuxctl.sh）"
+#!/bin/bash
+# 环境内的 linuxctl 入口（由 start.sh 每次启动时重写，别手改）。
+# 为什么不是软链：模块里那份 shebang 是 `#!/system/bin/sh`（Android 路径），chroot 里
+# 没有它；而环境内的 /bin/sh 是 dash，跑不了脚本里的 `set -o pipefail`。用 bash 显式解释。
+exec /bin/bash /opt/sunsetlinux/linuxctl.sh "$@"
+WRAP
+        chmod 0755 "$ROOTFS_DIR/usr/local/bin/linuxctl" 2>/dev/null || true
     fi
     log "已同步启动器脚本：$src -> $dst"
 }

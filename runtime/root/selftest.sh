@@ -1764,11 +1764,27 @@ if grep -q 'sdcard 自证' "$SELF_DIR/start.sh"; then
 else
     bad "start.sh 没有 sdcard 自证 —— \"挂上了\"与\"看得见\"又会分家"
 fi
-# 环境内 `linuxctl` 必须能直接敲（上一轮交付说明让用户跑它，实测 command not found）
-if grep -q 'usr/local/bin/linuxctl' "$SELF_DIR/start.sh"; then
-    ok "start.sh 会在环境内建 /usr/local/bin/linuxctl 软链"
+# 环境内 `linuxctl` 必须能**真的跑起来**（两轮踩坑：先是 command not found，后是 cannot exec）
+#   · 只放软链不行：模块脚本 shebang 是 `#!/system/bin/sh`（Android 路径），chroot 里没有；
+#   · 用 dash 解释也不行：`set -o pipefail` 是 bash/mksh 扩展。
+#   ⇒ 必须是**包装脚本**，且用环境内的 /bin/bash 显式解释。
+if grep -q 'exec /bin/bash /opt/sunsetlinux/linuxctl.sh' "$SELF_DIR/start.sh"; then
+    ok "环境内 linuxctl 是 bash 包装脚本（绕过 Android shebang 与 dash 的 pipefail）"
 else
-    bad "没有建 linuxctl 软链 —— 环境内敲 linuxctl 仍是 command not found"
+    bad "环境内 linuxctl 入口不是 bash 包装脚本 —— 会以 cannot exec / Illegal option 收场"
+fi
+# 软链那条老写法不许回潮（它跑不起来）
+if grep -q 'ln -sfn /opt/sunsetlinux/linuxctl.sh "$ROOTFS_DIR/usr/local/bin/linuxctl"' "$SELF_DIR/start.sh"; then
+    bad "又用软链做环境内入口了 —— shebang 是 /system/bin/sh，环境里 cannot exec"
+else
+    ok "没有回潮成软链入口"
+fi
+# common/ 与 fixtures/ 必须**逐文件**复制：toybox 的 cp 不认 `dir/.`，会静默失败。
+# 只扫**代码行**（`^[^#]*`）—— 注释里正写着这个反面教材，别把注释也判成违规。
+if grep -nE '^[^#]*cp -f "\$src/(common|fixtures)/\." ' "$SELF_DIR/start.sh" >/dev/null 2>&1; then
+    bad "又用了 toybox 不认的 cp dir/. 写法 —— 环境内 common/ 会静默变空（linuxctl 随即报找不到 status_json.sh）"
+else
+    ok "common/fixtures 逐文件复制（不会静默变空）"
 fi
 # whereami 的路径地图要把 Download 的位置写清楚（用户就是照着它找文件的）
 if grep -q 'Download 就是 /mnt/sdcard/Download' "$SELF_DIR/linuxctl.sh"; then
