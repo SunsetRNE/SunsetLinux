@@ -187,18 +187,17 @@ if [ -f "$DETECT" ]; then
     ui_print "  (探测函数载入失败，跳过)"
   fi
   ui_print ""
-  if module_needs_mount; then
-    ui_print "- 结论：module/ 下有 system/ 等目录，需要 metamodule 才能把系统路径覆盖上"
-  else
-    ui_print "★ 上面那句说的是**系统分区**，别读成「这模块不挂载任何东西」："
-    ui_print "  · 本模块不向系统分区放文件（/system、/vendor 等目录里都没有我们的东西）"
-    ui_print "    → 不需要 metamodule，也不会和 KernelSU / metamodule 的挂载实现冲突；"
-    ui_print "  · 但环境自己要挂载：overlayfs + 三层 erofs 只读镜像 + 可写层 ext4(loop)，"
-    ui_print "    全部在 linuxctl start 起的**私有 mount namespace** 里，挂载点在 $LINUX_HOME/… 下；"
-    ui_print "  ⚠ 如果本机 toybox mount 不支持 --make-rprivate（unshare 也不支持 --propagation），"
-    ui_print "    这些挂在私有 ns 里的东西会出现在**全局**挂载表里（只是看得见，不覆盖系统分区）——"
-    ui_print "    linuxctl doctor 的 §1d 会把它们一条条列出来。"
-  fi
+  # ★ 不再输出「是否需要挂载 / 需要 metamodule」那种结论（用户 2026-09-19 要求移除）：
+  #   那个判据讲的是**系统分区覆盖**，写在安装日志里只会让人以为"这模块到底挂不挂东西"。
+  #   直接陈述**实机上的挂载行为** —— 它固定如此，不随 KernelSU/metamodule 变动而变。
+  ui_print "- 实机挂载行为（固定如此，不需要你选、也不需要 metamodule）"
+  ui_print "  · 系统分区：**不动** —— module/ 下没有 system/、vendor/ 等目录，本模块不向系统分区放文件，"
+  ui_print "    因此与 KernelSU / metamodule 的挂载实现无关。"
+  ui_print "  · 环境自身：linuxctl start 会新建**私有 mount namespace**，在里面按顺序挂："
+  ui_print "      upper.img（ext4 + loop，可写层）→ 三层 erofs 只读镜像（base / runtime / dsh）"
+  ui_print "      → overlayfs 合成出 rootfs → /proc /sys /dev /dev/shm /tmp → 共享存储 /mnt/sdcard → 交换目录 /share"
+  ui_print "  · 挂载点全部在 $LINUX_HOME/… 下，不覆盖系统分区；linuxctl stop 按相反顺序卸载。"
+  ui_print "  · 自检：linuxctl doctor 会检查这些挂载有没有漏进全局命名空间（漏了会明确报出来）。"
 else
   ui_print "  警告：找不到 $DETECT，跳过挂载实现探测"
 fi

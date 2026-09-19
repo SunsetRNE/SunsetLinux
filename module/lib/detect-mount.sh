@@ -255,30 +255,17 @@ detect_mount_report() {
         printf 'metamodule 实现  : （无）\n'
     fi
 
-    if module_needs_mount; then
-        printf '本模块是否需要挂载: 是\n'
-    elif [ $? -eq 2 ]; then
-        printf '本模块是否需要挂载: 未知（不知道模块根在哪；用 MODULE_ROOT=<模块目录> 指定）\n'
-        if [ "$impl" = "kernelsu" ] && [ -z "$mm_csv" ]; then
-            printf '结论            : 需要挂载但当前没有 metamodule。\n'
-            printf '                  请先装一个 metamodule 实现，否则本模块的\n'
-            printf '                  系统路径覆盖不会生效。\n'
-        else
-            printf '结论            : 已满足（KernelSU 由 metamodule 提供挂载；Magisk 为原生挂载）。\n'
-        fi
-    else
-        printf '本模块是否需要挂载: 否\n'
-        printf '结论            : 本模块**不向系统分区放任何文件**（module/ 下没有 system/、vendor/ 等目录），\n'
-        printf '                  是纯脚本模块，**无需 metamodule 支持**。KernelSU 删掉自带挂载实现\n'
-        printf '                  这件事对本模块没有影响。\n'
-        printf '                  （只说系统分区这一件事；环境自己的 overlay/erofs/loop 挂载在\n'
-        printf '                    linuxctl start 的私有 mount ns 里，见 linuxctl doctor §1d。）\n'
-        if [ "$impl" = "kernelsu" ] && [ "$mm_present" = "no" ]; then
-            printf '提醒            : 当前 KernelSU 环境中没有检测到 metamodule。若你以后要装**需要挂载**的\n'
-            printf '                  模块（很多社区模块是自动挂载型），需要先装一个 metamodule；\n'
-            printf '                  但这不影响本模块。\n'
-        fi
-    fi
+    # ★ 这里**不再输出「本模块是否需要挂载」**（用户 2026-09-19 明确要求移除）。
+    #   那是个关于"系统分区覆盖"的内部判据，写在安装日志里只会让人以为
+    #   "这模块到底挂不挂东西"；而我们的模块**永远**不含 system/、vendor/ 等目录
+    #   （layer-spec 在构建期就拦），所以它不是需要用户关注的变量。
+    #   改成直接陈述**实机上的挂载行为** —— 固定事实，不需要"探测出结论再解释"。
+    #   （结构化输出 `detect_mount_json()` 里的 module_needs_mount 字段**保持不动**：
+    #     那是给 doctor / WebUI / 自测用的机器接口，见 tools/detect-mount-selftest.mjs。）
+    printf '本模块的挂载    : 不向系统分区放文件（module/ 下没有 system/、vendor/ 等目录）；\n'
+    printf '                  环境自身的挂载由 linuxctl start 在**私有 mount ns** 里完成\n'
+    printf '                  （overlayfs + 三层 erofs 只读镜像 + upper.img 可写层，\n'
+    printf '                   挂载点都在 LINUX_HOME/… 下，stop 时按相反顺序卸载）。\n'
 }
 
 # 直接执行时打印报告
