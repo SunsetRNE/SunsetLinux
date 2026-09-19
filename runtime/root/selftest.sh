@@ -1609,6 +1609,47 @@ fi
 #   `dsh` 的入口是 `#!/usr/bin/env node`，shebang 带不了它；`NODE_OPTIONS` 也被 node 拒绝。
 #   一旦有人"顺手简化"回直接跑 `dsh web`，症状是**环境起来后 DSH 立刻退出**
 #   （linux.log 里是 plugin tree failed to load），排查成本很高 —— 这条断言几秒就能钉住。
+head_ "单元：可变 DSH —— dsh remove 只删 dsh 层（决策 2026-09-19）"
+#
+# 定义见 tools/offline-bundle/variants.json 的 `_decision.variable_dsh`：
+# 允许移除 DSH 层做完整覆盖刷写；默认自带那份不变；回滚仍按版本。
+# 这里测"移除"这一步真的可用、且**只动 dsh**（base/runtime 一颗都不许碰）。
+DRH="$TMP/dsh-remove-env"
+mkdir -p "$DRH/layers"
+: > "$DRH/layers/dsh-0.1.6-alpha.2.erofs"
+: > "$DRH/layers/base-24.04.3-l1.erofs"
+: > "$DRH/layers/runtime-1.0.1.erofs"
+if [ -f "$SELF_DIR/linuxctl.sh" ]; then
+    # ① dry-run：只说不做
+    dout="$(LINUX_HOME="$DRH" "$SH_BIN" "$SELF_DIR/linuxctl.sh" dsh remove --dry-run 2>/dev/null | tail -n1 || true)"
+    if [ -f "$DRH/layers/dsh-0.1.6-alpha.2.erofs" ]; then
+        ok "dsh remove --dry-run 不删文件"
+    else
+        bad "dsh remove --dry-run 把文件删了（dry-run 语义坏了）"
+    fi
+    case "$dout" in *'"action":"dry-run"'*) ok "dry-run 的 JSON 标了 action=dry-run" ;; *) bad "dry-run 的 JSON 不对：$dout" ;; esac
+
+    # ② 真删：dsh 没了、base/runtime 还在
+    dout2="$(LINUX_HOME="$DRH" "$SH_BIN" "$SELF_DIR/linuxctl.sh" dsh remove 2>/dev/null | tail -n1 || true)"
+    if [ ! -f "$DRH/layers/dsh-0.1.6-alpha.2.erofs" ]; then
+        ok "dsh remove 移除了 dsh 层"
+    else
+        bad "dsh remove 没删掉 dsh 层"
+    fi
+    if [ -f "$DRH/layers/base-24.04.3-l1.erofs" ] && [ -f "$DRH/layers/runtime-1.0.1.erofs" ]; then
+        ok "base / runtime 未被波及（只动 dsh）"
+    else
+        bad "dsh remove 连带删了 base/runtime —— 那是破坏性行为"
+    fi
+    case "$dout2" in *'"action":"removed"'*) ok "移除后的 JSON 标了 action=removed 并给出装回来的路径" ;; *) bad "移除后的 JSON 不对：$dout2" ;; esac
+
+    # ③ 幂等：再删一次不报错
+    dout3="$(LINUX_HOME="$DRH" "$SH_BIN" "$SELF_DIR/linuxctl.sh" dsh remove 2>/dev/null | tail -n1 || true)"
+    case "$dout3" in *'"action":"nothing"'*) ok "已移除状态下再执行是幂等的（action=nothing）" ;; *) bad "幂等性不对：$dout3" ;; esac
+else
+    bad "找不到 linuxctl.sh，无法测 dsh remove"
+fi
+
 head_ "单元：启动器必须带 --expose-internals（DSH 0.1.6 的 HMR 硬要求）"
 SUP="$SELF_DIR/supervise.sh"
 if [ -f "$SUP" ]; then

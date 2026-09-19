@@ -68,13 +68,17 @@ adb install -r app/app/build/outputs/apk/prootFull/debug/SunsetLinux-*-proot-ful
 > 2026-09-19 真机踩到过（FileProvider 写死），0.3.25 修；这条约束现在有单测钉住
 > （`EditionSeparationTest`）。
 
-每个版本还各有 **3 个内置档位**（矩阵由 `tools/offline-bundle/variants.json` 定义，可以继续加）：
+**每个版本只有一个组合**（2026-09-19 维护决策收敛：6 个 → 2 个；矩阵与决策记录都在
+`tools/offline-bundle/variants.json`）：
 
-| 档位 | Root 版内嵌 | 免 root 版内嵌 | 适合谁 |
-|---|---|---|---|
-| 最小版 | 无（层全走频道） | proot 运行时 | 有 Wi-Fi、想要最小 APK |
-| Ubuntu 版 | base + runtime | base + runtime + proot | 想自己控制 DSH 版本（从频道装） |
-| 完整离线版 | base + runtime + dsh | base + runtime + proot + dsh | 想装完零下载即可用 |
+| 组合 | 内嵌 | 给谁 |
+|---|---|---|
+| `root-minimal` | **无**（Ubuntu 由 KernelSU 模块与频道层提供 —— "模块挂载 Ubuntu"） | 有 root：要极小的 APK |
+| `proot-full` | base + runtime + proroot + **默认自带的 DSH** | 没有 root：装完零下载即可用 |
+
+> **DSH 是可变部件**：允许 `linuxctl dsh remove` 移除它做**完整覆盖刷写**，默认自带那份不变
+> （`linuxctl dsh builtin` 装回内嵌那份、`linuxctl dsh install` 从频道装），
+> 回滚仍按版本（`linuxctl rollback dsh [<版本>]`）。详见 `docs/module-variants.md` §〇.1。
 
 > 引导页会**诚实写出两者的差距**——这两个模式**不等价**，别被"表面上都能跑起来"迷惑。
 > 两条路径最终都收敛到同一套 `linuxctl`，之后 App 的行为完全一致（模式只体现在 `status.mode`）。

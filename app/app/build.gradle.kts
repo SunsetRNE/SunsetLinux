@@ -105,21 +105,41 @@ val tierLabels: Map<String, String> =
 @Suppress("UNCHECKED_CAST")
 val variantSpecs: Map<String, Map<String, Any>> = variantsSpec["variants"] as Map<String, Map<String, Any>>
 
-/** 所有出现过的档位名（从组合 id 的 "<edition>-<tier>" 里拆出来，保序去重）。 */
-val tierIds: List<String> = variantSpecs.keys.map { it.substringAfter('-') }.distinct()
-require(tierIds.isNotEmpty()) { "variants.json 里没有任何组合" }
+/**
+ * 组合清单：**每个组合就是一个 flavor**（单维度）。
+ *
+ * ★ 2026-09-19 维护决策变更：组合从 6 个（edition × tier 两维笛卡尔积）压到 **2 个**。
+ *   组合数从此**不再等于维度乘积**，所以不能再靠两维 flavor 去拼 —— 那样会生成
+ *   root-full / proot-minimal 这类"没有定义"的组合，配置期直接报错。
+ *   flavor 名取 JSON 里的 `gradle_name`（缺省时由 id 派生：root-minimal → rootMinimal），
+ *   任务名与 CI 矩阵的派生规则一致（`assembleRootMinimalDebug`）。
+ */
+data class VariantSpec(
+    val id: String,
+    val gradleName: String,
+    val editionId: String,
+    val tierId: String,
+    val label: String,
+    val parts: String,
+)
+
+@Suppress("UNCHECKED_CAST")
+val variantList: List<VariantSpec> = variantSpecs.map { (id, v) ->
+    VariantSpec(
+        id = id,
+        gradleName = (v["gradle_name"] as? String)
+            ?: id.split('-').mapIndexed { i, p -> if (i == 0) p else p.replaceFirstChar { c -> c.uppercase() } }
+                .joinToString(""),
+        editionId = v["edition"] as String,
+        tierId = v["tier"] as String,
+        label = (v["label"] as? String) ?: id,
+        parts = (v["embed"] as List<String>).joinToString(","),
+    )
+}
+require(variantList.isNotEmpty()) { "variants.json 里没有任何组合" }
 
 /** 组合 id → 内嵌部件（逗号分隔，BuildConfig 用）。 */
-val variantParts: Map<String, String> = variantSpecs.mapValues { (_, v) ->
-    @Suppress("UNCHECKED_CAST")
-    (v["embed"] as List<String>).joinToString(",")
-}
-
-/** 某个 edition × 档位的真实部件（从 JSON 取；缺这个组合就报错，别静默少一个包）。 */
-fun partsOf(editionId: String, tierId: String): String {
-    val id = "$editionId-$tierId"
-    return variantParts[id] ?: error("variants.json 里没有组合 $id（editions: ${editions.map { it.id }}；tiers: $tierIds）")
-}
+val variantParts: Map<String, String> = variantList.associate { it.id to it.parts }
 
 android {
     namespace = "io.github.sunsetrne.sunsetlinux"
@@ -183,19 +203,21 @@ android {
     }
 
     // ────────────────────────────────────────────────────────────────────────
-    // 两个维度、六个组合（0.3.0 起）——**全部读 tools/offline-bundle/variants.json**：
-    //   edition（root / proot）：**两个可共存的 App**，包名不同（`…​.root` / `…​.proot`），
-    //    各自锁死运行模式。跨 edition **不能**覆盖安装，也不该互相干扰
-    //    （KernelSU 授权按【包名+签名】记）。
-    //   embed（minimal / base / full）：同一 App 的**内置档位**，差别只在 assets/ 里
-    //    内嵌哪份离线包。**同 edition 内换档位 = 覆盖安装**，数据不丢。
-    // 加档只改 JSON（Gradle flavor 与 CI 矩阵都会自动跟上），别在这里写死数量。
+    // **两个组合**（2026-09-19 维护决策变更：6 → 2）——**全部读 tools/offline-bundle/variants.json**：
+    //   root-minimal：**极简 Root + 模块挂载 Ubuntu**（APK 不带环境；层由模块与频道提供）
+    //   proot-full  ：**完整 proot + Ubuntu**（内嵌 base + runtime + proot + 默认自带的 DSH）
+    //   DSH 是**可变部件**：可移除 / 可替换 / 可回滚（见 variants.json 的 `_decision.variable_dsh`）。
+    // ★ 组合 = **一个 flavor**（单维度）。以前是 edition × embed 两维笛卡尔积（3 档 → 6 个包），
+    //   收敛之后组合数不再等于维度乘积，硬撑两维会生成 root-full / proot-minimal 这类
+    //   没有定义的组合（配置期直接报错）。加/减组合只改 JSON，这里不写死数量。
     // ────────────────────────────────────────────────────────────────────────
-    flavorDimensions += listOf("edition", "embed")
+    flavorDimensions += "variant"
     productFlavors {
-        editions.forEach { e ->
-            create(e.gradleName) {
-                dimension = "edition"
+        variantList.forEach { v ->
+            create(v.gradleName) {
+                dimension = "variant"
+                val e = editions.firstOrNull { it.id == v.editionId }
+                    ?: error("组合 ${v.id} 的 edition=${v.editionId} 在 editions 里不存在")
                 // 两个可共存的 App：包名不同（KernelSU 授权、App 数据、卸载互不影响）
                 applicationId = e.applicationId
                 // ★ 桌面标签也必须按 edition 分开：两个 App 装在同一台手机上、都叫
@@ -209,15 +231,10 @@ android {
                 buildConfigField("String", "EDITION_LABEL_SHORT", "\"${e.labelShort}\"")
                 buildConfigField("String", "EDITION_MODE", "\"${e.mode}\"")
                 // 本 edition 锁定的模式：界面据此隐藏"切换模式"（单模式 App）
-                // 档位与部件在 embed flavor 里拼（组合 id = "<edition>-<tier>"）
                 buildConfigField("String", "EDITION_ID", "\"${e.id}\"")
-            }
-        }
-        tierIds.forEach { t ->
-            create(t) {
-                dimension = "embed"
-                buildConfigField("String", "EMBED_TIER", "\"$t\"")
-                buildConfigField("String", "EMBED_LABEL", "\"${tierLabels[t] ?: t}\"")
+                // 档位标签（"极简" / "完整"）：界面上用来说明本包含什么
+                buildConfigField("String", "EMBED_TIER", "\"${v.tierId}\"")
+                buildConfigField("String", "EMBED_LABEL", "\"${tierLabels[v.tierId] ?: v.tierId}\"")
             }
         }
     }
@@ -678,18 +695,20 @@ androidComponents {
     onVariants { variant ->
         // 两个维度拼出组合 id（与 tools/offline-bundle/variants.json 的键逐字一致）：
         //   edition=root/proot，embed=minimal/full → "root-minimal" / "proot-full" …
-        val editionName = variant.productFlavors.firstOrNull { it.first == "edition" }?.second ?: "root"
-        val tierName = variant.productFlavors.firstOrNull { it.first == "embed" }?.second ?: "minimal"
-        val edition = editions.firstOrNull { it.gradleName == editionName }
-        val variantId = "${edition?.id ?: editionName}-$tierName"
-        val parts = partsOf(edition?.id ?: editionName, tierName)
+        // 单维度：flavor 名 → variants.json 里的组合（决策变更后一个组合就是一个 flavor）
+        val flavorName = variant.productFlavors.firstOrNull { it.first == "variant" }?.second
+        val spec = variantList.firstOrNull { it.gradleName == flavorName }
+            ?: error("变体 ${variant.name} 找不到对应组合（flavor=$flavorName）—— variants.json 与 flavor 名脱节了")
+        val edition = editions.firstOrNull { it.id == spec.editionId }
+            ?: error("组合 ${spec.id} 的 edition=${spec.editionId} 在 editions 里不存在")
+        val variantId = spec.id
+        val parts = spec.parts
 
         // 组合 id / 部件只在**运行时**才知道 → 用 variant 级 BuildConfig 注入
-        // （flavor 级只能给"每个维度各自知道"的值，拼不出组合）
-        val isRootEdition = (edition?.id ?: editionName) == "root"
+        val isRootEdition = edition.id == "root"
         variant.buildConfigFields?.put("EMBED_VARIANT", com.android.build.api.variant.BuildConfigField("String", "\"$variantId\"", null))
         variant.buildConfigFields?.put("EMBED_PARTS", com.android.build.api.variant.BuildConfigField("String", "\"$parts\"", null))
-        variant.buildConfigFields?.put("APP_ID", com.android.build.api.variant.BuildConfigField("String", "\"${edition?.applicationId ?: ""}\"", null))
+        variant.buildConfigFields?.put("APP_ID", com.android.build.api.variant.BuildConfigField("String", "\"${edition.applicationId}\"", null))
 
         // ① APK 名：SunsetLinux-<版本>-<组合>.apk（debug 构建类型再带 -debug，
         //    与 Branchbase 的产物命名规则一致）

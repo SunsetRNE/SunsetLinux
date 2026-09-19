@@ -1,14 +1,30 @@
 {
-  "_comment": "内置形态的**唯一事实源**：两个 App（edition）× 三个内置档位（tier）= 六个变体。新增/调整只改这里 —— Gradle 的 flavor、offline-bundle 工具、pipeline 的编译矩阵、下载页与 App 的组合标签**全部**读它。",
+  "_comment": "内置形态的**唯一事实源**。★ 2026-09-19 维护决策变更：**六个组合压到两个** —— 见 _decision。新增/调整只改这里：Gradle 的 flavor、offline-bundle 工具、pipeline 的编译矩阵、下载页与 App 的组合标签**全部**读它。",
+  "_decision": {
+    "date": "2026-09-19",
+    "change": "6 个组合（2 edition × 3 tier 的笛卡尔积）→ **2 个组合**",
+    "kept": {
+      "root-minimal": "**极简 Root + 模块挂载 Ubuntu**：APK 不带任何环境，Ubuntu 由 KernelSU 模块（full 变体模块自带层）与频道提供；环境由模块开机启动，与 App 解耦",
+      "proot-full": "**完整 proot + Ubuntu**：内嵌 base + runtime + proot（+ 默认自带的 DSH），免 root 装完零下载即可起步"
+    },
+    "dropped": ["root-base", "root-full", "proot-minimal", "proot-base"],
+    "why": "维护面收敛：这两个组合已经覆盖全部两类用户（有 root / 无 root），被砍掉的四档只是\"内嵌多深\"的中间态 —— 收益低，而每个组合都要过一遍编译矩阵与回归。",
+    "variable_dsh": {
+      "定义": "**可变 DSH** = DSH 层是一个**可移除、可替换、可回滚**的独立部件，不是烧死在 APK/模块里的常量。",
+      "允许移除": "可以移除 DSH 层（`linuxctl dsh remove`），以便对同一套环境做**完整覆盖刷写**（重新铺 base/runtime，或换成自己那份 DSH）。",
+      "默认不变": "**默认自带的 DSH 不变**：APK（proot-full）/ 模块（full 变体）里内嵌的那份，装完即可用，不会因为\"可变\"就变成空缺。",
+      "回滚按版本": "回滚时**仍然回滚到相应版本**（`linuxctl rollback dsh [<版本>]`，层文件按版本留档；移除后再装/回滚都走同一套层机制）。"
+    }
+  },
   "format": "sunsetlinux-bundle",
   "layout": "layers-split-v1",
   "parts_legend": {
     "base": "Ubuntu 基础层（erofs，完整 rootfs）",
     "runtime": "运行层（Node + pnpm + 工具）",
-    "dsh": "DSH 层（npm 全局安装 + web profile）",
+    "dsh": "DSH 层（npm 全局安装 + web profile）——**可变部件**，见 _decision.variable_dsh",
     "proot": "非 root 模式的 proot 运行时（自带动态依赖，解到 $LINUX_HOME/proot）"
   },
-  "_editions_comment": "两个 App **不同包名、可共存**：各锁死自己的模式，界面上不再提供模式切换。",
+  "_editions_comment": "两个 App **不同包名、可共存**：各锁死自己的模式，界面上不再提供模式切换。（注意：所有 ContentProvider 的 authority 必须跟着 applicationId 走，否则第二个 App 装不上 —— 真机踩过，见 0.3.25。）",
   "editions": {
     "root": {
       "label": "SunsetLinux Root",
@@ -25,63 +41,33 @@
       "note": "不需要 root、不需要刷机；环境铺在 App 私有目录，随 App 进程存活"
     }
   },
-  "_tiers_comment": "档位 = **内置到多深**（不是两档就封顶：要加就加一条，Gradle 的 flavor 与 pipeline 的矩阵都会自动跟上）。",
+  "_tiers_comment": "档位 = **这一档内嵌到多深**。决策变更后只有两个在用：minimal（root 侧，什么都不内嵌）与 full（proot 侧，内嵌整套）。base 已随 2026-09-19 的收敛归档，不再产生组合。",
   "tiers": {
     "minimal": {
-      "label": "最小版",
-      "note": "只带本版**跑起来必需**的那一件（root 版什么都不带 = 层全走频道；免 root 版带 proot 运行时）"
-    },
-    "base": {
-      "label": "Ubuntu 版",
-      "note": "内置 Ubuntu（base + runtime）：能起环境，DSH 走频道/运行时更新"
+      "label": "极简",
+      "note": "APK 不带环境：层由模块与频道提供（root 版的常态）"
     },
     "full": {
-      "label": "完整离线版",
-      "note": "内置 Ubuntu + DSH（免 root 版另带 proot）：装完零下载即可用；DSH 版本随 APK 冻结，运行时仍可更新"
+      "label": "完整",
+      "note": "内嵌整套（base + runtime + proot + 默认自带的 DSH）：装完零下载即可用；DSH 仍可移除/替换/回滚（可变部件）"
     }
   },
   "variants": {
     "root-minimal": {
       "edition": "root",
       "tier": "minimal",
-      "label": "Root 最小版",
+      "gradle_name": "rootMinimal",
+      "label": "Root 极简版",
       "embed": [],
-      "note": "不含任何环境；装完用「更新」页从频道装层。给「有 Wi-Fi、想要最小 APK」的人"
-    },
-    "root-base": {
-      "edition": "root",
-      "tier": "base",
-      "label": "Root Ubuntu 版",
-      "embed": ["base", "runtime"],
-      "note": "内置 Ubuntu 基础环境；DSH 从频道装（想自己控制 DSH 版本的人选这档）"
-    },
-    "root-full": {
-      "edition": "root",
-      "tier": "full",
-      "label": "Root 完整离线版",
-      "embed": ["base", "runtime", "dsh"],
-      "note": "内嵌 Ubuntu + DSH：装完离线即可部署（root 模式不需要 proot 运行时）"
-    },
-    "proot-minimal": {
-      "edition": "proot",
-      "tier": "minimal",
-      "label": "免 root 最小版",
-      "embed": ["proot"],
-      "note": "只带 proot 运行时（免 root 必需件）；Ubuntu 与 dsh 走频道/离线包，APK 最小"
-    },
-    "proot-base": {
-      "edition": "proot",
-      "tier": "base",
-      "label": "免 root Ubuntu 版",
-      "embed": ["base", "runtime", "proot"],
-      "note": "内嵌 Ubuntu + proot：能起环境，DSH 从频道装"
+      "note": "极简 Root + **模块挂载 Ubuntu**：APK 不含环境，Ubuntu 由 KernelSU 模块与频道层提供；DSH 可移除/替换/回滚"
     },
     "proot-full": {
       "edition": "proot",
       "tier": "full",
-      "label": "免 root 完整离线版",
+      "gradle_name": "prootFull",
+      "label": "免 root 完整版",
       "embed": ["base", "runtime", "proot", "dsh"],
-      "note": "内嵌 Ubuntu + proot + DSH：免 root 装完零下载即可起步"
+      "note": "完整 proot + Ubuntu：内嵌 base + runtime + proot + 默认自带的 DSH，装完零下载即可起步；DSH 可移除/替换/回滚"
     }
   }
 }

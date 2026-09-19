@@ -2059,14 +2059,72 @@ cmd_dsh() {
         info)    cmd_dsh_info "$@" ;;
         builtin) cmd_dsh_builtin "$@" ;;
         install) cmd_dsh_install "$@" ;;
+        remove)  cmd_dsh_remove "$@" ;;
         start)   cmd_dsh_start "$@" ;;
         stop)    cmd_dsh_stop "$@" ;;
         -h|--help|help)
-            printf '用法：linuxctl dsh {info|builtin [--module-dir D] [--force]|install|start [--port N]|stop}\n' >&2
-            emit '{"ok":true,"usage":"dsh info|builtin|install|start|stop"}'
+            printf '用法：linuxctl dsh {info|builtin [--module-dir D] [--force]|install|remove [--dry-run]|start [--port N]|stop}\n' >&2
+            emit '{"ok":true,"usage":"dsh info|builtin|install|remove|start|stop"}'
             return 0 ;;
-        *) log "未知子命令：dsh $sub"; emit '{"ok":false,"error":"dsh 的子命令必须是 info/builtin/install/start/stop"}'; return 2 ;;
+        *) log "未知子命令：dsh $sub"; emit '{"ok":false,"error":"dsh 的子命令必须是 info/builtin/install/remove/start/stop"}'; return 2 ;;
     esac
+}
+
+# ---------------------------------------------------------------------------
+# dsh remove —— **移除 DSH 层**（「可变 DSH」的落地）
+#
+# 定义见 tools/offline-bundle/variants.json 的 `_decision.variable_dsh`：
+#   · **允许移除**：DSH 是独立部件，可以移除它，以便对同一套环境做**完整覆盖刷写**
+#     （重新铺 base/runtime，或换成你自己那份 DSH）；
+#   · **默认不变**：模块 full 变体 / APK（proot-full）里内嵌的那份仍在 —— 移除的是
+#     `layers/` 里生效的那份，随时可以 `dsh builtin` 装回来，或 `dsh install` 从频道装；
+#   · **回滚按版本**：移除**不影响** `linuxctl rollback dsh [<版本>]`（层按版本留档）。
+#
+# 安全边界（两条，都是踩过的坑）：
+#   ① **只在环境没跑时动**：层文件被 loop 挂着时删掉会留下悬挂挂载（与卸载那条坑同源，
+#      见 docs/uninstall.md）⇒ 运行中直接拒绝，让你先 `linuxctl stop`；
+#   ② 只删 `layers/dsh-*`，base/runtime 一律不碰。
+# ---------------------------------------------------------------------------
+cmd_dsh_remove() {
+    local dry=0
+    case "${1:-}" in
+        --dry-run) dry=1 ;;
+        "") : ;;
+        *) log "用法：linuxctl dsh remove [--dry-run]"; emit '{"ok":false,"error":"未知参数（只认 --dry-run）"}'; return 2 ;;
+    esac
+
+    if _fp_pid_alive "$RUN_DIR/supervisor.pid"; then
+        log "环境正在运行：先 'linuxctl stop' 再移除 DSH 层（层被 loop 挂着时删除会留下悬挂挂载）"
+        emit '{"ok":false,"error":"env-running","hint":"先 linuxctl stop"}'
+        return 1
+    fi
+
+    local files="" n=0 f base
+    for f in "$LAYERS_DIR"/dsh-*.erofs "$LAYERS_DIR"/dsh-*.erofs.gz "$LAYERS_DIR"/dsh-*.erofs.zst \
+             "$LAYERS_DIR"/dsh-*.squashfs; do
+        [ -f "$f" ] || continue
+        base="$(basename "$f")"
+        if [ "$dry" = "1" ]; then
+            log "（dry-run）会移除：$base"
+        else
+            if rm -f "$f"; then log "已移除：$base"; else log "WARN: 删除失败：$base"; continue; fi
+        fi
+        files="$files${files:+,}\"$base\""
+        n=$((n + 1))
+    done
+
+    if [ "$n" -eq 0 ]; then
+        log "layers/ 下没有 DSH 层（已经是移除状态）"
+        emit '{"ok":true,"action":"nothing","count":0,"files":[]}'
+        return 0
+    fi
+    if [ "$dry" = "1" ]; then
+        log "dry-run：将移除 $n 个 DSH 层文件（base/runtime 未动）"
+        emit "{\"ok\":true,\"action\":\"dry-run\",\"count\":$n,\"files\":[$files]}"
+    else
+        log "DSH 层已移除（$n 个文件；base/runtime 未动）—— 装回来：linuxctl dsh builtin 或 linuxctl dsh install"
+        emit "{\"ok\":true,\"action\":\"removed\",\"count\":$n,\"files\":[$files],\"restore\":\"linuxctl dsh builtin | linuxctl dsh install\"}"
+    fi
 }
 
 # ---------------------------------------------------------------------------

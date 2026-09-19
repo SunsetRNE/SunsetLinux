@@ -100,8 +100,9 @@ class SigningContractTest {
             buildText.contains("offline-bundle/variants.json") && buildText.contains("variantSpecs"),
         )
         assertTrue(
-            "flavor 维度必须是 edition(两个 App) + embed(内置档位)",
-            buildText.contains("flavorDimensions += listOf(\"edition\", \"embed\")"),
+            "flavor 必须是**单维度、一个组合一个 flavor**（2026-09-19 决策变更：6 个组合 → 2 个 —— " +
+                "组合数不再等于 edition × tier 的乘积，硬撑两维会生成没有定义的组合、配置期报错）",
+            buildText.contains("flavorDimensions += \"variant\"") && buildText.contains("variantList"),
         )
         val spec = org.json.JSONObject(variantsJson.readText())
         val editions = spec.getJSONObject("editions")
@@ -109,7 +110,17 @@ class SigningContractTest {
         val tiers = spec.getJSONObject("tiers")
         assertEquals("必须是两个 App（root / proot）", 2, editions.length())
         assertTrue("editions 里必须有 root 与 proot", editions.has("root") && editions.has("proot"))
-        assertTrue("档位至少三档（minimal/base/full），矩阵还要能继续长", tiers.length() >= 3)
+        // ★ 2026-09-19 维护决策变更：组合收敛到 2 个（root-minimal / proot-full）。
+        //   这里钉住**收敛的结果**与"可变 DSH"的定义，而不是旧矩阵的"至少三档"。
+        assertEquals("组合必须恰好两个（决策变更后不再有中间档）", 2, variants.length())
+        assertTrue("root 侧保留 root-minimal", variants.has("root-minimal"))
+        assertTrue("proot 侧保留 proot-full", variants.has("proot-full"))
+        assertEquals("档位只剩 minimal 与 full（base 已随收敛归档）", 2, tiers.length())
+        val dec = spec.optJSONObject("_decision")?.optJSONObject("variable_dsh")
+        assertTrue(
+            "variants.json 必须留下「可变 DSH」的定义（允许移除 / 默认不变 / 回滚按版本）",
+            dec != null && dec.has("允许移除") && dec.has("默认不变") && dec.has("回滚按版本"),
+        )
         val appIds = mutableListOf<String>()
         for (ed in editions.keys()) {
             val o = editions.getJSONObject(ed)

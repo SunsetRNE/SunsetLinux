@@ -48,7 +48,7 @@ console.log('\n== 变体矩阵（variants.json）==');
   const legend = Object.keys(spec.parts_legend ?? {});
   const variants = spec.variants ?? {};
   ok(legend.length >= 4, `parts_legend 覆盖四种部件（${legend.join(', ')}）`);
-  ok(Object.keys(variants).length >= 4, `至少四个变体（${Object.keys(variants).join(', ')}）`);
+  ok(Object.keys(variants).length === 2, `**恰好两个组合**（决策变更 2026-09-19：6 → 2；实际 ${Object.keys(variants).join(', ')}）`);
   const editions = spec.editions ?? {};
   ok(Object.keys(editions).length === 2 && !!editions.root && !!editions.proot,
      `两个 edition 必须在（${Object.keys(editions).join(', ')}）`);
@@ -66,20 +66,24 @@ console.log('\n== 变体矩阵（variants.json）==');
      editions.root.application_id !== editions.proot.application_id,
      '两个 edition 的 applicationId 不同（可同时安装）');
   ok(editions.root?.mode === 'root' && editions.proot?.mode === 'proot', 'edition 锁定的模式分别是 root / proot');
-  // 四个变体：每个 edition 各"最小 + 完整"一档
-  for (const ed of ['root', 'proot']) {
-    const mine = Object.entries(variants).filter(([, v]) => v.edition === ed);
-    // 档位数**不封顶**：矩阵是数据驱动的（用户："各种内置感觉不止 4 种吧"），
-    // 这里只要求"至少两档、且必须有最小档与完整档"。
-    ok(mine.length >= 2, `${ed} 版至少两档（${mine.map(([id]) => id).join(', ')}）`);
-    ok(new Set(mine.map(([, v]) => v.tier)).size === mine.length, `${ed} 版的档位没有重复`);
-    const min = mine.find(([, v]) => v.embed.length <= 1);
-    const full = mine.find(([, v]) => v.embed.includes('dsh'));
-    ok(!!min, `${ed} 版有「最小档」（内嵌 ≤1 个部件）`);
-    ok(!!full, `${ed} 版有「完整档」（内嵌 dsh = 零下载可用）`);
-  }
-  ok(variants['proot-full']?.embed.includes('proot') && !variants['root-full']?.embed.includes('proot'),
-     'proot 档带 proot 运行时、root 档不带（root 模式用不到它）');
+  // ★ 2026-09-19 维护决策变更：六个组合（2 edition × 3 tier）→ **两个组合**。
+  //   所以这里不再要求"每个 edition 至少两档"，而是钉住**收敛后的两条路线**：
+  //     · root 侧只有「极简」：APK 不带环境，Ubuntu 由 KernelSU 模块与频道提供；
+  //     · proot 侧只有「完整」：内嵌整套，免 root 装完零下载。
+  //   决策记录在 variants.json 的 `_decision`（含"可变 DSH"的定义）。
+  ok(Object.keys(variants).length === 2, `组合恰好两个（${Object.keys(variants).join(', ')}）`);
+  ok(!!variants['root-minimal'], 'root 侧保留 root-minimal（极简 + 模块挂载 Ubuntu）');
+  ok(!!variants['proot-full'], 'proot 侧保留 proot-full（完整 + 零下载）');
+  ok(Array.isArray(variants['root-minimal']?.embed) && variants['root-minimal'].embed.length === 0,
+     'root-minimal **不内嵌任何环境**（Ubuntu 走模块与频道）');
+  ok(variants['proot-full']?.embed.includes('dsh'), 'proot-full 内嵌 dsh（默认自带那份不变）');
+  // 「可变 DSH」的定义必须留在数据里（可移除 / 默认不变 / 回滚按版本）
+  const vd = spec._decision?.variable_dsh ?? {};
+  ok(vd['允许移除'] && vd['默认不变'] && vd['回滚按版本'],
+     'variants.json 的 _decision 写清了「可变 DSH」三件事（允许移除 / 默认不变 / 回滚按版本）');
+  ok(editions.root?.mode === 'root' && editions.proot?.mode === 'proot', 'edition 锁定的模式分别是 root / proot');
+  ok(variants['proot-full']?.embed.includes('proot') && !variants['root-minimal']?.embed.includes('proot'),
+     'proot 组合带 proot 运行时、root 组合不带（root 模式用不到它）');
 }
 
 // ─────────────────────────────────────────── 2) 合成部件的全链路

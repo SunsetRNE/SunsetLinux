@@ -49,13 +49,16 @@
 
 两个 App **包名不同、可以共存**（数据各放各的，互不影响）。
 
-每个版本还各有 **3 个内置档位**，区别只是"APK 里预装了多少"，装完都能用：
+**每个版本只有一个组合**（2026-09-19 维护决策收敛：原来 6 个 → 2 个）：
 
-| 档位 | 文件名的中间那段 | 适合 |
+| 你的情况 | 下哪个文件 | 说明 |
 |---|---|---|
-| 最小版 | `-minimal-` | 有 Wi-Fi，想要最小的 APK（层全部联网从频道装） |
-| Ubuntu 版 | `-base-` | 想自己控制 DSH 版本（从频道装 dsh 层） |
-| 完整离线版 | `-full-` | 想装完零下载直接用（APK 体积最大） |
+| 有 root | `SunsetLinux-<版本>-root-minimal-debug.apk` | **极简 Root + 模块挂载 Ubuntu**：APK 不带环境，Ubuntu 由 KernelSU 模块与频道层提供 |
+| 没有 root | `SunsetLinux-<版本>-proot-full-debug.apk` | **完整 proot + Ubuntu**：内嵌 Ubuntu 与 proot（+ 默认自带的 DSH），装完零下载即可用 |
+
+> **DSH 是可变的**：两边都可以把 DSH 层**移除**（`linuxctl dsh remove`，用于完整覆盖刷写）、
+> 从模块内嵌那份或频道**装回来**，回滚时**仍然回到相应版本**（`linuxctl rollback dsh [<版本>]`）。
+> 默认自带的那份不变 —— "可变"不等于"不带"。
 
 ---
 

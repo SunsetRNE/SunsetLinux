@@ -10,13 +10,27 @@
 
 ---
 
-## 〇、三条决策（一句话）
+## 〇、四条决策（一句话）
 
 | # | 决策 | 一句话 |
 |---|---|---|
 | 1 | **免 root 完全切割** | 免 root 版与 KernelSU 模块**彻底无关**；进入免 root 版 = 直接启用内置 Ubuntu 环境 + 终端 + DSH，不需要 su、不需要模块、不需要频道 |
 | 2 | **root 模块拆两个版本** | `full`（**默认**，自带 DSH：装完就有，可更新、可一键回滚到内置版）/ `bare`（不带 DSH，**一条指令**从内置官方频道装） |
 | 3 | **编译只在 CI** | 官方产物一律由 GitHub Actions 编译；**发布只由 `main` 触发**；`beta` / `channel` / `layers` / `gh-pages` 只用于**存储内容** |
+| 4 | **组合收敛到两个**（2026-09-19） | 6 个组合（2 edition × 3 tier）→ **2 个**：`root-minimal`（**极简 Root + 模块挂载 Ubuntu**）与 `proot-full`（**完整 proot + Ubuntu**）。被砍的 `root-base` / `root-full` / `proot-minimal` / `proot-base` 只是"内嵌多深"的中间态，收益低而每个组合都要过一遍编译矩阵与回归。数据在 `tools/offline-bundle/variants.json` 的 `_decision` |
+
+### 〇.1 「可变 DSH」的定义（决策 4 的一部分）
+
+**可变 DSH ≠ 不带 DSH。** 它的三件事（原文见 `variants.json` 的 `_decision.variable_dsh`）：
+
+| 维度 | 含义 | 落地 |
+|---|---|---|
+| **允许移除** | DSH 是**独立部件**，可以移除它，以便对同一套环境做**完整覆盖刷写**（重铺 base/runtime，或换成你自己那份 DSH） | `linuxctl dsh remove [--dry-run]` —— 只删 `layers/dsh-*`，**base/runtime 一律不碰**；环境在跑时拒绝执行（层被 loop 挂着删除会留悬挂挂载） |
+| **默认不变** | **默认自带的那份 DSH 不变**：模块 `full` 变体 / APK（`proot-full`）里内嵌的 DSH 装完即可用，不会因为"可变"而变成空缺 | 移除的只是 `layers/` 里生效的那份；`linuxctl dsh builtin`（用内嵌那份）或 `linuxctl dsh install`（从频道）随时装回来 |
+| **回滚按版本** | 移除**不影响回滚**：回滚仍然回到相应版本 | `linuxctl rollback dsh [<版本>]`（层按版本留档，与 base/runtime 同一套机制） |
+
+> 自测钉住这些语义：`runtime/root/selftest.sh` 的「可变 DSH —— dsh remove 只删 dsh 层」一节
+> （dry-run 不删、真删只动 dsh、幂等、JSON 给装回来的路径）。
 
 ---
 
@@ -30,7 +44,7 @@
 | su | 必需 | **不申请** |
 | 运行时脚本来源 | 模块 `post-fs-data.sh` 同步到 `/data/sunsetlinux/bin` | APK 内嵌 `assets/proot-runtime/` → `ProotRuntime.ensure()` |
 | 环境位置 | `/data/sunsetlinux`（与 App 生命周期解耦） | App 私有目录 `files/sunsetlinux` |
-| 内置内容 | 由档位决定（`minimal`/`base`/`full`） | **一律内置**：Ubuntu base + runtime + DSH + proot/proroot 运行时（零下载） |
+| 内置内容 | **极简**（`root-minimal`）：APK **不带任何环境** —— Ubuntu 由 KernelSU 模块与频道层提供（"模块挂载 Ubuntu"） | **完整**（`proot-full`）：Ubuntu base + runtime + proroot 运行时 + 默认自带的 DSH（零下载）；DSH 仍可移除/替换/回滚 |
 | 进入 App 后 | 环境由模块在开机时拉起；App 只做状态/终端/更新 | **直接启用**：检查 → 铺运行时 → 铺环境 → 起环境 → 落到终端 |
 
 "彻底"的含义是**代码级**：root 运行时不再保留任何 proot 降级分支（`doctor` 的 proot 段、
