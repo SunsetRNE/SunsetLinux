@@ -275,7 +275,32 @@ object OfflineApplier {
                 log.append("· [${Stage.APPLY.label}] linuxctl ${args.joinToString(" ")}\n")
                 onStage("${Stage.APPLY.label} $id", 1, 1)
                 val ctl = LinuxCtl(context, mode)
-                val result = ctl.stream(args) { line -> log.append("  $line\n") }
+                // ★ 每个部件最多试两次，并把**子进程的结局**如实写进日志（真机 2026-09-19）：
+                //   现场是"解压 base 走到一半、约 35 秒后无声失败"，日志里既没有错误行也没有退出码
+                //   —— 分不清是脚本报错、被谁杀掉、还是调用方被取消。所以这里补两件事：
+                //     ① 记录退出码与耗时（ok=false 时 exitCode 会显示出来，SIGKILL 是 137）；
+                //     ② 失败**重试一次**（update 是幂等的：base 重新解包、runtime/dsh 合并覆盖），
+                //        瞬时资源紧张导致的半途而废能自愈，不必让用户手点第二次。
+                var result: CtlResult
+                var elapsed = 0L
+                run {
+                    val t0 = System.currentTimeMillis()
+                    result = ctl.stream(args) { line -> log.append("  $line\n") }
+                    elapsed = System.currentTimeMillis() - t0
+                }
+                if (!result.ok) {
+                    log.append(
+                        "· [${Stage.APPLY.label}] $id 第 1 次失败（exit=${result.exitCode}，" +
+                            "耗时 ${elapsed / 1000}s）：${result.message}\n  重试一次…\n"
+                    )
+                    val t0 = System.currentTimeMillis()
+                    result = ctl.stream(args) { line -> log.append("  $line\n") }
+                    elapsed = System.currentTimeMillis() - t0
+                }
+                log.append(
+                    "· [${Stage.APPLY.label}] $id 结束：exit=${result.exitCode}，耗时 ${elapsed / 1000}s" +
+                        "（SIGKILL=137 / SIGTERM=143 说明是被外部杀掉，不是脚本自己报错）\n"
+                )
                 if (!result.ok) {
                     return Outcome(
                         false,
