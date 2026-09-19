@@ -96,10 +96,19 @@
                 android:value="dsh_linux_environment_supervision" />
         </service>
 
-        <!-- 排障包分享：FileProvider 只暴露 cacheDir/exports 与 filesDir/crash -->
+        <!-- 排障包分享：FileProvider 只暴露 cacheDir/exports 与 filesDir/crash。
+             ★ authority 必须跟着 applicationId 走，**不能写死**（真机实测 2026-09-19）：
+               · authority 在系统里是**全局唯一**的，而两个 edition 的包名不同
+                 （…sunsetlinux.root / …sunsetlinux.proot）—— 写死成同一个字符串，
+                 第二个 App 直接装不上：安装器报「存在同名的 ContentProvider」；
+               · 而且代码里请求的是 `"${context.packageName}.files"`
+                 （core/LogExport.kt、core/BundledModule.kt），写死的那份谁也匹配不上
+                 ⇒ 导出日志 / 分享排障包在真机上**本来就是坏的**（会抛
+                 "Couldn't find meta-data for provider with authority …"）。
+             `${applicationId}` 一处同时修掉这两个问题：edition 之间唯一，且与代码一致。 -->
         <provider
             android:name="androidx.core.content.FileProvider"
-            android:authorities="io.github.sunsetrne.sunsetlinux.files"
+            android:authorities="${applicationId}.files"
             android:exported="false"
             android:grantUriPermissions="true">
             <meta-data

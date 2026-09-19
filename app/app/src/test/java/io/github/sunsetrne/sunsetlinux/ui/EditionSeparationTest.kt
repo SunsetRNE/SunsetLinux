@@ -281,4 +281,35 @@ class EditionSeparationTest {
             launcher.contains("!onboarded && !Edition.isRoot && !prefs.prootBootstrapDeclined"),
         )
     }
+
+    /**
+     * FileProvider 的 authority 必须跟着 applicationId 走。
+     *
+     * 真机实测（2026-09-19）：在已装 Root 版的机器上装免 root 版，安装器直接报
+     * **「存在同名的 ContentProvider」** —— 因为 manifest 把 authority 写死成
+     * `io.github.sunsetrne.sunsetlinux.files`，而 authority 在系统里是**全局唯一**的。
+     * 同一个写死值还让**本 App 自己**对不上：代码请求的是
+     * `"${context.packageName}.files"`（core/LogExport.kt、core/BundledModule.kt），
+     * 于是导出日志 / 分享排障包在真机上本来就是坏的（找不到该 authority 的 provider）。
+     * 改成 `${applicationId}.files` 一处同时修掉"装不上"与"功能坏"。
+     */
+    @Test
+    fun `FileProvider 的 authority 必须带 applicationId（两个 App 才能装在同一台机器上）`() {
+        val manifest = File(TestPaths.repoRoot, "app/app/src/main/AndroidManifest.xml").readText()
+        assertTrue(
+            "authority 没跟着 applicationId 走 —— 第二个 edition 会装不上（同名 ContentProvider）",
+            manifest.contains("android:authorities=\"\${applicationId}.files\""),
+        )
+        assertFalse(
+            "manifest 里还留着硬编码的 sunsetlinux.files authority",
+            Regex("""android:authorities="io\.github\.sunsetrne\.sunsetlinux\.files"""").containsMatchIn(manifest),
+        )
+        // 与代码一致：两个调用点都按 packageName 拼 authority
+        for (rel in listOf("core/LogExport.kt", "core/BundledModule.kt")) {
+            assertTrue(
+                "$rel 用的 authority 必须与 manifest 的 \${applicationId}.files 一致",
+                read(rel).contains("\"\${context.packageName}.files\""),
+            )
+        }
+    }
 }

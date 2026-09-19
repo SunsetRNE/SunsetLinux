@@ -61,6 +61,12 @@ adb install -r app/app/build/outputs/apk/prootFull/debug/SunsetLinux-*-proot-ful
 
 > 两个 App **可以同时装**：环境数据在各自的位置（root 版在 `/data/sunsetlinux`，
 > 免 root 版在 App 私有目录），KernelSU 授权按包名记，互不影响。
+>
+> ⚠️ **前提：所有 ContentProvider 的 authority 必须跟着包名走**（manifest 里写
+> `${applicationId}.xxx`）。authority 在系统里是**全局唯一**的 —— 写死成固定字符串时，
+> 先装的那个占了名字，第二个 App 会直接装不上，安装器报「**存在同名的 ContentProvider**」。
+> 2026-09-19 真机踩到过（FileProvider 写死），0.3.25 修；这条约束现在有单测钉住
+> （`EditionSeparationTest`）。
 
 每个版本还各有 **3 个内置档位**（矩阵由 `tools/offline-bundle/variants.json` 定义，可以继续加）：
 
