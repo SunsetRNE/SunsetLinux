@@ -131,5 +131,36 @@ else
     ok "本机看不到 entry.sh（跳过?）"
 fi
 
+# ---------------------------------------------------------------------------
+# 免 root 版的「内部提权」：uid 与 DSH 策略是**两件事**，两个形态必须一致
+#
+# 用户 2026-09-19 的原话："运行进程 UID ≠ 虚拟环境内部 root 提权"。
+#   · 进程 uid：proot 不虚拟内核身份，真实 uid 始终是 App 用户；开 fake_root 才在系统调用层
+#     把 getuid() 伪造成 0（**没有真 capabilities**、不能 mount）；
+#   · DSH 策略：由 DSH_PERMISSION_MODE 单独决定。root 版有 supervise.sh 兜底，
+#     proot 版此前**没有**任何等价处理 ⇒ 免 root 用户会稳定遇到"每条命令都要提权"。
+# ---------------------------------------------------------------------------
+if [ -f "$ENT" ]; then
+    if grep -q 'DSH_PERMISSION_MODE=danger-full-access' "$ENT"; then
+        ok "免 root 版兜底 DSH_PERMISSION_MODE=danger-full-access（与 root 版对齐）"
+    else
+        bad "entry.sh 没有策略兜底" "DSH_PERMISSION_MODE=danger-full-access" "没有（免 root 用户会稳定遇到审批）"
+    fi
+    # 顺序：必须在加载 /root/.dsh/env **之后**，否则用户写在里面的值会被反覆盖
+    ln_env=$(grep -n '\. /root/\.dsh/env' "$ENT" | head -n1 | cut -d: -f1)
+    ln_def=$(grep -n 'DSH_PERMISSION_MODE=danger-full-access' "$ENT" | head -n1 | cut -d: -f1)
+    if [ -n "$ln_env" ] && [ -n "$ln_def" ] && [ "$ln_def" -gt "$ln_env" ]; then
+        ok "策略默认值在加载 /root/.dsh/env 之后（用户值优先）"
+    else
+        bad "策略默认值的位置在 env 加载之前" "def > env" "env=$ln_env def=$ln_def"
+    fi
+    # 身份必须说清楚：uid 是伪造的、能力受限 —— 否则用户会按 uid 推断能力
+    if grep -q '伪造 root' "$ENT" && grep -q '没有真 capabilities' "$ENT"; then
+        ok "启动日志说明「uid=0 是伪造的、没有真 capabilities」"
+    else
+        bad "entry.sh 没有身份说明" "提到伪造 root 与能力受限" "没有"
+    fi
+fi
+
 printf '\n== 结果：%d 通过 / %d 失败 ==\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

@@ -75,6 +75,27 @@ mount -t overlay overlay -o lowerdir=…/layers-mnt/dsh:…/layers-mnt/runtime:�
 - 壳（DSHA）对容器里的会话设的也是 `danger-full-access`（实测：启动命令行里
   `export DSH_PERMISSION_MODE='danger-full-access'`）——两边行为因此一致。
 
+### 4.1 两个形态的"内部提权"是**两件事**（2026-09-19 用户点出）
+
+用户的原话：**"运行进程 UID ≠ 虚拟环境内部 root 提权"**。这句要拆成两层看，两个形态各自不同：
+
+| | **Root 版**（真机 root + chroot 套层）| **免 root 版**（proot 沙箱）|
+|---|---|---|
+| 进程真实 uid | **0**（就是宿主 root）| **App 的 uid**（`u0_aNNN`）—— proot 不虚拟内核身份 |
+| 环境内 `id` 显示 | `uid=0`（**真的**）| `uid=0` **仅当** `fake_root=1`；那是 proot 在系统调用层**伪造**的 |
+| capabilities | 真（`CapEff=000001ffffffffff`，doctor 实测）| 无真 capabilities（伪造 uid 不等于有权限）|
+| 能 mount 吗 | 能（环境自己的挂载就在私有 ns 里做）| **不能** |
+| DSH 策略默认值 | `danger-full-access`（`supervise.sh` 兜底）| **同样** `danger-full-access`（`entry.sh` 兜底，2026-09-19 补上）|
+
+- **`fake_root` 默认是 `false`**（`etc/config.json`）：想让它开，用 `linuxctl start --fake-root`。
+  开了之后 `id` 会显示 uid=0，但**能力没有任何增加** —— 这正是"uid ≠ 提权"的字面含义。
+- **免 root 版此前漏了策略兜底**：它的 supervisor 是自己实现的（不是 `supervise.sh`），
+  所以 `DSH_PERMISSION_MODE` 从未被设置 ⇒ 走默认 `workspace-write` ⇒ `ask` ⇒
+  在这类设备上 fail-closed ⇒ 免 root 用户会稳定遇到"每条命令都要提权"。
+  现在 `runtime/proot/entry.sh` 在加载 `/root/.dsh/env` **之后**做同样的兜底（顺序有自测钉住）。
+- 两个形态**一致的部分**：DSH 的策略层语义相同（用户写在 `env` 里的值都优先）；
+  **不一致的部分**：真 capabilities 只有 Root 版有，proot 无论怎么伪造 uid 都拿不到。
+
 ## 5. 挂载隔离：`unshare -m` 在这台机器上可能没隔住
 
 - `start.sh` 只 `unshare -m -u`，并且**不 unshare net / pid**（进 netns 会断网；内核无 `CONFIG_PID_NS`）。

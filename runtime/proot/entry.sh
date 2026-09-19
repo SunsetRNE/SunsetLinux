@@ -306,6 +306,45 @@ if [ -f /root/.dsh/env ]; then
 fi
 
 # -----------------------------------------------------------------------------
+# A5. DSH 的权限策略默认值（与 root 版 supervise.sh **对齐**）
+#
+#   DSH 的沙箱与审批由**一条变量**决定（`dsh-base` 组合原文）：
+#     policy: (DSH_PERMISSION_MODE ?? 'workspace-write') === 'danger-full-access' ? 'never' : 'ask'
+#   而 `workspace-write` 在手机上**没有可执行的后端**（proot 里更不可能有 bwrap / Landlock），
+#   于是它 fail-closed 把命令一条条拒掉 —— 用户看到的就是"环境里每条命令都要提权"。
+#
+#   ★ 为什么免 root 版尤其需要这一条：root 版有 `supervise.sh` 兜底（0.3.20 起），
+#     而 proot 版的 supervisor 是**本脚本自己做的**，从来没有等价处理 ⇒ 免 root 用户会
+#     稳定遇到"要审批"。这正是用户 2026-09-19 点的第二个形态：**"运行进程 uid ≠
+#     虚拟环境内部的 root/提权"** —— 进程 uid 是 App 的，但环境内 DSH 的策略层是另一件事，
+#     两个形态必须给出一致的策略默认值。
+#
+#   顺序：必须在 A4 加载 `/root/.dsh/env` **之后** —— 用户写在里面的值优先（与 root 版同款语义）。
+# -----------------------------------------------------------------------------
+if [ -z "${DSH_PERMISSION_MODE:-}" ]; then
+  DSH_PERMISSION_MODE=danger-full-access
+  log "权限模式：未显式设置 → 默认 danger-full-access（无沙箱、不询问）。要改：在 /root/.dsh/env 里写 DSH_PERMISSION_MODE=workspace-write"
+else
+  log "权限模式：沿用已设置的 DSH_PERMISSION_MODE=$DSH_PERMISSION_MODE"
+fi
+export DSH_PERMISSION_MODE
+
+# -----------------------------------------------------------------------------
+# A6. 身份说明（回应用户："运行进程 UID ≠ 虚拟环境内部 root 提权"）
+#
+#   proot 不虚拟内核身份：**进程的真实 uid 始终是 App 的用户**（u0_aNNN）。
+#   开 `fake_root`（`linuxctl start --fake-root`，配置落在 etc/config.json）时，
+#   proot 会在系统调用层把 getuid() 之类**伪造成 0** —— 环境里 `id` 会显示 uid=0，
+#   但那是**软件层伪造**：没有真 capabilities、不能 mount、也改不动别人的文件。
+#   这条日志把"当前是哪种"说清楚，免得用户按 uid 去推断能力。
+# -----------------------------------------------------------------------------
+if [ "${SUNSETLINUX_FAKE_ROOT:-0}" = "1" ]; then
+  log "身份：环境内以**伪造 root** 运行（proot -0）：id 显示 uid=0，但没有真 capabilities、不能 mount"
+else
+  log "身份：环境内 uid = App 用户（未开 fake_root）。想要环境内 id 显示 uid=0：linuxctl start --fake-root（仍是伪造，能力受限）"
+fi
+
+# -----------------------------------------------------------------------------
 # B0. supervisor 前置：找到 node 与 dsh 入口
 # -----------------------------------------------------------------------------
 NODE_BIN=""
