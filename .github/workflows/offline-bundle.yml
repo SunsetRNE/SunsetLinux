@@ -82,14 +82,22 @@ jobs:
           dl "$SITE/channel/channel.json.sig" dist/channel.json.sig
           [ -s dist/channel.json ] || { echo "::error::拿不到频道清单（/channel/channel.json）"; exit 1; }
 
-          # 用清单当唯一事实源：文件名按 <id>-<版本>.erofs.zst 落，并顺手生成
+          # 用清单当唯一事实源：文件名按 <id>-<版本>.erofs.<ext> 落，并顺手生成
           # dist/SHA256SUMS.layers.txt（mk-bundle 会从里面取 sha256_raw/size_raw）
+          #
+          # ★ **优先取 `url_gz`（gzip）而不是 `url`（zstd）** —— 2026-09-19 真机事故后改的：
+          #   这些产物有一部分会被 mk-bundle 打进**内嵌离线包**，而内嵌包是给 **App 自己**解的；
+          #   App 侧唯一的 zstd 解码器（aircompressor，纯 Java）依赖
+          #   `sun.misc.Unsafe.ARRAY_BYTE_BASE_OFFSET` —— Android 的 Unsafe 是裁剪版、没这个字段，
+          #   真机解压直接失败。所以这里按"**取件偏好 = 谁能被 App 解开**"来选：
+          #   gzip 优先（JDK 自带，稳），zstd 只作为清单里没有 gz 时的兜底（那时 mk-bundle 会明确拒绝）。
+          #   代价：CI 多下 ~40%（gz 比 zst 大），换来内嵌包在真机上真的能解开。
           node - <<'NODE' > dist/layers.tsv
           const fs = require('node:fs');
           const m = JSON.parse(fs.readFileSync('dist/channel.json', 'utf8'));
           for (const l of m.layers ?? []) {
-            const url = l.url || l.url_gz;
-            const sha = l.url ? l.sha256 : l.sha256_gz;
+            const url = l.url_gz || l.url;
+            const sha = l.url_gz ? l.sha256_gz : l.sha256;
             if (!url || !sha) continue;
             const ext = url.endsWith('.gz') ? 'gz' : 'zst';
             console.log([l.id, l.version, url, sha, ext, l.sha256_raw ?? '', l.size_raw ?? ''].join('\t'));

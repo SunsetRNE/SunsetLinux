@@ -121,16 +121,37 @@ function loadVariants() {
 
 const LAYER_PREFIX = { base: 'base-', runtime: 'runtime-', dsh: 'dsh-' };
 
-/** 在 dir 里找 `<prefix><版本>.erofs.zst`，找不到回退 `.gz`。 */
+/**
+ * 在 dir 里找 `<prefix><版本>.erofs.gz`，找不到才回退 `.zst`。
+ *
+ * ★ **.gz 优先**（2026-09-19 真机事故后改的）：
+ *   内嵌离线包是给 **App 自己**解的，而 App 侧唯一的 zstd 解码器是 aircompressor
+ *   （纯 Java）—— 它的解码路径依赖 `sun.misc.Unsafe.ARRAY_BYTE_BASE_OFFSET`，
+ *   而 **Android 的 sun.misc.Unsafe 是裁剪版，没有这个字段**。真机上表现是：
+ *   ```
+ *   ✗ [解压] base：zstd 解压失败：No field ARRAY_BYTE_BASE_OFFSET of type I in class Lsun/misc/Unsafe
+ *   ```
+ *   （桌面 JVM 单测有完整 Unsafe，所以一路是绿的 —— 又一个"测试环境 ≠ 真机"的坑。）
+ *   代价是包变大（gzip 比 zstd 大约 40–50%），但换来"装完零下载"这个承诺**真的成立**。
+ *   将来若找到 Android 可用的纯 Java/NDK zstd，可以把优先级改回来。
+ *
+ * 频道产物（设备侧解）**不受影响**：那边有自己的能力判据（系统 zstd / node 兜底 / .gz 回退）。
+ */
 function findLayer(dir, id) {
   const prefix = LAYER_PREFIX[id] ?? die(`未知层 id：${id}`);
   let names;
   try { names = readdirSync(dir); } catch { die(`目录不存在：${dir}`); }
-  const cands = names.filter((n) => n.startsWith(prefix) && (n.endsWith('.erofs.zst') || n.endsWith('.erofs.gz')));
+  const cands = names.filter((n) => n.startsWith(prefix) && (n.endsWith('.erofs.gz') || n.endsWith('.erofs.zst')));
   if (cands.length === 0) return null;
-  cands.sort((a, b) => (a.endsWith('.zst') ? -1 : 1) - (b.endsWith('.zst') ? -1 : 1) || b.localeCompare(a));
+  // .gz 排前面（末尾 .gz 的 -1，.zst 的 1）
+  cands.sort((a, b) => (a.endsWith('.gz') ? -1 : 1) - (b.endsWith('.gz') ? -1 : 1) || b.localeCompare(a));
   const file = cands[0];
-  const transport = file.endsWith('.zst') ? 'zstd' : 'gzip';
+  if (!file.endsWith('.gz')) {
+    // 只有 .zst：**明确拒绝**，不要静默产出一个 App 在真机上解不开的包（本次事故的教训）。
+    die(`${id} 只有 .zst（${file}）：内嵌离线包必须用 .gz —— App 侧的纯 Java zstd 解码器在 Android 上不可用（Unsafe 字段缺失）。` +
+        `请先准备同名 .gz（zstd -dc ${file} | gzip -9 > ${file.replace(/\.zst$/, '')}），或让 CI 从频道清单的 url_gz 取件。`);
+  }
+  const transport = 'gzip';
   const version = file.slice(prefix.length).replace(/\.erofs\.(zst|gz)$/, '');
   return { kind: 'layer', id, version, transport, file };
 }

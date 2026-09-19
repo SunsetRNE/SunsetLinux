@@ -94,9 +94,12 @@ try {
   const out = join(tmp, 'bundles');
   mkdirSync(dist, { recursive: true });
   const parts = {
-    'base-24.04.3-l1.erofs.zst': Buffer.from('base-payload-'.repeat(300)),
-    'runtime-1.0.0.erofs.zst': Buffer.from('runtime-payload-'.repeat(500)),
-    'dsh-0.1.5-rc.1.erofs.zst': Buffer.from('dsh-payload-'.repeat(200)),
+    // ★ 夹具用 **.gz**（2026-09-19 起 mk-bundle 只接受 .gz 的层）：内嵌离线包是给 App 自己解的，
+    //   而 App 侧唯一的 zstd 解码器（aircompressor）依赖 Android 上缺失的 `sun.misc.Unsafe`
+    //   字段，真机解压必失败。用 .zst 做夹具会（**故意**）被 mk-bundle 拒绝。
+    'base-24.04.3-l1.erofs.gz': Buffer.from('base-payload-'.repeat(300)),
+    'runtime-1.0.0.erofs.gz': Buffer.from('runtime-payload-'.repeat(500)),
+    'dsh-0.1.5-rc.1.erofs.gz': Buffer.from('dsh-payload-'.repeat(200)),
     'proot-bundle-arm64.tar.gz': Buffer.from('proot-payload-'.repeat(50)),
   };
   for (const [n, b] of Object.entries(parts)) writeFileSync(join(dist, n), b);
@@ -160,6 +163,21 @@ try {
   // ④ 未知变体
   const v3 = run(['--variant', 'does-not-exist', '--dir', dist, '--out', out]);
   ok(v3.code !== 0 && /未知变体/.test(v3.out), '未知变体 → 明确失败');
+
+  // ⑤ ★ 2026-09-19：**只有 .zst 的层必须被拒绝**，不许静默产出一个"App 在真机上解不开"的包。
+  //    事故现场：内嵌离线包里的 base 是 .zst，App 侧唯一的 zstd 解码器（aircompressor，纯 Java）
+  //    依赖 `sun.misc.Unsafe.ARRAY_BYTE_BASE_OFFSET` —— Android 的 Unsafe 是裁剪版、没这个字段，
+  //    真机报 "No field ARRAY_BYTE_BASE_OFFSET ..."，于是"装完零下载"整条路走不通。
+  {
+    const zstDir = join(tmp, 'zst-only');
+    mkdirSync(zstDir, { recursive: true });
+    writeFileSync(join(zstDir, 'base-24.04.3-l1.erofs.zst'), Buffer.from('not-really-zstd'.repeat(50)));
+    const r5 = run(['--variant', 'proot-full', '--dir', zstDir, '--out', join(tmp, 'zst-out')]);
+    ok(
+      r5.code !== 0 && /\.gz/.test(r5.out + r5.err),
+      '只有 .zst 的层被明确拒绝，并提示需要 .gz（App 在 Android 上解不了 zstd）',
+    );
+  }
 } finally {
   rmSync(tmp, { recursive: true, force: true });
 }
@@ -168,7 +186,7 @@ try {
 console.log('\n== 真产物（dist/ 里有层时才跑）==');
 {
   const dist = join(REPO, 'dist');
-  const real = ['base-24.04.3-l1.erofs.zst', 'runtime-1.0.0.erofs.zst', 'dsh-0.1.5-rc.2.erofs.zst'];
+  const real = ['base-24.04.3-l1.erofs.gz', 'runtime-1.0.0.erofs.gz', 'dsh-0.1.5-rc.2.erofs.gz'];
   if (!real.every((n) => existsSyncSafe(join(dist, n)))) {
     console.log('  （dist/ 里没有完整三层，跳过 —— CI 上没有 dist/ 属正常）');
   } else {
@@ -185,7 +203,7 @@ console.log('\n== 真产物（dist/ 里有层时才跑）==');
       const ex = join(out, 'x');
       const r = run(['--extract', join(out, 'proot-full.bin'), '--out', ex]);
       ok(r.code === 0, 'proot-full 变体解包成功');
-      for (const n of ['base-24.04.3-l1.erofs.zst', 'runtime-1.0.0.erofs.zst']) {
+      for (const n of ['base-24.04.3-l1.erofs.gz', 'runtime-1.0.0.erofs.gz']) {
         ok(existsSyncSafe(join(ex, n)) && sha(join(ex, n)) === sha(join(dist, n)), `真产物 ${n} 解包后逐字节一致`);
       }
       const hdr = JSON.parse(readFileSync(join(out, 'proot-full.json'), 'utf8'));

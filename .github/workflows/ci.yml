@@ -288,8 +288,11 @@ jobs:
           const fs = require('node:fs');
           const m = JSON.parse(fs.readFileSync('dist/channel.json', 'utf8'));
           for (const l of m.layers ?? []) {
-            const url = l.url || l.url_gz;
-            const sha = l.url ? l.sha256 : l.sha256_gz;
+            // ★ gzip 优先（2026-09-19）：这些层会被打进**内嵌离线包**，而内嵌包是给
+            //   App 自己解的 —— App 侧唯一的 zstd 解码器（aircompressor）在 Android 上
+            //   依赖缺失的 `sun.misc.Unsafe` 字段，真机解压必然失败。见 offline-bundle.yml 同款注释。
+            const url = l.url_gz || l.url;
+            const sha = l.url_gz ? l.sha256_gz : l.sha256;
             if (!url || !sha) continue;
             console.log([l.id, l.version, url, sha, url.endsWith('.gz') ? 'gz' : 'zst', l.sha256_raw ?? '', l.size_raw ?? ''].join('\t'));
           }
