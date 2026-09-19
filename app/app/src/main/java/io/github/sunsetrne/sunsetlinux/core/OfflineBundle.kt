@@ -90,7 +90,7 @@ object OfflineBundle {
      * 容错策略：宁可在装之前明确报错，也不要把半个环境铺下去 —— 所以这里对
      * 魔数/长度/部件 sha256 形状都做硬校验（部件**内容**的校验留给 [verifyPart]）。
      */
-    fun parse(bytes: ByteArray): Bundle {
+    fun parse(bytes: ByteArray, headerOnly: Boolean = false): Bundle {
         if (bytes.size < HEADER_OFFSET) throw BundleFormatException("离线包太小（${bytes.size} 字节），不是 bundle")
         val magic = String(bytes, 0, 4, Charsets.US_ASCII)
         if (magic != MAGIC) throw BundleFormatException("离线包魔数不对（读到 $magic，期望 $MAGIC）")
@@ -118,7 +118,13 @@ object OfflineBundle {
                 if (file.isEmpty() || sha.length != 64 || len < 0 || off < 0) {
                     throw BundleFormatException("离线包第 ${i + 1} 个部件字段不全（file=$file len=$len off=$off）")
                 }
-                if (HEADER_OFFSET + headerLen + off + len > bytes.size) {
+                // ★ 越界校验只在**拿到整包**时做。`headerOnly = true` 时传进来的字节
+                //   只有"偏移 0..HEADER_OFFSET+headerLen"，部件偏移（几十 MB）当然"越界" ——
+                //   真机实测（2026-09-19）：readHeaderOnly 就是这么把**每个内嵌包**都判成
+                //   非法的（抛 BundleFormatException → 被上层 runCatching 吞成 null），
+                //   于是 App 认为"本包没有内嵌离线包"，让装了 full 版的用户去频道下载 ——
+                //   内嵌离线包这条路**从来没有成功过**。
+                if (!headerOnly && HEADER_OFFSET + headerLen + off + len > bytes.size) {
                     throw BundleFormatException("离线包部件 $file 越界（off=$off len=$len）")
                 }
                 add(
@@ -153,16 +159,27 @@ object OfflineBundle {
     }
 
     /** 只读头（不把整个包读进内存）：给"我这个包内嵌了什么"这类展示用。 */
+    /**
+     * 只读头（不把整个包读进内存）：给"我这个包内嵌了什么"这类展示用。
+     *
+     * ★ 这里必须传 `headerOnly = true` —— 否则 parse 会拿"部件偏移（几十 MB）"去和
+     *   "只有头部的这几 KB"比大小，抛越界。真机实测（2026-09-19）：就是这个让**所有**
+     *   内嵌包档位（root-base/root-full/proot-base/proot-full）都被判成"没有内嵌包"。
+     *
+     * ★ catch 也从 `IOException` 放宽到 `Throwable`：本方法的语义是"尽力读个头，
+     *   读不到就当没有"，不该被任何一种解析异常把整条路打死 —— 上面那个越界异常正是
+     *   栽在这条窄 catch 上（它一路抛到调用方的 `runCatching`，静默变成 null）。
+     */
     fun readHeaderOnly(context: Context): Bundle? = try {
         context.assets.open(ASSET_NAME).use { input ->
             val head = input.readNBytes(HEADER_OFFSET)
             if (head.size < HEADER_OFFSET) null else {
                 val headerLen = readUInt32LE(head, 4)
                 val rest = input.readNBytes(headerLen.toInt())
-                parse(head + rest)
+                parse(head + rest, headerOnly = true)
             }
         }
-    } catch (_: IOException) {
+    } catch (_: Throwable) {
         null
     }
 

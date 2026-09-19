@@ -302,9 +302,24 @@ class WelcomeState internal constructor(
             message = when {
                 proot?.rootfsReady == true ->
                     "免 root 环境已铺好（rootfs 就位）。回首页点「启动环境」即可。"
-                proot?.hasRootSource == false ->
-                    "还没有可用的 rootfs 来源：去「更新」页从频道安装 base 层（erofs）后再点一次这个按钮。" +
-                        if (outcome.ok) "" else "（这次失败在：${outcome.failedStep?.label ?: "未知步骤"}）"
+                proot?.hasRootSource == false -> buildString {
+                    // ★ 别在这里一律说"去频道装" —— 装了内嵌离线包（-base- / -full-）的包
+                    //   本来就带了 base 层，让用户去下载是把他支到错的方向上（真机反馈
+                    //   2026-09-19："完整的离线内置版仍然会有这种问题？那我内置它干嘛？"）。
+                    //   而且**失败原因原来被吞了**：只打印 failedStep.label，看不到 outcome.error。
+                    append("provision 没能铺出 rootfs。")
+                    if (bundle != null) {
+                        append("本包内嵌了离线包（变体 ${bundle.variant}，${bundle.parts.size} 个部件）：")
+                        append("先点上面的「安装内嵌离线包」把它解出来，再点这个按钮。")
+                    } else {
+                        append("本包没有内嵌离线包：去「更新」页从频道安装 base 层（erofs），或放一个 ubuntu-base tar。")
+                    }
+                    if (!outcome.ok) {
+                        append("（这次失败在：${outcome.failedStep?.label ?: "未知步骤"}")
+                        outcome.error?.let { append("：$it") }
+                        append("）")
+                    }
+                }
                 else ->
                     "provision 没有成功：${outcome.error ?: "原因见日志"}"
             }

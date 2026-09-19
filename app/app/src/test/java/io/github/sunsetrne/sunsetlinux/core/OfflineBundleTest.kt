@@ -171,11 +171,22 @@ class OfflineBundleTest {
     }
 
     @Test
-    fun `只读头也能拿到变体与部件清单`() {
-        val bytes = makeBundle(listOf(Triple("base:1", "b.erofs.zst", p1)), variant = "minimal")
-        val b = OfflineBundle.parse(bytes)
-        assertNotNull(b.builtAt)
-        assertEquals("minimal", b.variant)
-        assertNull("没有 proot 部件时 hasProot 为 false", null.takeIf { b.hasProot })
+    fun `只读头也能拿到变体与部件清单（真·headerOnly 路径）`() {
+        // ★ 这条测试以前**名不副实**：它叫"只读头"，传进去的却是完整字节（makeBundle 的整包），
+        //   所以 readHeaderOnly 真正走的那条路（只喂头部那几 KB）**一次都没被覆盖** ——
+        //   真机事故（2026-09-19）就出在这里：readHeaderOnly 拿只有头部的字节去 parse，
+        //   被"部件越界"判死，App 于是认为所有内嵌包档位都"没有内嵌离线包"。
+        val full = makeBundle(listOf(Triple("base:1", "b.erofs.zst", p1), Triple("proot:", "p.zst", p2)))
+        val head = full.copyOfRange(0, OfflineBundle.parse(full).payloadStart.toInt())
+
+        // ① 整包语义下，只给头部**必须**判越界（这条防线保留：防止铺半个环境）
+        val strict = runCatching { OfflineBundle.parse(head) }.exceptionOrNull()
+        assertTrue("整包语义下只有头部应当判越界，实际：$strict", strict is OfflineBundle.BundleFormatException)
+
+        // ② headerOnly 语义下，同样的字节要能正常解析出部件清单
+        val b = OfflineBundle.parse(head, headerOnly = true)
+        assertEquals("部件数量应当解析出来", 2, b.parts.size)
+        assertEquals("base", b.parts[0].id)
+        assertNotNull("builtAt 也要在", b.builtAt)
     }
 }
